@@ -4,6 +4,9 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urljoin
+from urllib.request import Request, urlopen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -63,6 +66,58 @@ def load_json_lines(testcase, result, description="CLI"):
     return records
 
 
+def create_session_fixture(testcase, server_url, directory, *, title=None, metadata=None):
+    payload = {"directory": str(Path(directory).resolve())}
+    if title is not None:
+        payload["title"] = title
+    if metadata is not None:
+        payload["metadata"] = metadata
+    return http_json(testcase, "POST", server_url, "api/session", payload)
+
+
+def delete_session_fixture(testcase, server_url, session_id, *, ignore_not_found=False):
+    ignored_statuses = {404} if ignore_not_found else set()
+    return http_json(
+        testcase,
+        "DELETE",
+        server_url,
+        f"api/session/{quote(session_id, safe='')}",
+        ignored_statuses=ignored_statuses,
+    )
+
+
+def http_json(testcase, method, server_url, path, payload=None, *, ignored_statuses=None):
+    ignored_statuses = ignored_statuses or set()
+    body = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(_server_url(server_url, path), data=body, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=_timeout_seconds()) as response:
+            response_body = response.read().decode("utf-8")
+    except HTTPError as error:
+        response_body = error.read().decode("utf-8")
+        if error.code in ignored_statuses:
+            return None
+        testcase.fail(
+            f"{method} /{path.lstrip('/')} failed: HTTP {error.code}\n"
+            f"response:\n{_format_stream(response_body)}"
+        )
+    except URLError as error:
+        testcase.fail(f"{method} /{path.lstrip('/')} could not reach {server_url}: {error.reason}")
+    except TimeoutError:
+        testcase.fail(f"{method} /{path.lstrip('/')} timed out after {_timeout_seconds():g}s")
+    try:
+        return json.loads(response_body or "{}")
+    except json.JSONDecodeError as error:
+        testcase.fail(
+            f"{method} /{path.lstrip('/')} did not return valid JSON: {error}\n"
+            f"response:\n{_format_stream(response_body)}"
+        )
+
+
 def format_completed_process(result):
     return "\n".join(
         [
@@ -74,6 +129,10 @@ def format_completed_process(result):
             _format_stream(result.stderr),
         ]
     )
+
+
+def _server_url(server_url, path):
+    return urljoin(server_url.rstrip("/") + "/", path.lstrip("/"))
 
 
 def _timeout_seconds():
