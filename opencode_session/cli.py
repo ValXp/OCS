@@ -536,7 +536,7 @@ def _add_run_store_arguments(parser):
 
     run_start_parser = run_subparsers.add_parser("start")
     run_start_parser.add_argument("name", help="local run name")
-    run_start_parser.add_argument("--prompt", required=True, help="prompt text for the single worker")
+    run_start_parser.add_argument("--prompt", help="prompt text for a single worker; omit to start stored worker prompts")
     run_start_parser.add_argument("--worker", default="worker", help="worker record ID")
     run_start_parser.add_argument("--role", default="worker", help="worker role")
     run_start_parser.add_argument("--directory", help="target directory when creating the run")
@@ -552,7 +552,7 @@ def _add_run_store_arguments(parser):
 
     run_collect_parser = run_subparsers.add_parser("collect")
     run_collect_parser.add_argument("name", help="local run name")
-    run_collect_parser.add_argument("--worker", default="worker", help="worker record ID")
+    run_collect_parser.add_argument("--worker", help="worker record ID")
     run_collect_parser.add_argument("--json", action="store_true", help="print collected result JSON")
 
     run_worker_parser = run_subparsers.add_parser("worker")
@@ -562,6 +562,7 @@ def _add_run_store_arguments(parser):
     run_worker_parser.add_argument("--session", dest="session_id", help="OpenCode session ID reference")
     run_worker_parser.add_argument("--agent", help="agent metadata")
     run_worker_parser.add_argument("--model", help="model metadata")
+    run_worker_parser.add_argument("--prompt", help="prompt text to run for this worker")
     run_worker_parser.add_argument("--depends-on", dest="dependencies", action="append", help="worker dependency ID")
     run_worker_parser.add_argument("--prompt-id", dest="prompt_ids", action="append", help="prompt admission ID")
     run_worker_parser.add_argument("--status", help="worker status")
@@ -570,12 +571,25 @@ def _add_run_store_arguments(parser):
     run_worker_parser.add_argument("--blocker", dest="blockers", action="append", help="blocker reference")
     run_worker_parser.add_argument("--output-ref", dest="output_refs", action="append", help="output reference")
 
+    run_steer_parser = run_subparsers.add_parser("steer")
+    run_steer_parser.add_argument("name", help="local run name")
+    run_steer_parser.add_argument("worker_id", help="worker record ID")
+    run_steer_parser.add_argument("text", help="input text to admit to the worker session")
+    run_steer_parser.add_argument("--delivery", choices=("steer", "queue"), default="steer", help="admission delivery mode")
+    run_steer_parser.add_argument("--message-id", help="client-supplied prompt/message ID for idempotent admission")
+    run_steer_parser.add_argument("--json", action="store_true", help="print run-scoped admission JSON")
+
+    run_abort_parser = run_subparsers.add_parser("abort")
+    run_abort_parser.add_argument("name", help="local run name")
+    run_abort_parser.add_argument("worker_id", help="worker record ID")
+    run_abort_parser.add_argument("--json", action="store_true", help="print run-scoped abort JSON")
+
 
 def _handle_run_store_command(args):
     store = RunStore(args.store)
     try:
         if args.run_command == "start":
-            return _start_single_worker_run(args, store)
+            return _start_orchestration_run(args, store)
         if args.run_command == "init":
             run = store.create_run(args.name, directory=args.directory, server_url=args.server)
             print(format_run_compact(run))
@@ -588,7 +602,7 @@ def _handle_run_store_command(args):
             print(format_run_compact(run))
             return 0
         if args.run_command == "collect":
-            return _collect_single_worker_result(args, store)
+            return _collect_run_results(args, store)
         if args.run_command == "worker":
             run = store.upsert_worker(
                 args.name,
@@ -597,6 +611,7 @@ def _handle_run_store_command(args):
                 session_id=args.session_id,
                 agent=args.agent,
                 model=args.model,
+                prompt=args.prompt,
                 dependencies=args.dependencies,
                 prompt_ids=args.prompt_ids,
                 status=args.status,
@@ -607,12 +622,113 @@ def _handle_run_store_command(args):
             )
             print(format_run_compact(run))
             return 0
+        if args.run_command == "steer":
+            return _steer_run_worker(args, store)
+        if args.run_command == "abort":
+            return _abort_run_worker(args, store)
     except RunStoreError as error:
         _print_error(str(error))
         if error.kind == "missing":
             return EX_NOINPUT
         return EX_DATAERR
     return 64
+
+
+def _start_orchestration_run(args, store):
+    if args.prompt is not None:
+        return _start_single_worker_run(args, store)
+    run = store.load_run(args.name)
+    if args.directory is not None:
+        run["directory"] = str(Path(args.directory).resolve())
+    if args.server is not None:
+        run["server_url"] = args.server
+    if args.session_id is not None:
+        worker = _ensure_orchestration_worker(run, args.worker, role=args.role)
+        worker["session_id"] = args.session_id
+    if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):
+        raise RunStoreError(f"run '{args.name}' has no worker prompts; pass --prompt or add workers with --prompt")
+    return _start_prompted_workers_run(args, store, run)
+
+
+def _start_prompted_workers_run(args, store, run):
+    client = OpenCodeApiClient(run["server_url"])
+    try:
+        capabilities = detect_capabilities(client)
+        if not capabilities["legacy_fallback_available"]:
+            message = (
+                "unsupported route behavior: missing legacy POST /session/{sessionID}/run + "
+                "POST /session/{sessionID}/reply; v2 prompt admission is not execution"
+            )
+            _mark_prompted_workers_failed(store, run, message)
+            _print_error(message)
+            return EX_UNSUPPORTED
+
+        run["status"] = "active"
+        _save_orchestration_run(store, run)
+        while True:
+            workers = run.get("workers", {})
+            ready_workers = _ready_prompted_workers(workers)
+            if not ready_workers:
+                _mark_dependency_blocked_workers(run)
+                break
+            started_workers = []
+            for worker in ready_workers:
+                worker["status"] = "active"
+            _save_orchestration_run(store, run)
+            for worker in ready_workers:
+                if not worker.get("session_id"):
+                    create_response = client.create_session_response(
+                        run["directory"], agent=worker.get("agent"), model=worker.get("model")
+                    )
+                    worker["session_id"] = _session_value(create_response.data, "id", "sessionID", "sessionId")
+            _save_orchestration_run(store, run)
+            for worker in ready_workers:
+                run_response = client.run_session_response(worker["session_id"], _worker_prompt(worker))
+                prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
+                if prompt_id is not None:
+                    worker["prompt_ids"] = [prompt_id]
+                provider_error = _provider_failure(run_response.data)
+                if provider_error:
+                    worker["status"] = "failed"
+                    worker["error"] = provider_error
+                    _mark_dependency_blocked_workers(run)
+                    _refresh_orchestration_run_summary(run)
+                    _save_orchestration_run(store, run)
+                    _print_error(f"provider failure: {provider_error}")
+                    return EX_UNAVAILABLE
+                started_workers.append((worker, run_response.data))
+            _save_orchestration_run(store, run)
+            for worker, run_message in started_workers:
+                reply_response = client.reply_session_response(worker["session_id"])
+                provider_error = _provider_failure(reply_response.data)
+                if provider_error:
+                    worker["status"] = "failed"
+                    worker["error"] = provider_error
+                    _mark_dependency_blocked_workers(run)
+                    _refresh_orchestration_run_summary(run)
+                    _save_orchestration_run(store, run)
+                    _print_error(f"provider failure: {provider_error}")
+                    return EX_UNAVAILABLE
+                result = _run_result(worker["session_id"], run_message, reply_response.data)
+                assistant_message_id = result["message_ids"].get("assistant")
+                worker["result"] = result
+                worker["status"] = "done"
+                worker["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
+            _refresh_orchestration_run_summary(run)
+            _save_orchestration_run(store, run)
+            if not _ready_prompted_workers(run.get("workers", {})):
+                _mark_dependency_blocked_workers(run)
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                if not _pending_prompted_workers(run.get("workers", {})):
+                    break
+    except OpenCodeApiError as error:
+        _mark_prompted_workers_failed(store, run, str(error))
+        _print_error(f"api failure: {error}")
+        return EX_UNAVAILABLE
+
+    print(format_run_compact(run))
+    return 0 if run.get("status") == "done" else EX_UNAVAILABLE
 
 
 def _start_single_worker_run(args, store):
@@ -698,19 +814,126 @@ def _start_single_worker_run(args, store):
     return 0
 
 
-def _collect_single_worker_result(args, store):
+def _collect_run_results(args, store):
     run = store.load_run(args.name)
-    worker = run.get("workers", {}).get(args.worker)
+    workers = run.get("workers", {})
+    if args.worker is not None:
+        return _collect_single_worker_result(args, run, args.worker)
+    if len(workers) == 1:
+        worker_id = next(iter(workers))
+        return _collect_single_worker_result(args, run, worker_id)
+    completed_workers = [
+        worker for worker in _workers_in_dependency_order(workers) if isinstance(worker.get("result"), dict)
+    ]
+    if not completed_workers:
+        raise RunStoreError(f"run '{args.name}' has no collected worker results", kind="missing")
+    if args.json:
+        print(
+            json.dumps(
+                [
+                    {"worker": worker.get("id"), "role": worker.get("role"), "result": worker.get("result")}
+                    for worker in completed_workers
+                ],
+                sort_keys=True,
+            )
+        )
+        return 0
+    print("\n".join(_format_worker_result_compact(worker) for worker in completed_workers))
+    return 0
+
+
+def _collect_single_worker_result(args, run, worker_id):
+    worker = run.get("workers", {}).get(worker_id)
     if not isinstance(worker, dict):
-        raise RunStoreError(f"worker '{args.worker}' not found in run '{args.name}'", kind="missing")
+        raise RunStoreError(f"worker '{worker_id}' not found in run '{args.name}'", kind="missing")
     result = worker.get("result")
     if not isinstance(result, dict):
-        raise RunStoreError(f"worker '{args.worker}' in run '{args.name}' has no collected result", kind="missing")
+        raise RunStoreError(f"worker '{worker_id}' in run '{args.name}' has no collected result", kind="missing")
     if args.json:
         print(json.dumps(result, sort_keys=True))
         return 0
     print(_format_run_compact(result))
     return 0
+
+
+def _steer_run_worker(args, store):
+    run = store.load_run(args.name)
+    worker = _run_worker_with_session(run, args.worker_id)
+    client = OpenCodeApiClient(run["server_url"])
+    try:
+        capabilities = detect_capabilities(client)
+    except OpenCodeApiError as error:
+        _print_error(str(error))
+        return EX_UNAVAILABLE
+    if not capabilities["v2_prompt_support"]:
+        _print_error(
+            "unsupported v2 prompt capability; durable prompt admission requires "
+            "POST /api/session/{sessionID}/prompt or POST /session/{sessionID}/prompt_async; "
+            "legacy run/reply fallback is not used for steer admission"
+        )
+        return EX_UNSUPPORTED
+
+    message_id = args.message_id or f"msg_{uuid.uuid4().hex}"
+    payload = {
+        "messageID": message_id,
+        "parts": [{"type": "text", "text": args.text}],
+        "delivery": args.delivery,
+    }
+    try:
+        response = client.admit_prompt_response(
+            worker["session_id"], payload, capabilities["route_availability"]["v2_prompt"]["path"]
+        )
+    except OpenCodeApiError as error:
+        if error.status in {400, 404, 405, 415, 422}:
+            _print_error(f"unsupported v2 prompt behavior; {_api_error_detail(error)}; legacy run/reply fallback is not used")
+            return EX_UNSUPPORTED
+        _print_error(f"prompt admission failed; {error}; legacy run/reply fallback is not used")
+        return EX_UNAVAILABLE
+
+    admission = _admission_record(worker["session_id"], args.delivery, message_id, response.data, capabilities=capabilities)
+    prompt_ids = worker.setdefault("prompt_ids", [])
+    if admission["message_id"] not in prompt_ids:
+        prompt_ids.append(admission["message_id"])
+    _save_orchestration_run(store, run)
+    if args.json:
+        print(json.dumps({"run": run["name"], "worker": worker["id"], "admission": admission}, sort_keys=True))
+    else:
+        print(f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {_format_admission_compact(admission)}")
+    return 0
+
+
+def _abort_run_worker(args, store):
+    run = store.load_run(args.name)
+    worker = _run_worker_with_session(run, args.worker_id)
+    client = OpenCodeApiClient(run["server_url"])
+    try:
+        response = client.abort_session_response(worker["session_id"])
+    except OpenCodeApiError as error:
+        if _is_session_not_found_error(error):
+            _print_error(f"session not found: {worker['session_id']}")
+        else:
+            _print_error(str(error))
+        return EX_UNAVAILABLE
+    abort = _abort_record(worker["session_id"], response.data)
+    if abort["accepted"]:
+        worker["status"] = "aborted"
+    worker["abort"] = abort
+    _refresh_orchestration_run_summary(run)
+    _save_orchestration_run(store, run)
+    if args.json:
+        print(json.dumps({"run": run["name"], "worker": worker["id"], "abort": abort}, sort_keys=True))
+    else:
+        print(f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {_format_abort_compact(abort)}")
+    return 0
+
+
+def _run_worker_with_session(run, worker_id):
+    worker = run.get("workers", {}).get(worker_id)
+    if not isinstance(worker, dict):
+        raise RunStoreError(f"worker '{worker_id}' not found in run '{run['name']}'", kind="missing")
+    if not worker.get("session_id"):
+        raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no session", kind="missing")
+    return worker
 
 
 def _load_or_create_orchestration_run(store, args):
@@ -770,6 +993,151 @@ def _mark_orchestration_failed(store, run, worker, error):
     worker["status"] = "failed"
     worker["error"] = error
     _save_orchestration_run(store, run)
+
+
+def _mark_prompted_workers_failed(store, run, error):
+    run["status"] = "failed"
+    for worker in run.get("workers", {}).values():
+        if isinstance(worker, dict) and _worker_prompt(worker) and worker.get("status") not in {"done", "failed"}:
+            worker["status"] = "failed"
+            worker["error"] = error
+    _save_orchestration_run(store, run)
+
+
+def _ready_prompted_workers(workers):
+    ready = []
+    for worker_id in sorted(workers):
+        worker = workers[worker_id]
+        if not isinstance(worker, dict) or not _worker_prompt(worker):
+            continue
+        if worker.get("status") in {"done", "failed", "aborted", "timeout"}:
+            continue
+        if _dependencies_done(worker, workers):
+            ready.append(worker)
+    return ready
+
+
+def _pending_prompted_workers(workers):
+    return [
+        worker
+        for worker in workers.values()
+        if isinstance(worker, dict)
+        and _worker_prompt(worker)
+        and worker.get("status") not in {"done", "failed", "aborted", "timeout", "blocked"}
+    ]
+
+
+def _mark_dependency_blocked_workers(run):
+    workers = run.get("workers", {})
+    for worker in workers.values():
+        if not isinstance(worker, dict) or not _worker_prompt(worker):
+            continue
+        if worker.get("status") in {"done", "failed", "aborted", "timeout"}:
+            continue
+        if _dependencies_failed(worker, workers):
+            worker["status"] = "blocked"
+            worker["blockers"] = [f"dependency:{dependency}" for dependency in worker.get("dependencies", [])]
+
+
+def _dependencies_done(worker, workers):
+    for dependency in worker.get("dependencies", []):
+        dependency_worker = workers.get(dependency)
+        if not isinstance(dependency_worker, dict) or dependency_worker.get("status") != "done":
+            return False
+    return True
+
+
+def _dependencies_failed(worker, workers):
+    for dependency in worker.get("dependencies", []):
+        dependency_worker = workers.get(dependency)
+        if not isinstance(dependency_worker, dict):
+            return True
+        if dependency_worker.get("status") in {"failed", "aborted", "timeout", "blocked"}:
+            return True
+    return False
+
+
+def _refresh_orchestration_run_summary(run):
+    workers = run.get("workers", {})
+    prompted_workers = [worker for worker in workers.values() if isinstance(worker, dict) and _worker_prompt(worker)]
+    status_workers = prompted_workers or [worker for worker in workers.values() if isinstance(worker, dict)]
+    run["output_refs"] = _worker_output_refs_in_dependency_order(workers)
+    if not status_workers:
+        return
+    statuses = {worker.get("status") for worker in status_workers}
+    if statuses == {"done"}:
+        run["status"] = "done"
+    elif any(status == "failed" for status in statuses):
+        run["status"] = "failed"
+    elif statuses == {"aborted"}:
+        run["status"] = "aborted"
+    elif any(status == "timeout" for status in statuses):
+        run["status"] = "timeout"
+    elif any(status == "blocked" for status in statuses):
+        run["status"] = "blocked"
+    elif any(status == "active" for status in statuses):
+        run["status"] = "active"
+    else:
+        run["status"] = "queued"
+
+
+def _worker_output_refs_in_dependency_order(workers):
+    ordered = []
+    for worker in _workers_in_dependency_order(workers):
+        worker_id = worker.get("id")
+        if worker.get("status") != "done":
+            continue
+        for output_ref in worker.get("output_refs", []):
+            if isinstance(output_ref, str) and output_ref.startswith("assistant:"):
+                ordered.append(f"{worker_id}:{output_ref.split(':', 1)[1]}")
+            else:
+                ordered.append(f"{worker_id}:{output_ref}")
+    return ordered
+
+
+def _workers_in_dependency_order(workers):
+    ordered = []
+    visited = set()
+    visiting = set()
+
+    def visit(worker_id):
+        if worker_id in visited or worker_id in visiting:
+            return
+        visiting.add(worker_id)
+        worker = workers.get(worker_id)
+        if isinstance(worker, dict):
+            for dependency in worker.get("dependencies", []):
+                visit(dependency)
+            ordered.append(worker)
+        visiting.remove(worker_id)
+        visited.add(worker_id)
+
+    for worker_id in sorted(workers):
+        visit(worker_id)
+    return ordered
+
+
+def _format_worker_result_compact(worker):
+    result = worker["result"]
+    fields = [
+        ("worker", worker.get("id")),
+        ("role", worker.get("role")),
+        ("session", result["session_id"]),
+        ("status", result["status"]),
+        ("user", result["message_ids"]["user"]),
+        ("assistant", result["message_ids"]["assistant"]),
+        ("cost", result["cost"]),
+        ("tokens", _tokens_total(result["tokens"])),
+        ("text", result["text"]),
+    ]
+    return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+
+
+def _worker_prompt(worker):
+    prompt = worker.get("prompt")
+    if prompt is None:
+        return None
+    return str(prompt)
 
 
 def _save_orchestration_run(store, run):

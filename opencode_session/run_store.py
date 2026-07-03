@@ -52,7 +52,7 @@ class RunStore:
         else:
             worker = _normalize_worker(existing, worker_id)
 
-        for key in ("role", "session_id", "agent", "model", "status", "retry_count", "timeout_seconds"):
+        for key in ("role", "session_id", "agent", "model", "prompt", "status", "retry_count", "timeout_seconds"):
             if changes.get(key) is not None:
                 worker[key] = short_status(changes[key]) if key == "status" else changes[key]
         for key in ("dependencies", "prompt_ids", "blockers", "output_refs"):
