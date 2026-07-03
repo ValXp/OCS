@@ -103,6 +103,7 @@ class InventoryOpenCodeServer:
     def __exit__(self, exc_type, exc, tb):
         self.server.shutdown()
         self.thread.join(timeout=2)
+        self.server.server_close()
 
     @property
     def url(self):

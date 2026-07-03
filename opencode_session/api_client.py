@@ -5,9 +5,11 @@ from urllib.request import Request, urlopen
 
 
 class OpenCodeApiError(Exception):
-    def __init__(self, message, *, status=None):
+    def __init__(self, message, *, status=None, body=None, data=None):
         super().__init__(message)
         self.status = status
+        self.body = body
+        self.data = data
 
 
 class OpenCodeApiResponse:
@@ -74,7 +76,18 @@ class OpenCodeApiClient:
             with urlopen(request, timeout=self.timeout) as response:
                 return response.read().decode("utf-8")
         except HTTPError as error:
-            raise OpenCodeApiError(f"{method} /{path.lstrip('/')} failed: HTTP {error.code}", status=error.code) from error
+            error_body = error.read().decode("utf-8")
+            error_data = None
+            try:
+                error_data = json.loads(error_body or "{}")
+            except json.JSONDecodeError:
+                pass
+            raise OpenCodeApiError(
+                f"{method} /{path.lstrip('/')} failed: HTTP {error.code}",
+                status=error.code,
+                body=error_body,
+                data=error_data,
+            ) from error
         except URLError as error:
             raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
         except TimeoutError as error:
@@ -108,3 +121,14 @@ class OpenCodeApiClient:
 
     def delete_session_response(self, session_id):
         return self.delete_response(f"api/session/{quote(session_id, safe='')}")
+
+    def admit_prompt_response(self, session_id, payload, prompt_path):
+        return self.post_response(_session_prompt_path(prompt_path, session_id), payload)
+
+
+def _session_prompt_path(prompt_path, session_id):
+    path = prompt_path.lstrip("/")
+    quoted_session_id = quote(session_id, safe="")
+    for placeholder in ("{sessionID}", ":sessionID", "{id}", ":id"):
+        path = path.replace(placeholder, quoted_session_id)
+    return path
