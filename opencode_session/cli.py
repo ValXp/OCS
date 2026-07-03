@@ -727,11 +727,8 @@ def _start_prompted_workers_run(args, store, run):
     try:
         client = OpenCodeApiClient(run["server_url"])
         capabilities = detect_capabilities(client)
-        if not capabilities["legacy_fallback_available"]:
-            message = (
-                "unsupported route behavior: missing legacy POST /session/{sessionID}/run + "
-                "POST /session/{sessionID}/reply; v2 prompt admission is not execution"
-            )
+        if _blocking_execution_strategy(capabilities) is None:
+            message = _unsupported_blocking_execution_message()
             _mark_prompted_workers_failed(store, run, message)
             _print_error(message)
             return EX_UNSUPPORTED
@@ -758,15 +755,19 @@ def _start_prompted_workers_run(args, store, run):
             attempt_workers = list(ready_workers)
             while attempt_workers:
                 retry_workers = []
-                started_workers = []
                 for worker in attempt_workers:
                     worker["status"] = "active"
                     worker["next_eligible_action"] = "wait"
                     worker["timeout_started_at"] = _utc_now() if worker.get("timeout_seconds") else None
                     try:
-                        run_response = _call_worker_with_timeout(
+                        result = _call_worker_with_timeout(
                             worker,
-                            lambda: client.run_session_response(worker["session_id"], _worker_prompt(worker)),
+                            lambda: _execute_blocking_prompt(
+                                client,
+                                worker["session_id"],
+                                _worker_prompt(worker),
+                                capabilities,
+                            ),
                         )
                     except _WatchTimeout:
                         reason = _worker_timeout_reason(worker)
@@ -790,59 +791,21 @@ def _start_prompted_workers_run(args, store, run):
                         _save_orchestration_run(store, run)
                         _print_error(f"api failure: {error}")
                         return _exit_code_for_orchestration_run(run)
-                    prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
+                    except _BlockingProviderFailure as error:
+                        if error.prompt_id is not None:
+                            worker["prompt_ids"] = [error.prompt_id]
+                        if _schedule_worker_retry(worker, "provider", str(error)):
+                            retry_workers.append(worker)
+                            continue
+                        _mark_worker_failed(worker, "provider", str(error))
+                        _mark_dependency_blocked_workers(run)
+                        _refresh_orchestration_run_summary(run)
+                        _save_orchestration_run(store, run)
+                        _print_error(f"provider failure: {error}")
+                        return _exit_code_for_orchestration_run(run)
+                    prompt_id = result["message_ids"].get("user")
                     if prompt_id is not None:
                         worker["prompt_ids"] = [prompt_id]
-                    provider_error = _provider_failure(run_response.data)
-                    if provider_error:
-                        if _schedule_worker_retry(worker, "provider", provider_error):
-                            retry_workers.append(worker)
-                            continue
-                        _mark_worker_failed(worker, "provider", provider_error)
-                        _mark_dependency_blocked_workers(run)
-                        _refresh_orchestration_run_summary(run)
-                        _save_orchestration_run(store, run)
-                        _print_error(f"provider failure: {provider_error}")
-                        return _exit_code_for_orchestration_run(run)
-                    started_workers.append((worker, run_response.data))
-                _save_orchestration_run(store, run)
-                for worker, run_message in started_workers:
-                    try:
-                        reply_response = _call_worker_with_timeout(worker, lambda: client.reply_session_response(worker["session_id"]))
-                    except _WatchTimeout:
-                        reason = _worker_timeout_reason(worker)
-                        if _schedule_worker_retry(worker, "timeout", reason):
-                            worker["timed_out_at"] = _utc_now()
-                            retry_workers.append(worker)
-                            continue
-                        _mark_worker_timeout(worker, reason)
-                        _mark_dependency_blocked_workers(run)
-                        _refresh_orchestration_run_summary(run)
-                        _save_orchestration_run(store, run)
-                        _print_error(reason)
-                        return _exit_code_for_orchestration_run(run)
-                    except OpenCodeApiError as error:
-                        if _schedule_worker_retry(worker, "api", str(error)):
-                            retry_workers.append(worker)
-                            continue
-                        _mark_worker_failed(worker, "api", str(error))
-                        _mark_dependency_blocked_workers(run)
-                        _refresh_orchestration_run_summary(run)
-                        _save_orchestration_run(store, run)
-                        _print_error(f"api failure: {error}")
-                        return _exit_code_for_orchestration_run(run)
-                    provider_error = _provider_failure(reply_response.data)
-                    if provider_error:
-                        if _schedule_worker_retry(worker, "provider", provider_error):
-                            retry_workers.append(worker)
-                            continue
-                        _mark_worker_failed(worker, "provider", provider_error)
-                        _mark_dependency_blocked_workers(run)
-                        _refresh_orchestration_run_summary(run)
-                        _save_orchestration_run(store, run)
-                        _print_error(f"provider failure: {provider_error}")
-                        return _exit_code_for_orchestration_run(run)
-                    result = _run_result(worker["session_id"], run_message, reply_response.data)
                     _apply_worker_result(worker, result)
                 _refresh_orchestration_run_summary(run)
                 _save_orchestration_run(store, run)
@@ -1534,11 +1497,8 @@ def _start_single_worker_run(args, store):
     try:
         client = OpenCodeApiClient(run["server_url"])
         capabilities = detect_capabilities(client)
-        if not capabilities["legacy_fallback_available"]:
-            message = (
-                "unsupported route behavior: missing legacy POST /session/{sessionID}/run + "
-                "POST /session/{sessionID}/reply; v2 prompt admission is not execution"
-            )
+        if _blocking_execution_strategy(capabilities) is None:
+            message = _unsupported_blocking_execution_message()
             _mark_orchestration_failed(store, run, worker, message)
             _print_error(message)
             return EX_UNSUPPORTED
@@ -1561,7 +1521,10 @@ def _start_single_worker_run(args, store):
             worker["next_eligible_action"] = "wait"
             worker["timeout_started_at"] = _utc_now() if worker.get("timeout_seconds") else None
             try:
-                run_response = _call_worker_with_timeout(worker, lambda: client.run_session_response(session_id, args.prompt))
+                result = _call_worker_with_timeout(
+                    worker,
+                    lambda: _execute_blocking_prompt(client, session_id, args.prompt, capabilities),
+                )
             except _WatchTimeout:
                 reason = _worker_timeout_reason(worker)
                 if _schedule_worker_retry(worker, "timeout", reason):
@@ -1582,66 +1545,28 @@ def _start_single_worker_run(args, store):
                 _save_orchestration_run(store, run)
                 _print_error(f"api failure: {error}")
                 return _exit_code_for_orchestration_run(run)
+            except _BlockingProviderFailure as error:
+                if error.prompt_id is not None:
+                    worker["prompt_ids"] = [error.prompt_id]
+                if _schedule_worker_retry(worker, "provider", str(error)):
+                    _save_orchestration_run(store, run)
+                    continue
+                _mark_worker_failed(worker, "provider", str(error))
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                _print_error(f"provider failure: {error}")
+                return _exit_code_for_orchestration_run(run)
 
-            prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
+            prompt_id = result["message_ids"].get("user")
             if prompt_id is not None:
                 worker["prompt_ids"] = [prompt_id]
                 _save_orchestration_run(store, run)
-
-            provider_error = _provider_failure(run_response.data)
-            if provider_error:
-                if _schedule_worker_retry(worker, "provider", provider_error):
-                    _save_orchestration_run(store, run)
-                    continue
-                _mark_worker_failed(worker, "provider", provider_error)
-                _refresh_orchestration_run_summary(run)
-                _save_orchestration_run(store, run)
-                _print_error(f"provider failure: {provider_error}")
-                return _exit_code_for_orchestration_run(run)
-
-            event_route = capabilities["route_availability"]["events"]
-            if event_route["available"]:
-                _stream_orchestration_progress(client, session_id, event_route["path"])
-
-            try:
-                reply_response = _call_worker_with_timeout(worker, lambda: client.reply_session_response(session_id))
-            except _WatchTimeout:
-                reason = _worker_timeout_reason(worker)
-                if _schedule_worker_retry(worker, "timeout", reason):
-                    worker["timed_out_at"] = _utc_now()
-                    _save_orchestration_run(store, run)
-                    continue
-                _mark_worker_timeout(worker, reason)
-                _refresh_orchestration_run_summary(run)
-                _save_orchestration_run(store, run)
-                _print_error(reason)
-                return _exit_code_for_orchestration_run(run)
-            except OpenCodeApiError as error:
-                if _schedule_worker_retry(worker, "api", str(error)):
-                    _save_orchestration_run(store, run)
-                    continue
-                _mark_worker_failed(worker, "api", str(error))
-                _refresh_orchestration_run_summary(run)
-                _save_orchestration_run(store, run)
-                _print_error(f"api failure: {error}")
-                return _exit_code_for_orchestration_run(run)
-            provider_error = _provider_failure(reply_response.data)
-            if provider_error:
-                if _schedule_worker_retry(worker, "provider", provider_error):
-                    _save_orchestration_run(store, run)
-                    continue
-                _mark_worker_failed(worker, "provider", provider_error)
-                _refresh_orchestration_run_summary(run)
-                _save_orchestration_run(store, run)
-                _print_error(f"provider failure: {provider_error}")
-                return _exit_code_for_orchestration_run(run)
             break
     except OpenCodeApiError as error:
         _mark_orchestration_failed(store, run, worker, str(error))
         _print_error(f"api failure: {error}")
         return EX_UNAVAILABLE
 
-    result = _run_result(session_id, run_response.data, reply_response.data)
     _apply_worker_result(worker, result)
     _refresh_orchestration_run_summary(run)
     if args.cleanup:
@@ -2351,7 +2276,9 @@ def _read_prompt(prompt_words):
 
 
 class _BlockingProviderFailure(Exception):
-    pass
+    def __init__(self, message, *, prompt_id=None):
+        super().__init__(message)
+        self.prompt_id = prompt_id
 
 
 def _blocking_execution_capabilities(doc):
@@ -2408,7 +2335,7 @@ def _execute_session_message_prompt(client, session_id, prompt, capabilities):
     )
     provider_error = _provider_failure(response.data)
     if provider_error:
-        raise _BlockingProviderFailure(provider_error)
+        raise _BlockingProviderFailure(provider_error, prompt_id=message_id)
     return _session_message_result(session_id, message_id, response.data, capabilities)
 
 
@@ -2420,7 +2347,10 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt):
     )
     provider_error = _provider_failure(run_response.data)
     if provider_error:
-        raise _BlockingProviderFailure(provider_error)
+        raise _BlockingProviderFailure(
+            provider_error,
+            prompt_id=_message_value(run_response.data, "id", "messageID", "messageId"),
+        )
     reply_response = _call_with_client_timeout(
         client,
         BLOCKING_EXECUTION_TIMEOUT_SECONDS,
@@ -2428,7 +2358,10 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt):
     )
     provider_error = _provider_failure(reply_response.data)
     if provider_error:
-        raise _BlockingProviderFailure(provider_error)
+        raise _BlockingProviderFailure(
+            provider_error,
+            prompt_id=_message_value(run_response.data, "id", "messageID", "messageId"),
+        )
     return _run_result(session_id, run_response.data, reply_response.data)
 
 

@@ -15,9 +15,19 @@ CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class OrchestrationOpenCodeServer:
-    def __init__(self, *, events=None, run_payload=None, reply_payload=None, session_ids=None):
+    def __init__(
+        self,
+        *,
+        events=None,
+        run_payload=None,
+        reply_payload=None,
+        message_payload=None,
+        session_ids=None,
+        modern_message=False,
+    ):
         self.events = events or []
         self.session_ids = session_ids or {"ses_new"}
+        self.modern_message = modern_message
         self.run_payload = run_payload or {"id": "msg_user_1", "status": "submitted"}
         self.reply_payload = reply_payload or {
             "id": "msg_assistant_1",
@@ -25,6 +35,16 @@ class OrchestrationOpenCodeServer:
             "cost": 0.015,
             "tokens": {"input": 12, "output": 8, "total": 20},
             "text": "Worker finished.",
+        }
+        self.message_payload = message_payload or {
+            "info": {
+                "id": "msg_assistant_modern_1",
+                "sessionID": "ses_new",
+                "role": "assistant",
+                "cost": 0.02,
+                "tokens": {"input": 3, "output": 2, "total": 5},
+            },
+            "parts": [{"type": "text", "text": "Modern worker finished."}],
         }
         self.requests = []
         self.server = None
@@ -43,15 +63,19 @@ class OrchestrationOpenCodeServer:
                     self._write_json({"status": "ok", "version": "2.0.0"})
                     return
                 if self.path == "/doc":
+                    paths = {
+                        "/api/session": {"get": {}, "post": {}},
+                        "/api/event": {"get": {}},
+                    }
+                    if parent.modern_message:
+                        paths["/session/{sessionID}/message"] = {"post": {}}
+                    else:
+                        paths["/session/{sessionID}/run"] = {"post": {}}
+                        paths["/session/{sessionID}/reply"] = {"post": {}}
                     self._write_json(
                         {
                             "openapi": "3.1.0",
-                            "paths": {
-                                "/api/session": {"get": {}, "post": {}},
-                                "/api/event": {"get": {}},
-                                "/session/{sessionID}/run": {"post": {}},
-                                "/session/{sessionID}/reply": {"post": {}},
-                            },
+                            "paths": paths,
                         }
                     )
                     return
@@ -78,6 +102,9 @@ class OrchestrationOpenCodeServer:
                         return
                     if self.path == f"/session/{session_id}/reply":
                         self._write_json(parent.reply_payload)
+                        return
+                    if self.path == f"/session/{session_id}/message":
+                        self._write_json(parent.message_payload)
                         return
                 self.send_error(404)
 
@@ -389,7 +416,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             check=False,
         )
 
-    def test_start_named_run_creates_session_streams_progress_and_persists_success(self):
+    def test_start_named_run_creates_session_and_persists_success(self):
         events = [
             {
                 "type": "session.prompt.admitted",
@@ -423,8 +450,6 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertIn("admission session=ses_new message=msg_user_1 delivery=run status=queued\n", result.stdout)
-        self.assertIn("status session=ses_new status=done\n", result.stdout)
         self.assertIn("run=demo status=done", result.stdout)
         self.assertEqual(status.returncode, 0, status.stderr)
         payload = json.loads(status.stdout)
@@ -463,12 +488,48 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
                 ("GET", "/doc", None),
                 ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_new/run", {"message": "Finish the worker task"}),
-                ("GET", "/api/event", None),
                 ("POST", "/session/ses_new/reply", {}),
             ],
         )
 
-    def test_start_posts_all_ready_worker_runs_before_waiting_for_replies(self):
+    def test_start_named_run_uses_modern_session_message_when_available(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with OrchestrationOpenCodeServer(modern_message=True) as server:
+                result = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "start",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                    "--prompt",
+                    "Finish the worker task",
+                )
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        worker = payload["workers"]["worker"]
+        self.assertEqual(worker["status"], "done")
+        self.assertEqual(worker["prompt_ids"], [worker["result"]["message_ids"]["user"]])
+        self.assertTrue(worker["prompt_ids"][0].startswith("msg_"))
+        self.assertEqual(worker["output_refs"], ["assistant:msg_assistant_modern_1"])
+        self.assertEqual(worker["result"]["execution_strategy"], "session_message")
+        self.assertEqual(worker["result"]["text"], "Modern worker finished.")
+        self.assertEqual(payload["output_refs"], ["worker:msg_assistant_modern_1"])
+        self.assertEqual(
+            [(method, path) for method, path, _payload in requests],
+            [("GET", "/global/health"), ("GET", "/doc"), ("POST", "/api/session"), ("POST", "/session/ses_new/message")],
+        )
+        self.assertEqual(requests[3][2]["parts"], [{"type": "text", "text": "Finish the worker task"}])
+        self.assertTrue(requests[3][2]["messageID"].startswith("msg_"))
+
+    def test_start_executes_each_ready_worker_through_blocking_executor(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with MultiWorkerOrchestrationServer() as server:
                 init = self.run_cli(
@@ -539,8 +600,8 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
                     {"location": {"directory": directory}, "agent": "plan", "model": "openai/gpt-5.5"},
                 ),
                 ("POST", "/session/ses_docs/run", {"message": "Draft the release notes"}),
-                ("POST", "/session/ses_plan/run", {"message": "Create the implementation plan"}),
                 ("POST", "/session/ses_docs/reply", {}),
+                ("POST", "/session/ses_plan/run", {"message": "Create the implementation plan"}),
                 ("POST", "/session/ses_plan/reply", {}),
             ],
         )
@@ -1406,10 +1467,8 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
         )
 
     def test_start_attaches_session_then_reloads_it_from_store_on_restart(self):
-        events = [{"type": "session.status", "properties": {"sessionID": "ses_existing", "status": "completed"}}]
-
         with tempfile.TemporaryDirectory() as store:
-            with OrchestrationOpenCodeServer(events=events, session_ids={"ses_existing"}) as server:
+            with OrchestrationOpenCodeServer(session_ids={"ses_existing"}) as server:
                 first = self.run_cli(
                     "run",
                     "--store",
@@ -1449,21 +1508,17 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
                 ("POST", "/session/ses_existing/run", {"message": "First prompt"}),
-                ("GET", "/api/event", None),
                 ("POST", "/session/ses_existing/reply", {}),
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
                 ("POST", "/session/ses_existing/run", {"message": "Second prompt"}),
-                ("GET", "/api/event", None),
                 ("POST", "/session/ses_existing/reply", {}),
             ],
         )
 
     def test_start_with_cleanup_deletes_created_disposable_session_and_records_cleanup(self):
-        events = [{"type": "session.status", "properties": {"sessionID": "ses_new", "status": "completed"}}]
-
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with OrchestrationOpenCodeServer(events=events) as server:
+            with OrchestrationOpenCodeServer() as server:
                 result = self.run_cli(
                     "run",
                     "--store",
@@ -1494,7 +1549,6 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
                 ("GET", "/doc", None),
                 ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_new/run", {"message": "Finish the worker task"}),
-                ("GET", "/api/event", None),
                 ("POST", "/session/ses_new/reply", {}),
                 ("DELETE", "/api/session/ses_new", None),
             ],
