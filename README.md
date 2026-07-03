@@ -76,6 +76,14 @@ JSON output includes API path, fallback behavior, session ID, prompt/message ID,
 
 Live-provider validation is separate and opt-in only. It must not run as part of default smoke tests or mocked API tests.
 
+Run optional live-provider validation only when you explicitly allow provider calls:
+
+```bash
+OCS_LIVE_VALIDATE=1 bin/ocs live_validate --directory /path/to/target --server http://127.0.0.1:4096
+```
+
+`live_validate` uses the minimal prompt `Reply exactly PONG.`. Expected token use is two minimal PONG prompts at most: one v2 steer admission and one legacy run/reply used by `run_blocking`. It records v2 steer admission, v2 wait availability, and the legacy run/reply result. Live validation creates disposable `ocs-live-` sessions and verifies they are deleted before the command exits.
+
 Run a deterministic smoke check in no-live-model mode:
 
 ```bash

@@ -24,6 +24,10 @@ from opencode_session.status import short_status
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 CLI_NAME = "ocs"
 SMOKE_SESSION_PREFIX = "ocs-smoke-"
+LIVE_VALIDATE_ENV = "OCS_LIVE_VALIDATE"
+LIVE_SESSION_PREFIX = "ocs-live-"
+LIVE_VALIDATE_PROMPT = "Reply exactly PONG."
+LIVE_EVENT_OBSERVATION_TIMEOUT = 1.0
 EX_UNAVAILABLE = 69
 EX_UNSUPPORTED = 70
 EX_DATAERR = 65
@@ -133,6 +137,21 @@ def main(argv=None):
     smoke_parser.add_argument("--event-limit", type=_positive_int, default=3, help="maximum matching events to observe")
     _add_server_argument(smoke_parser)
     smoke_parser.add_argument("--json", action="store_true", help="print smoke result JSON")
+
+    live_parser = subparsers.add_parser(
+        "live_validate",
+        help=f"run opt-in live-provider validation; requires {LIVE_VALIDATE_ENV}=1",
+        description=(
+            "Run an explicit live-provider validation using the minimal prompt: Reply exactly PONG.\n"
+            f"Requires {LIVE_VALIDATE_ENV}=1; expected token use is two minimal PONG prompts at most.\n"
+            "Creates disposable sessions and verifies they are deleted before the command exits."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    live_parser.add_argument("--directory", default=".", help="target directory for disposable live validation sessions")
+    live_parser.add_argument("--prefix", default=LIVE_SESSION_PREFIX, help="recognizable disposable live session prefix")
+    _add_server_argument(live_parser)
+    live_parser.add_argument("--json", action="store_true", help="print live validation result JSON")
 
     cleanup_parser = subparsers.add_parser("cleanup", help="delete stale disposable smoke sessions")
     cleanup_parser.add_argument("--directory", default=".", help="target directory to clean")
@@ -524,6 +543,9 @@ def main(argv=None):
     if args.command == "smoke":
         return _run_smoke(args, client)
 
+    if args.command == "live_validate":
+        return _run_live_validate(args, client)
+
     if args.command == "cleanup":
         return _cleanup_disposable_command(args, client)
 
@@ -903,6 +925,313 @@ def _require_smoke_capabilities(capabilities):
             "v2 prompt admission is not execution",
             exit_code=EX_UNSUPPORTED,
         )
+
+
+def _run_live_validate(args, client):
+    if os.environ.get(LIVE_VALIDATE_ENV) != "1":
+        _print_error(
+            f"live-provider validation disabled; set {LIVE_VALIDATE_ENV}=1 to allow token-consuming provider calls"
+        )
+        return EX_DATAERR
+
+    directory = str(Path(args.directory).resolve())
+    validation_id = f"{args.prefix}{uuid.uuid4().hex[:10]}"
+    created_session_ids = []
+    result = {
+        "status": "active",
+        "ok": False,
+        "mode": "live-provider",
+        "gate": {"env": LIVE_VALIDATE_ENV, "enabled": True, "required": "1"},
+        "prompt": LIVE_VALIDATE_PROMPT,
+        "health": None,
+        "version": None,
+        "directory": directory,
+        "prefix": args.prefix,
+        "session_ids": {"steer": None, "run_blocking": None},
+        "checks": {},
+        "cleanup": {"status": "queued", "deleted": [], "verified": []},
+    }
+    failure = None
+    exit_code = EX_UNAVAILABLE
+
+    def create_live_session(role):
+        create_response = client.create_session_response(
+            directory,
+            title=f"{validation_id}-{role}",
+            metadata={
+                "disposable": True,
+                "kind": "live-provider-validation",
+                "live_provider": True,
+                "prefix": args.prefix,
+                "validation_id": validation_id,
+                "role": role,
+            },
+        )
+        session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
+        if not session_id:
+            raise _LiveValidationFailure("session creation response did not include a session id")
+        created_session_ids.append(session_id)
+        return session_id
+
+    try:
+        capabilities = detect_capabilities(client)
+        result["capabilities"] = capabilities
+        result["health"] = capabilities["health"]
+        result["version"] = capabilities["version"]
+        result["checks"]["capabilities"] = {
+            "status": "done",
+            "health": capabilities["health"],
+            "version": capabilities["version"],
+        }
+        _require_live_validate_capabilities(capabilities)
+        result["checks"]["wait"] = _live_wait_record(capabilities)
+
+        steer_session_id = create_live_session("steer")
+        result["session_ids"]["steer"] = steer_session_id
+        steer_message_id = f"{validation_id}-steer"
+        steer_response = client.admit_prompt_response(
+            steer_session_id,
+            {
+                "messageID": steer_message_id,
+                "parts": [{"type": "text", "text": LIVE_VALIDATE_PROMPT}],
+                "delivery": "steer",
+            },
+            capabilities["route_availability"]["v2_prompt"]["path"],
+        )
+        steer = _admission_record(
+            steer_session_id,
+            "steer",
+            steer_message_id,
+            steer_response.data,
+            capabilities=capabilities,
+        )
+        steer.update(_live_steer_execution_observation(client, steer, capabilities))
+        result["checks"]["v2_steer"] = steer
+
+        run_session_id = create_live_session("run_blocking")
+        result["session_ids"]["run_blocking"] = run_session_id
+        run_response = client.run_session_response(run_session_id, LIVE_VALIDATE_PROMPT)
+        provider_error = _provider_failure(run_response.data)
+        if provider_error:
+            raise _LiveValidationFailure(f"provider failure: {provider_error}")
+        reply_response = client.reply_session_response(run_session_id)
+        provider_error = _provider_failure(reply_response.data)
+        if provider_error:
+            raise _LiveValidationFailure(f"provider failure: {provider_error}")
+        legacy_run_reply = _run_result(run_session_id, run_response.data, reply_response.data)
+        legacy_run_reply["succeeded"] = legacy_run_reply["status"] == "done"
+        legacy_run_reply["pong"] = _is_exact_pong(legacy_run_reply["text"])
+        if not legacy_run_reply["pong"]:
+            raise _LiveValidationFailure("live provider did not reply exactly PONG")
+        result["checks"]["legacy_run_reply"] = legacy_run_reply
+        result["status"] = "done"
+        result["ok"] = True
+        exit_code = 0
+    except _LiveValidationFailure as error:
+        failure = error
+        exit_code = error.exit_code
+        result["status"] = "failed"
+        result["error"] = str(error)
+    except OpenCodeApiError as error:
+        failure = error
+        result["status"] = "failed"
+        result["error"] = str(error)
+
+    cleanup = _cleanup_created_sessions(client, created_session_ids)
+    result["cleanup"] = cleanup
+    result["checks"]["cleanup"] = cleanup
+    if cleanup["status"] != "done" and failure is None:
+        failure = _LiveValidationFailure("disposable live validation session cleanup failed")
+        result["status"] = "failed"
+        result["ok"] = False
+        result["error"] = str(failure)
+        exit_code = failure.exit_code
+
+    if failure is not None:
+        _print_error(
+            f"live-provider validation failed: {failure}; {_format_cleanup_summary(result['cleanup'])}"
+        )
+        return exit_code
+
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(_format_live_validate_compact(result))
+    return 0
+
+
+class _LiveValidationFailure(Exception):
+    def __init__(self, message, *, exit_code=EX_UNAVAILABLE):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def _require_live_validate_capabilities(capabilities):
+    reasons = unsupported_reasons(capabilities)
+    if not capabilities["v2_prompt_support"]:
+        reasons.append("missing v2 steer admission: POST /api/session/{sessionID}/prompt")
+    if not capabilities["legacy_fallback_available"]:
+        reasons.append(
+            "missing legacy run_blocking execution: POST /session/{sessionID}/run + POST /session/{sessionID}/reply"
+        )
+    if reasons:
+        raise _LiveValidationFailure(
+            f"unsupported OpenCode server; {'; '.join(reasons)}",
+            exit_code=EX_UNSUPPORTED,
+        )
+
+
+def _live_wait_record(capabilities):
+    wait_route = capabilities["route_availability"]["v2_wait"]
+    return {
+        "available": wait_route["available"],
+        "api_path": wait_route["path"],
+        "status": "available" if wait_route["available"] else "unavailable",
+    }
+
+
+def _live_steer_execution_observation(client, steer, capabilities):
+    wait_route = capabilities["route_availability"]["v2_wait"]
+    wait_observation = None
+    if wait_route["available"] and "?" not in wait_route["path"]:
+        try:
+            response = client.wait_session_response(steer["session_id"], wait_route["path"])
+        except OpenCodeApiError as error:
+            wait_observation = _execution_observation(
+                "unknown",
+                source="wait",
+                status="unknown",
+                reason="observation_failed",
+                error=str(error),
+            )
+        else:
+            status = short_status(_first_present(response.data, "status", "state", "phase"))
+            if status in {"active", "done"}:
+                return _execution_observation(True, source="wait", status=status, reason="observed_execution_state")
+            if status == "queued":
+                return _execution_observation(False, source="wait", status=status, reason="observed_not_executed_state")
+            wait_observation = _execution_observation("unknown", source="wait", status=status, reason="no_execution_evidence")
+    message_observation = _live_message_execution_observation(client, steer)
+    if message_observation["executed"] != "unknown":
+        return message_observation
+    event_route = capabilities["route_availability"]["events"]
+    if event_route["available"]:
+        return _live_event_execution_observation(client, steer, event_route["path"])
+    return message_observation if wait_observation is None else wait_observation
+
+
+def _live_message_execution_observation(client, steer):
+    try:
+        session = client.get_session_response(steer["session_id"]).data
+    except OpenCodeApiError as error:
+        return _execution_observation(
+            "unknown",
+            source="message",
+            status="unknown",
+            reason="observation_failed",
+            error=str(error),
+        )
+    status = _assistant_message_status(session)
+    if status is not None:
+        return _execution_observation(True, source="message", status=status, reason="observed_assistant_message")
+    return _execution_observation("unknown", source="message", status="unknown", reason="no_execution_evidence")
+
+
+def _assistant_message_status(session):
+    for message in _iter_message_evidence_candidates(session):
+        role = str(_first_present(message, "role", "author", "speaker", "type", "kind") or "").lower()
+        if "assistant" not in role:
+            continue
+        status = short_status(_first_present(message, "status", "state", "phase"))
+        if _message_text(message) or _message_tokens(message) is not None or _message_value(message, "cost") is not None:
+            return status or "unknown"
+        if status in {"active", "done"}:
+            return status
+    return None
+
+
+def _live_event_execution_observation(client, steer, event_path):
+    try:
+        with _watch_deadline(LIVE_EVENT_OBSERVATION_TIMEOUT):
+            for raw_event in client.stream_events(event_path):
+                event = normalize_event(raw_event, steer["session_id"])
+                if event is None:
+                    continue
+                observation = _event_execution_observation(event)
+                if observation["executed"] != "unknown":
+                    return observation
+                if is_terminal_event(event):
+                    break
+    except _WatchTimeout:
+        return _execution_observation(
+            "unknown",
+            source="event",
+            status="unknown",
+            reason="observation_timed_out",
+        )
+    except OpenCodeApiError as error:
+        return _execution_observation(
+            "unknown",
+            source="event",
+            status="unknown",
+            reason="observation_failed",
+            error=str(error),
+        )
+    return _execution_observation("unknown", source="event", status="unknown", reason="no_execution_evidence")
+
+
+def _event_execution_observation(event):
+    status = event.get("status") or "unknown"
+    if event.get("kind") in {"text", "tool", "step"}:
+        return _execution_observation(True, source="event", status=status, reason="observed_execution_event")
+    if event.get("kind") == "status" and status in {"active", "done"}:
+        return _execution_observation(True, source="event", status=status, reason="observed_execution_event")
+    return _execution_observation("unknown", source="event", status=status, reason="no_execution_evidence")
+
+
+def _iter_message_evidence_candidates(data):
+    if not isinstance(data, dict):
+        return
+    for key in ("message", "assistant", "reply", "output"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            yield value
+    for key in ("messages", "items", "entries"):
+        value = data.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                yield item
+
+
+def _execution_observation(executed, *, source, status, reason, error=None):
+    evidence = {"source": source, "status": status or "unknown", "reason": reason}
+    if error is not None:
+        evidence["error"] = error
+    return {"executed": executed, "execution_evidence": evidence}
+
+
+def _is_exact_pong(text):
+    return str(text).strip() == "PONG"
+
+
+def _format_live_validate_compact(result):
+    steer = result["checks"].get("v2_steer") or {}
+    wait = result["checks"].get("wait") or {}
+    legacy_run_reply = result["checks"].get("legacy_run_reply") or {}
+    fields = [
+        ("status", result["status"]),
+        ("mode", result["mode"]),
+        ("health", result["health"]),
+        ("version", result["version"]),
+        ("steer", steer.get("status")),
+        ("wait", wait.get("status")),
+        ("run", legacy_run_reply.get("status")),
+        ("pong", _compact_bool(legacy_run_reply.get("pong"))),
+        ("cleanup", result["cleanup"].get("status")),
+    ]
+    return "live_validate " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
 def _collect_smoke_event_types(client, session_id, event_path, timeout, event_limit):

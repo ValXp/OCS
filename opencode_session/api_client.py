@@ -196,6 +196,9 @@ class OpenCodeApiClient:
     def admit_prompt_response(self, session_id, payload, prompt_path):
         return self.post_response(_session_prompt_path(prompt_path, session_id), payload)
 
+    def wait_session_response(self, session_id, wait_path):
+        return self.post_response(_session_prompt_path(wait_path, session_id), {})
+
     def list_permissions_response(self):
         return self.get_response("permission")
 

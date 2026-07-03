@@ -42,6 +42,17 @@ class OcsUxContractTest(unittest.TestCase):
         self.assertNotIn("execute", result.stdout.lower())
         self.assertNotIn("complete", result.stdout.lower())
 
+    def test_live_validate_help_explains_gate_tokens_and_cleanup(self):
+        result = self.run_cli("live_validate", "--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("OCS_LIVE_VALIDATE=1", result.stdout)
+        self.assertIn("PONG", result.stdout)
+        self.assertIn("token", result.stdout.lower())
+        self.assertIn("disposable", result.stdout.lower())
+        self.assertIn("deleted before the command exits", result.stdout)
+
     def test_readme_examples_use_finalized_ocs_vocabulary(self):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -49,6 +60,11 @@ class OcsUxContractTest(unittest.TestCase):
         self.assertIn("run_blocking", readme)
         self.assertIn("steer", readme)
         self.assertIn("Live-provider validation is separate and opt-in", readme)
+        self.assertIn("bin/ocs live_validate", readme)
+        self.assertIn("OCS_LIVE_VALIDATE=1", readme)
+        self.assertIn("Reply exactly PONG", readme)
+        self.assertIn("token", readme.lower())
+        self.assertIn("deleted before the command exits", readme)
         self.assertNotIn("bin/opencode-session", readme)
         self.assertNotIn("top-level `queue`", readme)
 
