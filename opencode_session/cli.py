@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
@@ -273,9 +274,26 @@ def _parse_run_store_args(argv):
     run_init_parser.add_argument("--directory", default=".", help="target directory for the run")
     _add_server_argument(run_init_parser)
 
+    run_start_parser = run_subparsers.add_parser("start")
+    run_start_parser.add_argument("name", help="local run name")
+    run_start_parser.add_argument("--prompt", required=True, help="prompt text for the single worker")
+    run_start_parser.add_argument("--worker", default="worker", help="worker record ID")
+    run_start_parser.add_argument("--role", default="worker", help="worker role")
+    run_start_parser.add_argument("--directory", help="target directory when creating the run")
+    run_start_parser.add_argument("--server", help="OpenCode server URL")
+    run_start_parser.add_argument("--session", dest="session_id", help="existing OpenCode session ID to attach")
+    run_start_parser.add_argument("--agent", help="agent name when creating a worker session")
+    run_start_parser.add_argument("--model", help="model name when creating a worker session")
+    run_start_parser.add_argument("--cleanup", action="store_true", help="delete a session created by this start after completion")
+
     run_status_parser = run_subparsers.add_parser("status")
     run_status_parser.add_argument("name", help="local run name")
     run_status_parser.add_argument("--json", action="store_true", help="print complete run JSON data")
+
+    run_collect_parser = run_subparsers.add_parser("collect")
+    run_collect_parser.add_argument("name", help="local run name")
+    run_collect_parser.add_argument("--worker", default="worker", help="worker record ID")
+    run_collect_parser.add_argument("--json", action="store_true", help="print collected result JSON")
 
     run_worker_parser = run_subparsers.add_parser("worker")
     run_worker_parser.add_argument("name", help="local run name")
@@ -297,6 +315,8 @@ def _parse_run_store_args(argv):
 def _handle_run_store_command(args):
     store = RunStore(args.store)
     try:
+        if args.run_command == "start":
+            return _start_single_worker_run(args, store)
         if args.run_command == "init":
             run = store.create_run(args.name, directory=args.directory, server_url=args.server)
             print(format_run_compact(run))
@@ -308,6 +328,8 @@ def _handle_run_store_command(args):
                 return 0
             print(format_run_compact(run))
             return 0
+        if args.run_command == "collect":
+            return _collect_single_worker_result(args, store)
         if args.run_command == "worker":
             run = store.upsert_worker(
                 args.name,
@@ -332,6 +354,176 @@ def _handle_run_store_command(args):
             return EX_NOINPUT
         return EX_DATAERR
     return 64
+
+
+def _start_single_worker_run(args, store):
+    run = _load_or_create_orchestration_run(store, args)
+    worker = _ensure_orchestration_worker(run, args.worker, role=args.role)
+    run["status"] = "running"
+    worker["status"] = "running"
+    _save_orchestration_run(store, run)
+
+    client = OpenCodeApiClient(run["server_url"])
+    created_session_id = None
+    try:
+        capabilities = detect_capabilities(client)
+        if not capabilities["legacy_fallback_available"]:
+            message = (
+                "unsupported route behavior: missing legacy POST /session/{sessionID}/run + "
+                "POST /session/{sessionID}/reply; v2 prompt admission is not execution"
+            )
+            _mark_orchestration_failed(store, run, worker, message)
+            print(f"opencode-session: {message}", file=sys.stderr)
+            return EX_UNSUPPORTED
+
+        session_id = args.session_id or worker.get("session_id")
+        if session_id is None:
+            create_response = client.create_session_response(run["directory"], agent=args.agent, model=args.model)
+            session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
+            created_session_id = session_id
+        worker["session_id"] = session_id
+        _save_orchestration_run(store, run)
+
+        if args.agent is not None:
+            worker["agent"] = args.agent
+        if args.model is not None:
+            worker["model"] = args.model
+
+        run_response = client.run_session_response(session_id, args.prompt)
+        prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
+        if prompt_id is not None:
+            worker["prompt_ids"] = [prompt_id]
+            _save_orchestration_run(store, run)
+
+        provider_error = _provider_failure(run_response.data)
+        if provider_error:
+            _mark_orchestration_failed(store, run, worker, provider_error)
+            print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+            return EX_UNAVAILABLE
+
+        event_route = capabilities["route_availability"]["events"]
+        if event_route["available"]:
+            _stream_orchestration_progress(client, session_id, event_route["path"])
+
+        reply_response = client.reply_session_response(session_id)
+        provider_error = _provider_failure(reply_response.data)
+        if provider_error:
+            _mark_orchestration_failed(store, run, worker, provider_error)
+            print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+            return EX_UNAVAILABLE
+    except OpenCodeApiError as error:
+        _mark_orchestration_failed(store, run, worker, str(error))
+        print(f"opencode-session: api failure: {error}", file=sys.stderr)
+        return EX_UNAVAILABLE
+
+    result = _run_result(session_id, run_response.data, reply_response.data)
+    assistant_message_id = result["message_ids"].get("assistant")
+    worker["result"] = result
+    worker["status"] = "done"
+    worker["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
+    run["status"] = "complete"
+    run["output_refs"] = [f"{worker['id']}:{assistant_message_id}"] if assistant_message_id else []
+    if args.cleanup:
+        worker["cleanup"] = {"requested": True, "deleted": False}
+        if created_session_id is not None:
+            try:
+                client.delete_session(created_session_id)
+            except OpenCodeApiError as error:
+                worker["cleanup"]["error"] = str(error)
+                _mark_orchestration_failed(store, run, worker, str(error))
+                _print_cleanup_error(error)
+                return EX_UNAVAILABLE
+            worker["cleanup"]["deleted"] = True
+    _save_orchestration_run(store, run)
+    print(format_run_compact(run))
+    return 0
+
+
+def _collect_single_worker_result(args, store):
+    run = store.load_run(args.name)
+    worker = run.get("workers", {}).get(args.worker)
+    if not isinstance(worker, dict):
+        raise RunStoreError(f"worker '{args.worker}' not found in run '{args.name}'", kind="missing")
+    result = worker.get("result")
+    if not isinstance(result, dict):
+        raise RunStoreError(f"worker '{args.worker}' in run '{args.name}' has no collected result", kind="missing")
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    print(_format_run_compact(result))
+    return 0
+
+
+def _load_or_create_orchestration_run(store, args):
+    try:
+        run = store.load_run(args.name)
+    except RunStoreError as error:
+        if error.kind != "missing":
+            raise
+        run = store.create_run(
+            args.name,
+            directory=args.directory or ".",
+            server_url=args.server or _server_default(),
+        )
+    else:
+        if args.directory is not None:
+            run["directory"] = str(Path(args.directory).resolve())
+        if args.server is not None:
+            run["server_url"] = args.server
+    return run
+
+
+def _ensure_orchestration_worker(run, worker_id, *, role):
+    workers = run.setdefault("workers", {})
+    worker = workers.get(worker_id)
+    if not isinstance(worker, dict):
+        worker = {}
+    worker.setdefault("id", worker_id)
+    worker.setdefault("role", role)
+    worker.setdefault("session_id", None)
+    worker.setdefault("agent", None)
+    worker.setdefault("model", None)
+    worker.setdefault("dependencies", [])
+    worker.setdefault("prompt_ids", [])
+    worker.setdefault("retry_count", 0)
+    worker.setdefault("timeout_seconds", None)
+    worker.setdefault("blockers", [])
+    worker.setdefault("output_refs", [])
+    if not worker.get("role"):
+        worker["role"] = role
+    worker["id"] = worker_id
+    workers[worker_id] = worker
+    return worker
+
+
+def _stream_orchestration_progress(client, session_id, event_path):
+    for raw_event in client.stream_events(event_path):
+        event = normalize_event(raw_event, session_id)
+        if event is None:
+            continue
+        print(format_watch_event(event), flush=True)
+        if is_terminal_event(event):
+            return
+
+
+def _mark_orchestration_failed(store, run, worker, error):
+    run["status"] = "failed"
+    worker["status"] = "failed"
+    worker["error"] = error
+    _save_orchestration_run(store, run)
+
+
+def _save_orchestration_run(store, run):
+    run["updated_at"] = _utc_now()
+    store.save_run(run)
+
+
+def _server_default():
+    return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _add_server_argument(parser):
