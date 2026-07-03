@@ -74,6 +74,11 @@ def unsupported_reasons(capabilities):
     return reasons
 
 
+def legacy_run_reply_supported(doc):
+    paths = doc.get("paths") or {}
+    return _route_available(paths, LEGACY_RUN_PATH, "post") and _route_available(paths, LEGACY_REPLY_PATH, "post")
+
+
 def _route(path, method, available):
     return {"path": path, "method": method, "available": available}
 

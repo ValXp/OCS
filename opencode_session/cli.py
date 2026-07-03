@@ -5,7 +5,12 @@ import sys
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
-from opencode_session.capabilities import detect_capabilities, format_compact, unsupported_reasons
+from opencode_session.capabilities import (
+    detect_capabilities,
+    format_compact,
+    legacy_run_reply_supported,
+    unsupported_reasons,
+)
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
@@ -46,12 +51,79 @@ def main(argv=None):
     _add_server_argument(delete_parser)
     _add_output_arguments(delete_parser)
 
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("prompt", nargs="*", help="prompt text; stdin is used when omitted")
+    run_parser.add_argument("--session", help="existing session ID to run in")
+    run_parser.add_argument("--directory", help="target directory when creating a disposable session")
+    run_parser.add_argument("--agent", help="agent name for a disposable session")
+    run_parser.add_argument("--model", help="model name for a disposable session")
+    _add_server_argument(run_parser)
+    run_parser.add_argument("--json", action="store_true", help="print normalized JSON result")
+
     args = parser.parse_args(argv)
     if not args.command:
         parser.print_help(sys.stderr)
         return 64
 
     client = OpenCodeApiClient(args.server)
+    if args.command == "run":
+        prompt = _read_prompt(args.prompt)
+        session_id = args.session
+        created_session_id = None
+        try:
+            if not legacy_run_reply_supported(client.require_openapi_doc()):
+                print(
+                    "opencode-session: unsupported route behavior: missing legacy POST "
+                    "/session/{sessionID}/run + POST /session/{sessionID}/reply; "
+                    "v2 prompt admission is not execution",
+                    file=sys.stderr,
+                )
+                return EX_UNSUPPORTED
+            if session_id is None:
+                directory = str(Path(args.directory or ".").resolve())
+                create_response = client.create_session_response(
+                    directory,
+                    agent=args.agent,
+                    model=args.model,
+                )
+                session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
+                created_session_id = session_id
+            run_response = client.run_session_response(session_id, prompt)
+            provider_error = _provider_failure(run_response.data)
+            if provider_error:
+                cleanup_error = _delete_disposable_session(client, created_session_id)
+                if cleanup_error:
+                    _print_cleanup_error(cleanup_error)
+                print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+                return EX_UNAVAILABLE
+            reply_response = client.reply_session_response(session_id)
+            provider_error = _provider_failure(reply_response.data)
+            if provider_error:
+                cleanup_error = _delete_disposable_session(client, created_session_id)
+                if cleanup_error:
+                    _print_cleanup_error(cleanup_error)
+                print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+                return EX_UNAVAILABLE
+        except OpenCodeApiError as error:
+            cleanup_error = _delete_disposable_session(client, created_session_id)
+            if cleanup_error:
+                _print_cleanup_error(cleanup_error)
+            if session_id is not None and _is_session_not_found_error(error):
+                print(f"opencode-session: session not found: {session_id}", file=sys.stderr)
+            else:
+                print(f"opencode-session: api failure: {error}", file=sys.stderr)
+            return EX_UNAVAILABLE
+        cleanup_error = _delete_disposable_session(client, created_session_id)
+        if cleanup_error:
+            _print_cleanup_error(cleanup_error)
+            return EX_UNAVAILABLE
+        result = _run_result(session_id, run_response.data, reply_response.data)
+        if args.json:
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        print(_format_run_compact(result))
+        return 0
+
     if args.command == "create":
         directory = str(Path(args.directory).resolve())
         try:
@@ -172,6 +244,120 @@ def _add_output_arguments(parser):
 
 def _write_raw(body):
     sys.stdout.write(body)
+
+
+def _read_prompt(prompt_words):
+    if prompt_words:
+        return " ".join(prompt_words)
+    prompt = sys.stdin.read()
+    if prompt.endswith("\n"):
+        prompt = prompt[:-1]
+    if prompt.endswith("\r"):
+        prompt = prompt[:-1]
+    return prompt
+
+
+def _run_result(session_id, run_message, reply_message):
+    return {
+        "session_id": session_id,
+        "message_ids": {
+            "user": _message_value(run_message, "id", "messageID", "messageId"),
+            "assistant": _message_value(reply_message, "id", "messageID", "messageId"),
+        },
+        "status": _message_value(reply_message, "status") or "completed",
+        "cost": _message_value(reply_message, "cost"),
+        "tokens": _message_tokens(reply_message),
+        "text": _message_text(reply_message),
+    }
+
+
+def _format_run_compact(result):
+    fields = [
+        ("session", result["session_id"]),
+        ("user", result["message_ids"]["user"]),
+        ("assistant", result["message_ids"]["assistant"]),
+        ("status", result["status"]),
+        ("cost", result["cost"]),
+        ("tokens", _tokens_total(result["tokens"])),
+        ("text", result["text"]),
+    ]
+    return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+
+
+def _message_value(message, *names):
+    for name in names:
+        value = message.get(name)
+        if value is not None:
+            return value
+    info = message.get("info")
+    if isinstance(info, dict):
+        for name in names:
+            value = info.get(name)
+            if value is not None:
+                return value
+    return None
+
+
+def _message_tokens(message):
+    tokens = _message_value(message, "tokens", "usage")
+    return tokens
+
+
+def _tokens_total(tokens):
+    if isinstance(tokens, dict):
+        if tokens.get("total") is not None:
+            return tokens["total"]
+        return sum(value for value in tokens.values() if isinstance(value, int))
+    return tokens
+
+
+def _message_text(message):
+    text = _message_value(message, "text", "content")
+    if text is not None:
+        return text
+    parts = message.get("parts")
+    if isinstance(parts, list):
+        return "".join(
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
+def _print_cleanup_error(error):
+    print(f"opencode-session: api failure: disposable session cleanup failed: {error}", file=sys.stderr)
+
+
+def _is_session_not_found_error(error):
+    if error.status != 404:
+        return False
+    method = str(getattr(error, "method", "") or "").upper()
+    path = str(getattr(error, "path", "") or "").split("?", 1)[0]
+    parts = path.split("/")
+    if method == "POST" and len(parts) == 4 and parts[1] == "session":
+        return bool(parts[2]) and parts[3] in {"run", "reply"}
+    return method in {"GET", "DELETE"} and len(parts) == 4 and parts[1:3] == ["api", "session"] and bool(parts[3])
+
+
+def _delete_disposable_session(client, session_id):
+    if session_id is None:
+        return None
+    try:
+        client.delete_session(session_id)
+    except OpenCodeApiError as error:
+        return error
+    return None
+
+
+def _provider_failure(message):
+    status = str(_message_value(message, "status") or "").lower()
+    if status not in {"failed", "error", "errored"}:
+        return None
+    error = _message_value(message, "error", "reason", "message")
+    if isinstance(error, dict):
+        error = error.get("message") or json.dumps(error, sort_keys=True)
+    return error or status
 
 
 def _format_session_compact(session):

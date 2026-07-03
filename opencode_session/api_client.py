@@ -5,9 +5,11 @@ from urllib.request import Request, urlopen
 
 
 class OpenCodeApiError(Exception):
-    def __init__(self, message, *, status=None):
+    def __init__(self, message, *, status=None, method=None, path=None):
         super().__init__(message)
         self.status = status
+        self.method = method
+        self.path = path
 
 
 class OpenCodeApiResponse:
@@ -36,6 +38,9 @@ class OpenCodeApiClient:
         except OpenCodeApiError:
             return {"paths": {}}
 
+    def require_openapi_doc(self):
+        return self.get_json("doc")
+
     def get_json(self, path):
         return self.get_response(path).data
 
@@ -59,7 +64,11 @@ class OpenCodeApiClient:
         try:
             data = json.loads(response_body or "{}")
         except json.JSONDecodeError as error:
-            raise OpenCodeApiError(f"{method} /{path.lstrip('/')} returned invalid JSON") from error
+            raise OpenCodeApiError(
+                f"{method} /{path.lstrip('/')} returned invalid JSON",
+                method=method,
+                path=f"/{path.lstrip('/')}",
+            ) from error
         return OpenCodeApiResponse(data, response_body)
 
     def _request_body(self, method, path, payload=None):
@@ -74,7 +83,12 @@ class OpenCodeApiClient:
             with urlopen(request, timeout=self.timeout) as response:
                 return response.read().decode("utf-8")
         except HTTPError as error:
-            raise OpenCodeApiError(f"{method} /{path.lstrip('/')} failed: HTTP {error.code}", status=error.code) from error
+            raise OpenCodeApiError(
+                f"{method} /{path.lstrip('/')} failed: HTTP {error.code}",
+                status=error.code,
+                method=method,
+                path=f"/{path.lstrip('/')}",
+            ) from error
         except URLError as error:
             raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
         except TimeoutError as error:
@@ -108,3 +122,9 @@ class OpenCodeApiClient:
 
     def delete_session_response(self, session_id):
         return self.delete_response(f"api/session/{quote(session_id, safe='')}")
+
+    def run_session_response(self, session_id, message):
+        return self.post_response(f"session/{quote(session_id, safe='')}/run", {"message": message})
+
+    def reply_session_response(self, session_id):
+        return self.post_response(f"session/{quote(session_id, safe='')}/reply", {})
