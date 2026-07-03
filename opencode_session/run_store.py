@@ -1,0 +1,224 @@
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+SCHEMA_VERSION = 1
+DEFAULT_RUN_STATUS = "initialized"
+DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
+
+
+class RunStoreError(Exception):
+    def __init__(self, message, *, kind="data"):
+        super().__init__(message)
+        self.kind = kind
+
+
+class RunStore:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def create_run(self, name, *, directory, server_url):
+        now = _utc_now()
+        run = {
+            "schema_version": SCHEMA_VERSION,
+            "name": name,
+            "run_id": name,
+            "directory": str(Path(directory).resolve()),
+            "server_url": server_url,
+            "status": DEFAULT_RUN_STATUS,
+            "retry_count": 0,
+            "timeout_seconds": None,
+            "blockers": [],
+            "output_refs": [],
+            "workers": {},
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.save_run(run)
+        return run
+
+    def upsert_worker(self, name, worker_id, **changes):
+        run = self.load_run(name)
+        workers = run.setdefault("workers", {})
+        existing = workers.get(worker_id)
+        if existing is None:
+            if not changes.get("role"):
+                raise RunStoreError(f"worker '{worker_id}' does not exist; --role is required to create it")
+            worker = _default_worker(worker_id)
+        else:
+            worker = _normalize_worker(existing, worker_id)
+
+        for key in ("role", "session_id", "agent", "model", "status", "retry_count", "timeout_seconds"):
+            if changes.get(key) is not None:
+                worker[key] = changes[key]
+        for key in ("dependencies", "prompt_ids", "blockers", "output_refs"):
+            if changes.get(key) is not None:
+                worker[key] = changes[key]
+
+        workers[worker_id] = worker
+        run["updated_at"] = _utc_now()
+        self.save_run(run)
+        return run
+
+    def load_run(self, name):
+        path = self._run_path(name)
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+        except FileNotFoundError as error:
+            raise RunStoreError(f"run '{name}' not found in {self.root}", kind="missing") from error
+        except json.JSONDecodeError as error:
+            raise RunStoreError(f"run record for '{name}' is corrupted: invalid JSON in {path}: {error}") from error
+        if not isinstance(data, dict):
+            raise RunStoreError(f"run record for '{name}' is corrupted: expected JSON object in {path}")
+        return _normalize_run(data, fallback_name=name)
+
+    def save_run(self, run):
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self._run_path(run["name"])
+        temporary_path = path.with_suffix(path.suffix + ".tmp")
+        with temporary_path.open("w", encoding="utf-8") as file:
+            json.dump(run, file, sort_keys=True)
+            file.write("\n")
+        os.replace(temporary_path, path)
+
+    def _run_path(self, name):
+        if not name or name in {".", ".."} or "/" in name or "\\" in name:
+            raise RunStoreError(f"invalid run name '{name}'")
+        return self.root / f"{name}.json"
+
+
+def default_store_root():
+    return os.environ.get("OPENCODE_SESSION_RUN_STORE") or str(Path.cwd() / ".opencode-session" / "runs")
+
+
+def format_run_compact(run):
+    workers = run.get("workers") or {}
+    counts = _worker_status_counts(workers)
+    fields = [
+        ("run", run.get("name")),
+        ("status", run.get("status")),
+        ("dir", run.get("directory")),
+        ("server", run.get("server_url")),
+        ("workers", len(workers)),
+        ("pending", counts["pending"]),
+        ("running", counts["running"]),
+        ("done", counts["done"]),
+        ("blocked", counts["blocked"]),
+        ("failed", counts["failed"]),
+        ("retries", run.get("retry_count")),
+        ("timeout", run.get("timeout_seconds")),
+        ("blockers", _compact_list(run.get("blockers"))),
+        ("outputs", _compact_list(run.get("output_refs"))),
+    ]
+    lines = [" ".join(f"{key}={_compact_value(value)}" for key, value in fields)]
+    for worker_id in sorted(workers):
+        worker = _normalize_worker(workers[worker_id], worker_id)
+        lines.append(_format_worker_compact(worker))
+    return "\n".join(lines)
+
+
+def _normalize_run(run, *, fallback_name):
+    normalized = dict(run)
+    normalized.setdefault("schema_version", SCHEMA_VERSION)
+    if not normalized.get("name"):
+        normalized["name"] = fallback_name
+    if not normalized.get("run_id"):
+        normalized["run_id"] = normalized["name"]
+    normalized.setdefault("directory", str(Path.cwd()))
+    if not normalized.get("server_url"):
+        normalized["server_url"] = DEFAULT_SERVER_URL
+    normalized.setdefault("status", DEFAULT_RUN_STATUS)
+    normalized.setdefault("retry_count", 0)
+    normalized.setdefault("timeout_seconds", None)
+    normalized.setdefault("blockers", [])
+    normalized.setdefault("output_refs", [])
+    workers = normalized.get("workers")
+    if workers is None:
+        workers = {}
+    elif not isinstance(workers, dict):
+        raise RunStoreError(f"run record for '{fallback_name}' is corrupted: workers must be an object")
+    normalized["workers"] = {worker_id: _normalize_worker(worker, worker_id) for worker_id, worker in workers.items()}
+    normalized.setdefault("created_at", None)
+    normalized.setdefault("updated_at", None)
+    return normalized
+
+
+def _default_worker(worker_id):
+    return {
+        "id": worker_id,
+        "role": None,
+        "session_id": None,
+        "agent": None,
+        "model": None,
+        "dependencies": [],
+        "prompt_ids": [],
+        "status": "pending",
+        "retry_count": 0,
+        "timeout_seconds": None,
+        "blockers": [],
+        "output_refs": [],
+    }
+
+
+def _normalize_worker(worker, worker_id):
+    normalized = _default_worker(worker_id)
+    if isinstance(worker, dict):
+        normalized.update(worker)
+    normalized["id"] = normalized.get("id") or worker_id
+    for key in ("dependencies", "prompt_ids", "blockers", "output_refs"):
+        value = normalized.get(key)
+        normalized[key] = value if isinstance(value, list) else []
+    if normalized.get("retry_count") is None:
+        normalized["retry_count"] = 0
+    if not normalized.get("status"):
+        normalized["status"] = "pending"
+    return normalized
+
+
+def _format_worker_compact(worker):
+    fields = [
+        ("worker", worker.get("id")),
+        ("role", worker.get("role")),
+        ("status", worker.get("status")),
+        ("session", worker.get("session_id")),
+        ("agent", worker.get("agent")),
+        ("model", worker.get("model")),
+        ("deps", _compact_list(worker.get("dependencies"))),
+        ("prompts", _compact_list(worker.get("prompt_ids"))),
+        ("retries", worker.get("retry_count")),
+        ("timeout", worker.get("timeout_seconds")),
+        ("blockers", _compact_list(worker.get("blockers"))),
+        ("outputs", _compact_list(worker.get("output_refs"))),
+    ]
+    return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+
+
+def _worker_status_counts(workers):
+    counts = {"pending": 0, "running": 0, "done": 0, "blocked": 0, "failed": 0}
+    for worker in workers.values():
+        status = worker.get("status") if isinstance(worker, dict) else None
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _compact_list(values):
+    if not values:
+        return None
+    return ",".join(str(value) for value in values)
+
+
+def _compact_value(value):
+    if value is None or value == "":
+        return "-"
+    text = str(value)
+    if any(character.isspace() for character in text):
+        return json.dumps(text)
+    return text
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
