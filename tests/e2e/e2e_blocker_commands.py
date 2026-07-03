@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import tempfile
 import unittest
@@ -15,10 +14,6 @@ from harness import (
 )
 
 
-SERVER_ENV = "OCS_E2E_SERVER_URL"
-
-
-@unittest.skipUnless(os.environ.get(SERVER_ENV), f"set {SERVER_ENV} to run OpenCode E2E tests")
 class BlockerCommandsE2ETest(unittest.TestCase):
     def test_permission_list_json_accepts_real_server_response(self):
         server_url = require_server_url(self)

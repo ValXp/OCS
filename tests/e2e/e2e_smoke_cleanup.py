@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import unittest
 import uuid
@@ -15,11 +14,9 @@ from harness import (
 )
 
 
-SERVER_ENV = "OCS_E2E_SERVER_URL"
 SMOKE_STATUS_TERMS = {"queued", "active", "blocked", "done", "failed", "aborted", "timeout"}
 
 
-@unittest.skipUnless(os.environ.get(SERVER_ENV), f"set {SERVER_ENV} to run OpenCode E2E tests")
 class RealServerSmokeCleanupE2ETest(unittest.TestCase):
     def test_smoke_json_exercises_real_server_and_cleanup(self):
         server_url = require_server_url(self)

@@ -11,7 +11,7 @@ OCS is a lightweight OpenCode session orchestration CLI.
 - `tests/`
   - Unit and UX-contract tests for the CLI and API client.
 - `tests/e2e/`
-  - Skipped-by-default subprocess E2E tests for an existing OpenCode server.
+  - Subprocess E2E tests for an existing OpenCode server and default model.
 
 ## Prerequisites
 
@@ -116,31 +116,21 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 
 ## Manual E2E runbook
 
-Optional E2E tests live under `tests/e2e/` and are skipped by default because they are not discovered by the default unit command. They run `bin/ocs` as a subprocess against an existing OpenCode server selected with `OCS_E2E_SERVER_URL`; the harness does not start, manage, or mock a server. Tests that consume provider tokens additionally require `OCS_E2E_LIVE=1` and `OCS_LIVE_VALIDATE=1`.
+Optional E2E tests live under `tests/e2e/` and are not discovered by the default unit command. They run `bin/ocs` as a subprocess against an existing OpenCode server selected with `OCS_E2E_SERVER_URL`; the harness does not start, manage, mock, or skip the server. When discovered, E2E runs every E2E test, including provider-consuming tests, and fails if the real server or default model is unavailable.
 
-GitHub Actions/CI setup for these E2E suites is intentionally deferred. Run them manually from a local checkout when you have an OpenCode server and, for live tests, explicit approval to spend provider tokens.
+GitHub Actions/CI setup for these E2E suites is intentionally deferred. Run them manually from a local checkout when you have an OpenCode server and explicit approval to spend provider tokens.
 
-Run real-server E2E against an existing OpenCode server:
+Run the full real-server E2E suite against an existing OpenCode server:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
 ```
 
-This probes `capabilities --json`, session lifecycle, durable steer/watch/abort behavior, `smoke --json`, and stale disposable session cleanup using the real server. Provider-consuming E2E tests in the same directory skip unless the live gates are set.
-
-Run live-provider E2E only by explicit manual opt-in. These tests call the configured provider and may consume provider tokens. Both `OCS_E2E_LIVE=1` and `OCS_LIVE_VALIDATE=1` are required:
-
-```bash
-env -u OCS_E2E_AGENT -u OCS_E2E_MODEL PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1 OCS_E2E_LIVE=1 OCS_LIVE_VALIDATE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
-```
-
-Manual live-provider E2E tests cover direct `run_blocking --json` execution and local `run --store ... start --cleanup` orchestration through the server's default configured model, followed by persisted `status --json` and `collect --json` checks in later subprocesses.
+This probes `capabilities --json`, session lifecycle, durable steer/watch/abort behavior, `smoke --json`, stale disposable session cleanup, direct `run_blocking --json` execution, `live_validate --json`, and local `run --store ... start --cleanup` orchestration through the server's default configured model, followed by persisted `status --json` and `collect --json` checks in later subprocesses. The E2E harness enables `OCS_LIVE_VALIDATE=1` for its subprocesses so `live_validate` runs instead of stopping at the command-level safety gate.
 
 E2E environment variables:
 
-- `OCS_E2E_SERVER_URL`: existing OpenCode server URL. Required for tests under `tests/e2e/`.
-- `OCS_E2E_LIVE`: set to `1` to include manual live-provider E2E tests that may consume provider tokens.
-- `OCS_LIVE_VALIDATE`: set to `1` with `OCS_E2E_LIVE=1` to allow `live_validate` provider calls from E2E.
+- `OCS_E2E_SERVER_URL`: existing OpenCode server URL. Default for E2E: `http://127.0.0.1`.
 - `OCS_E2E_AGENT`: optional OpenCode agent passed to live E2E commands that support `--agent`.
 - `OCS_E2E_MODEL`: optional provider model passed to live E2E commands that support `--model`.
 - `OCS_E2E_TIMEOUT_SECONDS`: optional subprocess timeout in seconds. Default: `20`.

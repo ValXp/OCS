@@ -12,28 +12,20 @@ from urllib.request import Request, urlopen
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "bin" / "ocs"
 SERVER_ENV = "OCS_E2E_SERVER_URL"
-LIVE_E2E_ENV = "OCS_E2E_LIVE"
 LIVE_VALIDATE_ENV = "OCS_LIVE_VALIDATE"
 AGENT_ENV = "OCS_E2E_AGENT"
 MODEL_ENV = "OCS_E2E_MODEL"
 TIMEOUT_ENV = "OCS_E2E_TIMEOUT_SECONDS"
 DEFAULT_TIMEOUT_SECONDS = 20.0
+DEFAULT_SERVER_URL = "http://127.0.0.1"
 
 
 def require_server_url(testcase):
-    server_url = os.environ.get(SERVER_ENV)
-    if not server_url:
-        testcase.skipTest(f"set {SERVER_ENV} to run OpenCode E2E tests")
-    return server_url
+    return os.environ.get(SERVER_ENV) or DEFAULT_SERVER_URL
 
 
 def require_live_server_url(testcase):
-    server_url = require_server_url(testcase)
-    if os.environ.get(LIVE_E2E_ENV) != "1":
-        testcase.skipTest(f"set {LIVE_E2E_ENV}=1 to run token-consuming live OpenCode E2E tests")
-    if os.environ.get(LIVE_VALIDATE_ENV) != "1":
-        testcase.skipTest(f"set {LIVE_VALIDATE_ENV}=1 to allow live_validate provider calls")
-    return server_url
+    return require_server_url(testcase)
 
 
 def live_validate_selection_args():
@@ -50,11 +42,13 @@ def live_validate_selection_args():
 def run_ocs(*args, timeout_seconds=None):
     command = [sys.executable, str(CLI), *args]
     timeout = _timeout_seconds(timeout_seconds)
+    env = os.environ.copy()
+    env.setdefault(LIVE_VALIDATE_ENV, "1")
     try:
         return subprocess.run(
             command,
             cwd=REPO_ROOT,
-            env=os.environ.copy(),
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

@@ -1,11 +1,9 @@
 import json
-import os
 import unittest
 
 from harness import assert_success, load_json, require_server_url, run_ocs
 
 
-SERVER_ENV = "OCS_E2E_SERVER_URL"
 EXPECTED_ROUTE_METHODS = {
     "session": "POST",
     "v2_prompt": "POST",
@@ -17,7 +15,6 @@ EXPECTED_ROUTE_METHODS = {
 }
 
 
-@unittest.skipUnless(os.environ.get(SERVER_ENV), f"set {SERVER_ENV} to run OpenCode E2E tests")
 class CapabilitiesTracerE2ETest(unittest.TestCase):
     def test_capabilities_json_contract_against_configured_server(self):
         server_url = require_server_url(self)

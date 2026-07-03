@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import unittest
 import uuid
@@ -7,11 +6,9 @@ import uuid
 from harness import add_session_cleanup, assert_success, format_completed_process, load_json, require_server_url, run_ocs
 
 
-SERVER_ENV = "OCS_E2E_SERVER_URL"
 SESSION_MARKER_PREFIX = "ocs-e2e-lifecycle-"
 
 
-@unittest.skipUnless(os.environ.get(SERVER_ENV), f"set {SERVER_ENV} to run OpenCode E2E tests")
 class SessionLifecycleE2ETest(unittest.TestCase):
     def test_session_lifecycle_through_public_cli_without_prompt_execution(self):
         server_url = require_server_url(self)

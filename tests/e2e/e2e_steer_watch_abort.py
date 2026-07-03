@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import unittest
 import uuid
@@ -15,13 +14,11 @@ from harness import (
 )
 
 
-SERVER_ENV = "OCS_E2E_SERVER_URL"
 SESSION_MARKER_PREFIX = "ocs-e2e-steer-watch-abort-"
 WATCH_TIMEOUT_SECONDS = "1.0"
 STATUS_TERMS = {"queued", "active", "blocked", "done", "failed", "aborted", "timeout"}
 
 
-@unittest.skipUnless(os.environ.get(SERVER_ENV), f"set {SERVER_ENV} to run OpenCode E2E tests")
 class RealServerSteerWatchAbortE2ETest(unittest.TestCase):
     def test_steer_json_admits_durable_prompt_without_execution_claim(self):
         server_url = require_server_url(self)
