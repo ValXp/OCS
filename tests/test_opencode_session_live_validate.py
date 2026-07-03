@@ -18,6 +18,7 @@ class LiveValidationOpenCodeServer:
         self,
         *,
         reply_payload=None,
+        message_payload=None,
         wait_payload=None,
         wait_available=True,
         session_payloads=None,
@@ -29,6 +30,16 @@ class LiveValidationOpenCodeServer:
             "cost": 0.001,
             "tokens": {"input": 4, "output": 1, "total": 5},
             "text": "PONG",
+        }
+        self.message_payload = message_payload or {
+            "info": {
+                "id": "msg_assistant_live",
+                "sessionID": "ses_live_2",
+                "role": "assistant",
+                "cost": 0.001,
+                "tokens": {"input": 4, "output": 1, "total": 5},
+            },
+            "parts": [{"type": "text", "text": "PONG"}],
         }
         self.wait_payload = wait_payload or {}
         self.wait_available = wait_available
@@ -55,6 +66,7 @@ class LiveValidationOpenCodeServer:
                     paths = {
                         "/api/session": {"get": {}, "post": {}},
                         "/api/session/{sessionID}/prompt": {"post": {}},
+                        "/session/{sessionID}/message": {"post": {}},
                         "/session/{sessionID}/run": {"post": {}},
                         "/session/{sessionID}/reply": {"post": {}},
                     }
@@ -123,6 +135,9 @@ class LiveValidationOpenCodeServer:
                     return
                 if self.path == "/session/ses_live_2/reply":
                     self._write_json(parent.reply_payload)
+                    return
+                if self.path == "/session/ses_live_2/message":
+                    self._write_json(parent.message_payload)
                     return
                 self.send_error(404)
 
@@ -221,9 +236,10 @@ class LiveValidateCliTest(unittest.TestCase):
             payload["checks"]["wait"],
             {"available": True, "api_path": "/api/session/{sessionID}/wait", "status": "available"},
         )
-        self.assertTrue(payload["checks"]["legacy_run_reply"]["succeeded"])
-        self.assertTrue(payload["checks"]["legacy_run_reply"]["pong"])
-        self.assertEqual(payload["checks"]["legacy_run_reply"]["text"], "PONG")
+        self.assertTrue(payload["checks"]["run_blocking"]["succeeded"])
+        self.assertTrue(payload["checks"]["run_blocking"]["pong"])
+        self.assertEqual(payload["checks"]["run_blocking"]["text"], "PONG")
+        self.assertEqual(payload["checks"]["run_blocking"]["execution_strategy"], "session_message")
         self.assertEqual(
             payload["cleanup"],
             {
@@ -243,8 +259,7 @@ class LiveValidateCliTest(unittest.TestCase):
                 ("POST", "/api/session/ses_live_1/wait"),
                 ("GET", "/api/session/ses_live_1"),
                 ("POST", "/api/session"),
-                ("POST", "/session/ses_live_2/run"),
-                ("POST", "/session/ses_live_2/reply"),
+                ("POST", "/session/ses_live_2/message"),
                 ("DELETE", "/api/session/ses_live_1"),
                 ("GET", "/api/session/ses_live_1"),
                 ("DELETE", "/api/session/ses_live_2"),
@@ -257,7 +272,8 @@ class LiveValidateCliTest(unittest.TestCase):
         self.assertEqual(server.requests[3][2]["delivery"], "steer")
         self.assertEqual(server.requests[4][2], {})
         self.assertTrue(server.requests[6][2]["title"].startswith("ocs-live-test-"))
-        self.assertEqual(server.requests[7][2], {"message": "Reply exactly PONG."})
+        self.assertTrue(server.requests[7][2]["messageID"].startswith("msg_"))
+        self.assertEqual(server.requests[7][2]["parts"], [{"type": "text", "text": "Reply exactly PONG."}])
 
     def test_live_validate_passes_agent_and_model_to_disposable_sessions(self):
         with tempfile.TemporaryDirectory() as directory, LiveValidationOpenCodeServer() as server:

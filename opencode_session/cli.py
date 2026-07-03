@@ -1087,20 +1087,15 @@ def _run_live_validate(args, client):
 
         run_session_id = create_live_session("run_blocking")
         result["session_ids"]["run_blocking"] = run_session_id
-        run_response = client.run_session_response(run_session_id, LIVE_VALIDATE_PROMPT)
-        provider_error = _provider_failure(run_response.data)
-        if provider_error:
-            raise _LiveValidationFailure(f"provider failure: {provider_error}")
-        reply_response = client.reply_session_response(run_session_id)
-        provider_error = _provider_failure(reply_response.data)
-        if provider_error:
-            raise _LiveValidationFailure(f"provider failure: {provider_error}")
-        legacy_run_reply = _run_result(run_session_id, run_response.data, reply_response.data)
-        legacy_run_reply["succeeded"] = legacy_run_reply["status"] == "done"
-        legacy_run_reply["pong"] = _is_exact_pong(legacy_run_reply["text"])
-        if not legacy_run_reply["pong"]:
+        try:
+            run_blocking = _execute_blocking_prompt(client, run_session_id, LIVE_VALIDATE_PROMPT, capabilities)
+        except _BlockingProviderFailure as error:
+            raise _LiveValidationFailure(f"provider failure: {error}") from error
+        run_blocking["succeeded"] = run_blocking["status"] == "done"
+        run_blocking["pong"] = _is_exact_pong(run_blocking["text"])
+        if not run_blocking["pong"]:
             raise _LiveValidationFailure("live provider did not reply exactly PONG")
-        result["checks"]["legacy_run_reply"] = legacy_run_reply
+        result["checks"]["run_blocking"] = run_blocking
         result["status"] = "done"
         result["ok"] = True
         exit_code = 0
@@ -1147,9 +1142,10 @@ def _require_live_validate_capabilities(capabilities):
     reasons = unsupported_reasons(capabilities)
     if not capabilities["v2_prompt_support"]:
         reasons.append("missing v2 steer admission: POST /api/session/{sessionID}/prompt")
-    if not capabilities["legacy_fallback_available"]:
+    if not capabilities.get("blocking_execution_available"):
         reasons.append(
-            "missing legacy run_blocking execution: POST /session/{sessionID}/run + POST /session/{sessionID}/reply"
+            "missing blocking run execution: POST /session/{sessionID}/message or legacy "
+            "POST /session/{sessionID}/run + POST /session/{sessionID}/reply"
         )
     if reasons:
         raise _LiveValidationFailure(
@@ -1296,7 +1292,7 @@ def _is_exact_pong(text):
 def _format_live_validate_compact(result):
     steer = result["checks"].get("v2_steer") or {}
     wait = result["checks"].get("wait") or {}
-    legacy_run_reply = result["checks"].get("legacy_run_reply") or {}
+    run_blocking = result["checks"].get("run_blocking") or {}
     fields = [
         ("status", result["status"]),
         ("mode", result["mode"]),
@@ -1304,8 +1300,8 @@ def _format_live_validate_compact(result):
         ("version", result["version"]),
         ("steer", steer.get("status")),
         ("wait", wait.get("status")),
-        ("run", legacy_run_reply.get("status")),
-        ("pong", _compact_bool(legacy_run_reply.get("pong"))),
+        ("run", run_blocking.get("status")),
+        ("pong", _compact_bool(run_blocking.get("pong"))),
         ("cleanup", result["cleanup"].get("status")),
     ]
     return "live_validate " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
