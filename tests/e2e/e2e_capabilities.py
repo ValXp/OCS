@@ -11,6 +11,7 @@ EXPECTED_ROUTE_METHODS = {
     "v2_prompt": "POST",
     "v2_wait": "POST",
     "events": "GET",
+    "blocking_message": "POST",
     "legacy_run": "POST",
     "legacy_reply": "POST",
 }
@@ -35,6 +36,8 @@ class CapabilitiesTracerE2ETest(unittest.TestCase):
             "v2_prompt_support",
             "v2_wait_support",
             "event_support",
+            "blocking_message_available",
+            "blocking_execution_available",
             "legacy_fallback_available",
         ):
             self.assertIn(field, payload, context)
@@ -59,12 +62,19 @@ class CapabilitiesTracerE2ETest(unittest.TestCase):
         self.assertEqual(payload["v2_prompt_support"], routes["v2_prompt"]["available"], context)
         self.assertEqual(payload["v2_wait_support"], routes["v2_wait"]["available"], context)
         self.assertEqual(payload["event_support"], routes["events"]["available"], context)
+        self.assertEqual(payload["blocking_message_available"], routes["blocking_message"]["available"], context)
+        self.assertEqual(
+            payload["blocking_execution_available"],
+            routes["blocking_message"]["available"]
+            or (routes["legacy_run"]["available"] and routes["legacy_reply"]["available"]),
+            context,
+        )
         self.assertEqual(
             payload["legacy_fallback_available"],
             routes["legacy_run"]["available"] and routes["legacy_reply"]["available"],
             context,
         )
-        self.assertTrue(payload["v2_prompt_support"] or payload["legacy_fallback_available"], context)
+        self.assertTrue(payload["v2_prompt_support"] or payload["blocking_execution_available"], context)
 
     def _payload_context(self, payload):
         return "capabilities payload:\n" + json.dumps(payload, indent=2, sort_keys=True)

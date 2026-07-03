@@ -90,7 +90,7 @@ Run optional live-provider validation only when you explicitly allow provider ca
 OCS_LIVE_VALIDATE=1 bin/ocs live_validate --directory /path/to/target --server http://127.0.0.1:4096
 ```
 
-`live_validate` uses the minimal prompt `Reply exactly PONG.`. Expected token use is two minimal PONG prompts at most: one v2 steer admission and one legacy run/reply used by `run_blocking`. It records v2 steer admission, v2 wait availability, and the legacy run/reply result. Live validation creates disposable `ocs-live-` sessions and verifies they are deleted before the command exits. Use `--agent` and `--model` when you need to select a non-default configured OpenCode agent or model.
+`live_validate` uses the minimal prompt `Reply exactly PONG.`. Expected token use is two minimal PONG prompts at most: one v2 steer admission and one blocking `run_blocking` execution. Current OpenCode servers use `POST /session/{sessionID}/message` for blocking execution; older servers can still use legacy run/reply when available. Live validation records v2 steer admission, v2 wait availability, and the blocking execution result. Live validation creates disposable `ocs-live-` sessions and verifies they are deleted before the command exits. Use `--agent` and `--model` when you need to select a non-default configured OpenCode agent or model.
 
 Run a deterministic smoke check in no-live-model mode:
 
@@ -123,7 +123,7 @@ GitHub Actions/CI setup for these E2E suites is intentionally deferred. Run them
 Run real-server E2E against an existing OpenCode server:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
+PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
 ```
 
 This probes `capabilities --json`, session lifecycle, durable steer/watch/abort behavior, `smoke --json`, and stale disposable session cleanup using the real server. Provider-consuming E2E tests in the same directory skip unless the live gates are set.
@@ -131,10 +131,10 @@ This probes `capabilities --json`, session lifecycle, durable steer/watch/abort 
 Run live-provider E2E only by explicit manual opt-in. These tests call the configured provider and may consume provider tokens. Both `OCS_E2E_LIVE=1` and `OCS_LIVE_VALIDATE=1` are required:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 OCS_E2E_LIVE=1 OCS_LIVE_VALIDATE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
+env -u OCS_E2E_AGENT -u OCS_E2E_MODEL PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1 OCS_E2E_LIVE=1 OCS_LIVE_VALIDATE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
 ```
 
-Manual live-provider E2E tests cover direct `run_blocking --json` execution and local `run --store ... start --cleanup` orchestration, followed by persisted `status --json` and `collect --json` checks in later subprocesses.
+Manual live-provider E2E tests cover direct `run_blocking --json` execution and local `run --store ... start --cleanup` orchestration through the server's default configured model, followed by persisted `status --json` and `collect --json` checks in later subprocesses.
 
 E2E environment variables:
 

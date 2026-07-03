@@ -1489,6 +1489,7 @@ def _format_cleanup_command_compact(result):
 def _start_single_worker_run(args, store):
     run = _load_or_create_orchestration_run(store, args)
     worker = _ensure_orchestration_worker(run, args.worker, role=args.role)
+    worker["prompt"] = args.prompt
     run["status"] = "active"
     worker["status"] = "active"
     _save_orchestration_run(store, run)

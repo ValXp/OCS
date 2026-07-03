@@ -459,6 +459,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(worker["status"], "done")
         self.assertEqual(worker["session_id"], "ses_new")
         self.assertEqual(worker["role"], "worker")
+        self.assertEqual(worker["prompt"], "Finish the worker task")
         self.assertEqual(worker["prompt_ids"], ["msg_user_1"])
         self.assertEqual(worker["output_refs"], ["assistant:msg_assistant_1"])
         self.assertEqual(

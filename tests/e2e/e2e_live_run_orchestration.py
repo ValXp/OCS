@@ -125,7 +125,12 @@ class LiveRunBlockingAndOrchestrationE2ETest(unittest.TestCase):
         self.assert_nonempty_string(payload.get("session_id"), "session_id", context)
         self.assertEqual(payload.get("status"), "done", context)
         self.assertEqual(payload.get("terminal_state"), "done", context)
-        self.assertTrue((payload.get("fallback") or {}).get("used"), context)
+        self.assertIn(payload.get("execution_strategy"), {"session_message", "legacy_run_reply"}, context)
+        self.assertEqual(
+            (payload.get("fallback") or {}).get("used"),
+            payload.get("execution_strategy") == "legacy_run_reply",
+            context,
+        )
         self.assertEqual(str(payload.get("text", "")).strip(), "PONG", context)
 
         message_ids = payload.get("message_ids")

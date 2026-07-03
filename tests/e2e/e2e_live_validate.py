@@ -67,16 +67,21 @@ class LiveValidateE2ETest(unittest.TestCase):
         self.assertIn(steer.get("executed"), {True, False, "unknown"}, context)
         self.assertIsInstance(steer.get("execution_evidence"), dict, context)
 
-        legacy = payload.get("checks", {}).get("legacy_run_reply")
-        self.assertIsInstance(legacy, dict, context)
-        self.assertEqual(legacy.get("session_id"), session_ids.get("run_blocking"), context)
-        self.assertTrue(legacy.get("succeeded"), context)
-        self.assertEqual(legacy.get("status"), "done", context)
-        self.assertEqual(legacy.get("terminal_state"), "done", context)
-        self.assertTrue((legacy.get("fallback") or {}).get("used"), context)
-        self.assertTrue(legacy.get("pong"), context)
-        self.assertEqual(str(legacy.get("text", "")).strip(), "PONG", context)
-        self.assertIsInstance(legacy.get("message_ids"), dict, context)
+        run_blocking = payload.get("checks", {}).get("run_blocking")
+        self.assertIsInstance(run_blocking, dict, context)
+        self.assertEqual(run_blocking.get("session_id"), session_ids.get("run_blocking"), context)
+        self.assertTrue(run_blocking.get("succeeded"), context)
+        self.assertEqual(run_blocking.get("status"), "done", context)
+        self.assertEqual(run_blocking.get("terminal_state"), "done", context)
+        self.assertIn(run_blocking.get("execution_strategy"), {"session_message", "legacy_run_reply"}, context)
+        self.assertEqual(
+            (run_blocking.get("fallback") or {}).get("used"),
+            run_blocking.get("execution_strategy") == "legacy_run_reply",
+            context,
+        )
+        self.assertTrue(run_blocking.get("pong"), context)
+        self.assertEqual(str(run_blocking.get("text", "")).strip(), "PONG", context)
+        self.assertIsInstance(run_blocking.get("message_ids"), dict, context)
 
         cleanup = payload.get("cleanup")
         self.assertIsInstance(cleanup, dict, context)
