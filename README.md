@@ -6,6 +6,10 @@ Small utilities and Codex-facing assets for local automation.
 
 - `ralph-wiggum/`
   - A simple loop that repeatedly runs Codex against a fixed prompt until a `stop.md` file appears.
+- `bin/opencode-session`
+  - A lightweight OpenCode session orchestration CLI. The first command probes server capabilities.
+- `opencode_session/`
+  - Python standard-library API client and capability detection code used by the CLI.
 - `skills/tmux-codex-orchestrator/`
   - A Codex skill for running worker Codex instances inside tmux panes while keeping a controller pane in the foreground.
 
@@ -14,6 +18,41 @@ Small utilities and Codex-facing assets for local automation.
 - `codex` installed and available on `PATH`
 - `tmux` installed for the orchestration skill
 - A shell environment that can run the included Bash script
+- `python3` for `bin/opencode-session` and its tests
+
+## OpenCode session CLI
+
+Probe a local or configured OpenCode server:
+
+```bash
+bin/opencode-session capabilities --server http://127.0.0.1:4096
+```
+
+Default output is compact:
+
+```text
+health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/prompt wait=/api/session/{sessionID}/wait events=/api/event legacy=unsupported
+```
+
+Use `--json` for the stable capability contract:
+
+```bash
+bin/opencode-session capabilities --server http://127.0.0.1:4096 --json
+```
+
+Server selection:
+
+- `--server URL`
+- `OPENCODE_SERVER_URL`
+- `OPENCODE_SERVER`
+- Default: `http://127.0.0.1:4096`
+
+Exit codes:
+
+- `0`: capability probe succeeded
+- `64`: command usage error
+- `69`: server unavailable or health response unreadable
+- `70`: server is reachable but lacks required session/prompt capabilities
 
 ## Ralph Wiggum loop
 
