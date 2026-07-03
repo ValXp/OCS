@@ -23,6 +23,7 @@ from opencode_session.status import short_status
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 CLI_NAME = "ocs"
+SMOKE_SESSION_PREFIX = "ocs-smoke-"
 EX_UNAVAILABLE = 69
 EX_UNSUPPORTED = 70
 EX_DATAERR = 65
@@ -118,6 +119,26 @@ def main(argv=None):
         description="Admit steer or queue input to a session and report admission/progress state; does not wait for an assistant reply.",
     )
     _add_admission_arguments(steer_parser)
+
+    smoke_parser = subparsers.add_parser("smoke", help="run a deterministic no-live OpenCode smoke test")
+    smoke_parser.add_argument("--directory", default=".", help="target directory for disposable smoke sessions")
+    smoke_parser.add_argument("--prefix", default=SMOKE_SESSION_PREFIX, help="recognizable disposable session prefix")
+    smoke_parser.add_argument(
+        "--no-live-model",
+        action="store_true",
+        default=True,
+        help="keep smoke in no-live-model mode; live-provider validation is separate",
+    )
+    smoke_parser.add_argument("--event-timeout", type=_positive_float, default=1.0, help="event watch timeout in seconds")
+    smoke_parser.add_argument("--event-limit", type=_positive_int, default=3, help="maximum matching events to observe")
+    _add_server_argument(smoke_parser)
+    smoke_parser.add_argument("--json", action="store_true", help="print smoke result JSON")
+
+    cleanup_parser = subparsers.add_parser("cleanup", help="delete stale disposable smoke sessions")
+    cleanup_parser.add_argument("--directory", default=".", help="target directory to clean")
+    cleanup_parser.add_argument("--prefix", default=SMOKE_SESSION_PREFIX, help="disposable session prefix to match")
+    _add_server_argument(cleanup_parser)
+    cleanup_parser.add_argument("--json", action="store_true", help="print cleanup result JSON")
 
     permission_parser = subparsers.add_parser("permission")
     permission_subparsers = permission_parser.add_subparsers(dest="permission_command")
@@ -500,6 +521,12 @@ def main(argv=None):
     if args.command == "steer":
         return _admit_prompt(args, client, args.delivery)
 
+    if args.command == "smoke":
+        return _run_smoke(args, client)
+
+    if args.command == "cleanup":
+        return _cleanup_disposable_command(args, client)
+
     try:
         capabilities = detect_capabilities(client)
     except OpenCodeApiError as error:
@@ -613,6 +640,314 @@ def _handle_run_store_command(args):
             return EX_NOINPUT
         return EX_DATAERR
     return 64
+
+
+class _SmokeFailure(Exception):
+    def __init__(self, message, *, exit_code=EX_UNAVAILABLE):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def _run_smoke(args, client):
+    directory = str(Path(args.directory).resolve())
+    smoke_id = f"{args.prefix}{uuid.uuid4().hex[:10]}"
+    session_id = None
+    created_session_ids = []
+    result = {
+        "status": "active",
+        "ok": False,
+        "health": None,
+        "version": None,
+        "directory": directory,
+        "prefix": args.prefix,
+        "session_id": None,
+        "mode": "no-live-model",
+        "no_live_model": bool(args.no_live_model),
+        "checks": {},
+        "event_types": [],
+        "cleanup": {"status": "queued", "deleted": [], "verified": []},
+    }
+    failure = None
+    exit_code = EX_UNAVAILABLE
+
+    try:
+        capabilities = detect_capabilities(client)
+        result["capabilities"] = capabilities
+        result["health"] = capabilities["health"]
+        result["version"] = capabilities["version"]
+        result["checks"]["capabilities"] = {
+            "status": "done",
+            "health": capabilities["health"],
+            "version": capabilities["version"],
+        }
+        _require_smoke_capabilities(capabilities)
+
+        create_response = client.create_session_response(
+            directory,
+            title=smoke_id,
+            metadata={
+                "disposable": True,
+                "prefix": args.prefix,
+                "smoke_id": smoke_id,
+                "no_live_model": bool(args.no_live_model),
+            },
+        )
+        session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
+        if not session_id:
+            raise _SmokeFailure("session creation response did not include a session id")
+        created_session_ids.append(session_id)
+        result["session_id"] = session_id
+        result["checks"]["create"] = {"status": "done", "session_id": session_id, "title": smoke_id}
+
+        steer_message_id = f"{smoke_id}-steer"
+        steer_response = client.admit_prompt_response(
+            session_id,
+            {
+                "messageID": steer_message_id,
+                "parts": [{"type": "text", "text": "ocs smoke steer"}],
+                "delivery": "steer",
+            },
+            capabilities["route_availability"]["v2_prompt"]["path"],
+        )
+        admission = _admission_record(session_id, "steer", steer_message_id, steer_response.data, capabilities=capabilities)
+        result["checks"]["steer"] = admission
+
+        event_types = _collect_smoke_event_types(
+            client,
+            session_id,
+            capabilities["route_availability"]["events"]["path"],
+            args.event_timeout,
+            args.event_limit,
+        )
+        result["event_types"] = event_types
+        result["checks"]["events"] = {"status": "done", "types": event_types}
+
+        if args.no_live_model:
+            result["checks"]["run_blocking"] = _no_live_run_reply_result(session_id, capabilities)
+        else:
+            run_response = client.run_session_response(session_id, "ocs smoke")
+            provider_error = _provider_failure(run_response.data)
+            if provider_error:
+                raise _SmokeFailure(f"provider failure: {provider_error}")
+            reply_response = client.reply_session_response(session_id)
+            provider_error = _provider_failure(reply_response.data)
+            if provider_error:
+                raise _SmokeFailure(f"provider failure: {provider_error}")
+            result["checks"]["run_blocking"] = _run_result(session_id, run_response.data, reply_response.data)
+
+        result["checks"]["blockers"] = _smoke_blocker_summary(client, session_id)
+        result["status"] = "done"
+        result["ok"] = True
+        exit_code = 0
+    except _SmokeFailure as error:
+        failure = error
+        exit_code = error.exit_code
+        result["status"] = "failed"
+        result["error"] = str(error)
+    except OpenCodeApiError as error:
+        failure = error
+        result["status"] = "failed"
+        result["error"] = str(error)
+
+    cleanup = _cleanup_created_sessions(client, created_session_ids)
+    result["cleanup"] = cleanup
+    result["checks"]["cleanup"] = cleanup
+    if cleanup["status"] != "done" and failure is None:
+        failure = _SmokeFailure("disposable session cleanup failed")
+        result["status"] = "failed"
+        result["ok"] = False
+        result["error"] = str(failure)
+        exit_code = failure.exit_code
+
+    if failure is not None:
+        _print_error(f"smoke failed: {failure}; {_format_cleanup_summary(result['cleanup'])}")
+        return exit_code
+
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(_format_smoke_compact(result))
+    return 0
+
+
+def _require_smoke_capabilities(capabilities):
+    reasons = unsupported_reasons(capabilities)
+    if reasons:
+        raise _SmokeFailure(f"unsupported OpenCode server; {'; '.join(reasons)}", exit_code=EX_UNSUPPORTED)
+    if not capabilities["v2_prompt_support"]:
+        raise _SmokeFailure("unsupported OpenCode server; missing v2 steer admission", exit_code=EX_UNSUPPORTED)
+    if not capabilities["event_support"]:
+        raise _SmokeFailure(
+            "unsupported OpenCode server; missing event stream: GET /api/event or GET /event or GET /global/event",
+            exit_code=EX_UNSUPPORTED,
+        )
+    if not capabilities["legacy_fallback_available"]:
+        raise _SmokeFailure(
+            "unsupported route behavior: missing legacy POST /session/{sessionID}/run + POST /session/{sessionID}/reply; "
+            "v2 prompt admission is not execution",
+            exit_code=EX_UNSUPPORTED,
+        )
+
+
+def _collect_smoke_event_types(client, session_id, event_path, timeout, event_limit):
+    event_types = []
+    try:
+        with _watch_deadline(timeout):
+            for raw_event in client.stream_events(event_path):
+                event = normalize_event(raw_event, session_id)
+                if event is None:
+                    continue
+                event_type = event.get("type") or event.get("kind")
+                if event_type and event_type not in event_types:
+                    event_types.append(event_type)
+                if len(event_types) >= event_limit or is_terminal_event(event):
+                    break
+    except _WatchTimeout as error:
+        if event_types:
+            return event_types
+        raise _SmokeFailure(f"event stream timed out after {_format_timeout(timeout)}s") from error
+    if not event_types:
+        raise _SmokeFailure("event stream produced no events for disposable session")
+    return event_types
+
+
+def _smoke_blocker_summary(client, session_id):
+    try:
+        permissions = _filter_blockers_by_session(_collection_blockers(client.list_permissions_response().data, "permissions"), session_id)
+        questions = _filter_blockers_by_session(_collection_blockers(client.list_questions_response().data, "questions"), session_id)
+    except OpenCodeApiError as error:
+        return {"status": "skipped", "error": str(error), "permissions": None, "questions": None, "total": None}
+    return {"status": "done", "permissions": len(permissions), "questions": len(questions), "total": len(permissions) + len(questions)}
+
+
+def _cleanup_created_sessions(client, session_ids):
+    cleanup = {"status": "done", "deleted": [], "verified": [], "errors": []}
+    if not session_ids:
+        return cleanup
+    for session_id in session_ids:
+        error = _delete_and_verify_session(client, session_id)
+        if error is not None:
+            cleanup["errors"].append({"session_id": session_id, "error": str(error)})
+            cleanup["status"] = "failed"
+            continue
+        cleanup["deleted"].append(session_id)
+        cleanup["verified"].append(session_id)
+    return cleanup
+
+
+def _delete_and_verify_session(client, session_id):
+    try:
+        client.delete_session_response(session_id)
+    except OpenCodeApiError as error:
+        if error.status != 404:
+            return error
+    try:
+        client.get_session(session_id)
+    except OpenCodeApiError as error:
+        if error.status == 404:
+            return None
+        return error
+    return OpenCodeApiError(f"delete verification failed; session {session_id} is still readable")
+
+
+def _format_smoke_compact(result):
+    run = result["checks"].get("run_blocking") or {}
+    blockers = result["checks"].get("blockers") or {}
+    fields = [
+        ("status", result["status"]),
+        ("health", result["health"]),
+        ("version", result["version"]),
+        ("session", result["session_id"]),
+        ("steer", (result["checks"].get("steer") or {}).get("status")),
+        ("run", run.get("status")),
+        ("events", _compact_list(result.get("event_types"))),
+        ("blockers", blockers.get("total")),
+        ("cleanup", result["cleanup"].get("status")),
+        ("no_live_model", _compact_bool(result["no_live_model"])),
+    ]
+    return "smoke " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+
+
+def _format_cleanup_summary(cleanup):
+    return " ".join(
+        [
+            f"cleanup={cleanup.get('status')}",
+            f"deleted={len(cleanup.get('deleted') or [])}",
+            f"verified={len(cleanup.get('verified') or [])}",
+        ]
+    )
+
+
+def _cleanup_disposable_command(args, client):
+    directory = str(Path(args.directory).resolve()) if args.directory else None
+    try:
+        response = client.list_sessions_response()
+    except OpenCodeApiError as error:
+        _print_error(str(error))
+        return EX_UNAVAILABLE
+
+    sessions = [
+        session
+        for session in _collection_sessions(response.data)
+        if _is_disposable_session(session, prefix=args.prefix, directory=directory)
+    ]
+    result = {
+        "status": "done",
+        "prefix": args.prefix,
+        "directory": directory,
+        "stale": len(sessions),
+        "sessions": [_session_value(session, "id", "sessionID", "sessionId") for session in sessions],
+        "deleted": [],
+        "verified": [],
+        "errors": [],
+    }
+    for session in sessions:
+        session_id = _session_value(session, "id", "sessionID", "sessionId")
+        if not session_id:
+            result["status"] = "failed"
+            result["errors"].append({"session_id": None, "error": "session has no id"})
+            continue
+        error = _delete_and_verify_session(client, session_id)
+        if error is not None:
+            result["status"] = "failed"
+            result["errors"].append({"session_id": session_id, "error": str(error)})
+            continue
+        result["deleted"].append(session_id)
+        result["verified"].append(session_id)
+
+    if result["status"] != "done":
+        _print_error(f"cleanup failed: {_format_cleanup_command_compact(result)}")
+        return EX_UNAVAILABLE
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(_format_cleanup_command_compact(result))
+    return 0
+
+
+def _is_disposable_session(session, *, prefix, directory):
+    if directory is not None and _session_value(session, "directory", "cwd") != directory:
+        return False
+    metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+    values = [
+        _session_value(session, "id", "sessionID", "sessionId"),
+        _session_value(session, "title", "name"),
+        metadata.get("smoke_id"),
+        metadata.get("prefix"),
+        metadata.get("disposable_prefix"),
+    ]
+    return any(str(value).startswith(prefix) for value in values if value is not None)
+
+
+def _format_cleanup_command_compact(result):
+    fields = [
+        ("stale", result["stale"]),
+        ("deleted", len(result["deleted"])),
+        ("verified", len(result["verified"])),
+        ("prefix", result["prefix"]),
+        ("dir", result["directory"]),
+    ]
+    return "cleanup " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
 def _start_single_worker_run(args, store):
@@ -1002,6 +1337,16 @@ def _positive_float(value):
     return number
 
 
+def _positive_int(value):
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
 def _format_timeout(timeout):
     return str(timeout)
 
@@ -1038,6 +1383,23 @@ def _run_result(session_id, run_message, reply_message):
         "cost": _message_value(reply_message, "cost"),
         "tokens": _message_tokens(reply_message),
         "text": _message_text(reply_message),
+    }
+
+
+def _no_live_run_reply_result(session_id, capabilities):
+    routes = capabilities["route_availability"]
+    return {
+        "session_id": session_id,
+        "status": "skipped",
+        "reason": "no-live-model",
+        "raw_status": "skipped",
+        "terminal_state": "skipped",
+        "api_path": {"run": routes["legacy_run"]["path"], "reply": routes["legacy_reply"]["path"]},
+        "fallback": {
+            "available": capabilities["legacy_fallback_available"],
+            "strategy": "legacy_run_reply",
+            "used": False,
+        },
     }
 
 
