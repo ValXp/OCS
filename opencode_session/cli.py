@@ -9,6 +9,8 @@ from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import (
+    LEGACY_REPLY_PATH,
+    LEGACY_RUN_PATH,
     detect_capabilities,
     format_compact,
     legacy_run_reply_supported,
@@ -16,9 +18,11 @@ from opencode_session.capabilities import (
 )
 from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event, normalize_event
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
+from opencode_session.status import short_status
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
+CLI_NAME = "ocs"
 EX_UNAVAILABLE = 69
 EX_UNSUPPORTED = 70
 EX_DATAERR = 65
@@ -35,64 +39,71 @@ def main(argv=None):
     if argv and argv[0] == "run" and "--store" in argv[1:]:
         return _handle_run_store_command(_parse_run_store_args(argv[1:]))
 
-    parser = argparse.ArgumentParser(prog="opencode-session")
+    parser = argparse.ArgumentParser(prog=CLI_NAME, description="Agent-friendly OpenCode session CLI.")
     subparsers = parser.add_subparsers(dest="command")
 
-    capabilities_parser = subparsers.add_parser("capabilities")
+    capabilities_parser = subparsers.add_parser("capabilities", help="probe OpenCode API capabilities")
     _add_server_argument(capabilities_parser)
     capabilities_parser.add_argument("--json", action="store_true", help="print full JSON capability data")
 
-    create_parser = subparsers.add_parser("create")
+    create_parser = subparsers.add_parser("create", help="create a session")
     create_parser.add_argument("directory", help="target directory for the new session")
     create_parser.add_argument("--agent", help="agent name for the new session")
     create_parser.add_argument("--model", help="model name for the new session")
     _add_server_argument(create_parser)
     _add_output_arguments(create_parser)
 
-    list_parser = subparsers.add_parser("list")
+    list_parser = subparsers.add_parser("list", help="list sessions")
     list_parser.add_argument("--directory", help="only show sessions for this target directory")
     list_parser.add_argument("--agent", help="only show sessions for this agent")
     list_parser.add_argument("--model", help="only show sessions for this model")
-    list_parser.add_argument("--blockers", action="store_true", help="include pending permission/question counts")
+    list_parser.add_argument("--blockers", action="store_true", help="include permission/question blocker counts")
     _add_server_argument(list_parser)
     _add_output_arguments(list_parser)
 
     for name in ("inspect", "get"):
-        inspect_parser = subparsers.add_parser(name)
+        inspect_parser = subparsers.add_parser(name, help="inspect one session")
         inspect_parser.add_argument("session_id", help="session ID to inspect")
-        inspect_parser.add_argument("--blockers", action="store_true", help="include pending permission/question counts")
+        inspect_parser.add_argument("--blockers", action="store_true", help="include permission/question blocker counts")
         _add_server_argument(inspect_parser)
         _add_output_arguments(inspect_parser)
 
-    delete_parser = subparsers.add_parser("delete")
+    delete_parser = subparsers.add_parser("delete", help="delete a session")
     delete_parser.add_argument("session_id", help="session ID to delete")
     _add_server_argument(delete_parser)
     _add_output_arguments(delete_parser)
 
-    abort_parser = subparsers.add_parser("abort")
+    abort_parser = subparsers.add_parser("abort", help="abort a session")
     abort_parser.add_argument("session_id", help="session ID to abort")
     _add_server_argument(abort_parser)
     _add_output_arguments(abort_parser)
 
-    fork_parser = subparsers.add_parser("fork")
+    fork_parser = subparsers.add_parser("fork", help="fork a session")
     fork_parser.add_argument("session_id", help="session ID to fork")
     fork_parser.add_argument("--message-id", help="message ID to fork from")
     _add_server_argument(fork_parser)
     _add_output_arguments(fork_parser)
 
-    children_parser = subparsers.add_parser("children")
+    children_parser = subparsers.add_parser("children", help="list child sessions")
     children_parser.add_argument("session_id", help="parent session ID")
     children_parser.add_argument("--directory", help="only show child sessions for this target directory")
     _add_server_argument(children_parser)
     _add_output_arguments(children_parser)
 
-    watch_parser = subparsers.add_parser("watch")
+    watch_parser = subparsers.add_parser("watch", help="watch session progress events")
     watch_parser.add_argument("session_id", help="session ID to watch")
     _add_server_argument(watch_parser)
     watch_parser.add_argument("--json", action="store_true", help="print normalized event JSON lines")
     watch_parser.add_argument("--timeout", type=_positive_float, help="stop watching after this many seconds")
 
-    run_parser = subparsers.add_parser("run")
+    run_store_parser = subparsers.add_parser("run", help="manage local orchestration runs")
+    _add_run_store_arguments(run_store_parser)
+
+    run_parser = subparsers.add_parser(
+        "run_blocking",
+        help="execute a task and wait for an assistant reply",
+        description="Execute a task and wait for an assistant reply or terminal failure.",
+    )
     run_parser.add_argument("prompt", nargs="*", help="prompt text; stdin is used when omitted")
     run_parser.add_argument("--session", help="existing session ID to run in")
     run_parser.add_argument("--directory", help="target directory when creating a disposable session")
@@ -101,11 +112,12 @@ def main(argv=None):
     _add_server_argument(run_parser)
     run_parser.add_argument("--json", action="store_true", help="print normalized JSON result")
 
-    steer_parser = subparsers.add_parser("steer")
+    steer_parser = subparsers.add_parser(
+        "steer",
+        help="admit durable input to a session",
+        description="Admit steer or queue input to a session and report admission/progress state; does not wait for an assistant reply.",
+    )
     _add_admission_arguments(steer_parser)
-
-    queue_parser = subparsers.add_parser("queue")
-    _add_admission_arguments(queue_parser)
 
     permission_parser = subparsers.add_parser("permission")
     permission_subparsers = permission_parser.add_subparsers(dest="permission_command")
@@ -147,6 +159,8 @@ def main(argv=None):
     if args.command == "question" and not args.question_command:
         question_parser.print_help(sys.stderr)
         return 64
+    if args.command == "run":
+        return _handle_run_store_command(args)
 
     client = OpenCodeApiClient(args.server)
     if args.command == "permission":
@@ -154,7 +168,7 @@ def main(argv=None):
             try:
                 response = client.list_permissions_response()
             except OpenCodeApiError as error:
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
                 return EX_UNAVAILABLE
             if args.raw:
                 _write_raw(response.body)
@@ -164,16 +178,19 @@ def main(argv=None):
                 print(json.dumps(permissions, sort_keys=True))
                 return 0
             if permissions:
-                print("\n".join(_format_permission_compact(permission) for permission in permissions))
+                if len(permissions) > 1:
+                    print(_format_permission_table(permissions))
+                else:
+                    print(_format_permission_compact(permissions[0]))
             return 0
         if args.permission_command == "reply":
             try:
                 response = client.reply_permission_response(args.request_id, args.reply, message=args.message)
             except OpenCodeApiError as error:
                 if _is_permission_request_not_found_error(error, args.request_id):
-                    print(f"opencode-session: permission request not found: {args.request_id}", file=sys.stderr)
+                    _print_error(f"permission request not found: {args.request_id}")
                     return EX_NOINPUT
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
                 return EX_UNAVAILABLE
             if args.raw:
                 _write_raw(response.body)
@@ -190,7 +207,7 @@ def main(argv=None):
             try:
                 response = client.list_questions_response()
             except OpenCodeApiError as error:
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
                 return EX_UNAVAILABLE
             if args.raw:
                 _write_raw(response.body)
@@ -200,21 +217,24 @@ def main(argv=None):
                 print(json.dumps(questions, sort_keys=True))
                 return 0
             if questions:
-                print("\n".join(_format_question_compact(question) for question in questions))
+                if len(questions) > 1:
+                    print(_format_question_table(questions))
+                else:
+                    print(_format_question_compact(questions[0]))
             return 0
         if args.question_command == "answer":
             try:
                 answers = _question_answers_from_args(args)
             except ValueError as error:
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
                 return EX_DATAERR
             try:
                 response = client.answer_question_response(args.request_id, answers)
             except OpenCodeApiError as error:
                 if _is_question_request_not_found_error(error, args.request_id):
-                    print(f"opencode-session: question request not found: {args.request_id}", file=sys.stderr)
+                    _print_error(f"question request not found: {args.request_id}")
                     return EX_NOINPUT
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
                 return EX_UNAVAILABLE
             if args.raw:
                 _write_raw(response.body)
@@ -236,9 +256,9 @@ def main(argv=None):
                 response = client.reject_question_response(args.request_id)
             except OpenCodeApiError as error:
                 if _is_question_request_not_found_error(error, args.request_id):
-                    print(f"opencode-session: question request not found: {args.request_id}", file=sys.stderr)
+                    _print_error(f"question request not found: {args.request_id}")
                     return EX_NOINPUT
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
                 return EX_UNAVAILABLE
             if args.raw:
                 _write_raw(response.body)
@@ -250,14 +270,14 @@ def main(argv=None):
             print(_format_question_resolution_compact(result))
             return 0
 
-    if args.command == "run":
+    if args.command == "run_blocking":
         prompt = _read_prompt(args.prompt)
         session_id = args.session
         created_session_id = None
         try:
             if not legacy_run_reply_supported(client.require_openapi_doc()):
                 print(
-                    "opencode-session: unsupported route behavior: missing legacy POST "
+                    f"{CLI_NAME}: unsupported route behavior: missing legacy POST "
                     "/session/{sessionID}/run + POST /session/{sessionID}/reply; "
                     "v2 prompt admission is not execution",
                     file=sys.stderr,
@@ -278,7 +298,7 @@ def main(argv=None):
                 cleanup_error = _delete_disposable_session(client, created_session_id)
                 if cleanup_error:
                     _print_cleanup_error(cleanup_error)
-                print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+                _print_error(f"provider failure: {provider_error}")
                 return EX_UNAVAILABLE
             reply_response = client.reply_session_response(session_id)
             provider_error = _provider_failure(reply_response.data)
@@ -286,16 +306,16 @@ def main(argv=None):
                 cleanup_error = _delete_disposable_session(client, created_session_id)
                 if cleanup_error:
                     _print_cleanup_error(cleanup_error)
-                print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+                _print_error(f"provider failure: {provider_error}")
                 return EX_UNAVAILABLE
         except OpenCodeApiError as error:
             cleanup_error = _delete_disposable_session(client, created_session_id)
             if cleanup_error:
                 _print_cleanup_error(cleanup_error)
             if session_id is not None and _is_session_not_found_error(error):
-                print(f"opencode-session: session not found: {session_id}", file=sys.stderr)
+                _print_error(f"session not found: {session_id}")
             else:
-                print(f"opencode-session: api failure: {error}", file=sys.stderr)
+                _print_error(f"api failure: {error}")
             return EX_UNAVAILABLE
         cleanup_error = _delete_disposable_session(client, created_session_id)
         if cleanup_error:
@@ -313,7 +333,7 @@ def main(argv=None):
         try:
             response = client.create_session_response(directory, agent=args.agent, model=args.model)
         except OpenCodeApiError as error:
-            print(f"opencode-session: {error}", file=sys.stderr)
+            _print_error(str(error))
             return EX_UNAVAILABLE
         if args.raw:
             _write_raw(response.body)
@@ -329,7 +349,7 @@ def main(argv=None):
         try:
             response = client.list_sessions_response()
         except OpenCodeApiError as error:
-            print(f"opencode-session: {error}", file=sys.stderr)
+            _print_error(str(error))
             return EX_UNAVAILABLE
         if args.raw:
             _write_raw(response.body)
@@ -342,7 +362,7 @@ def main(argv=None):
             try:
                 blocker_counts = _load_blocker_counts(client)
             except OpenCodeApiError as error:
-                print(f"opencode-session: blocker summary failed: {error}", file=sys.stderr)
+                _print_error(f"blocker summary failed: {error}")
                 return EX_UNAVAILABLE
         if args.json:
             if blocker_counts is not None:
@@ -350,14 +370,17 @@ def main(argv=None):
             print(json.dumps(sessions, sort_keys=True))
             return 0
         if sessions:
-            print("\n".join(_format_session_compact(session, _counts_for_session(blocker_counts, session)) for session in sessions))
+            if len(sessions) > 1:
+                print(_format_session_table(sessions, blocker_counts))
+            else:
+                print(_format_session_compact(sessions[0], _counts_for_session(blocker_counts, sessions[0])))
         return 0
 
     if args.command in ("inspect", "get"):
         try:
             response = client.get_session_response(args.session_id)
         except OpenCodeApiError as error:
-            print(f"opencode-session: {error}", file=sys.stderr)
+            _print_error(str(error))
             return EX_UNAVAILABLE
         if args.raw:
             _write_raw(response.body)
@@ -368,7 +391,7 @@ def main(argv=None):
             try:
                 blocker_counts = _load_blocker_counts(client)
             except OpenCodeApiError as error:
-                print(f"opencode-session: blocker summary failed: {error}", file=sys.stderr)
+                _print_error(f"blocker summary failed: {error}")
                 return EX_UNAVAILABLE
         if args.json:
             if blocker_counts is not None:
@@ -405,9 +428,9 @@ def main(argv=None):
                     return 0
                 print(f"deleted id={_compact_value(args.session_id)} verified=unreadable")
                 return 0
-            print(f"opencode-session: {error}", file=sys.stderr)
+            _print_error(str(error))
             return EX_UNAVAILABLE
-        print(f"opencode-session: delete verification failed; session {args.session_id} is still readable", file=sys.stderr)
+        _print_error(f"delete verification failed; session {args.session_id} is still readable")
         return EX_UNAVAILABLE
 
     if args.command == "abort":
@@ -415,9 +438,9 @@ def main(argv=None):
             response = client.abort_session_response(args.session_id)
         except OpenCodeApiError as error:
             if _is_session_not_found_error(error):
-                print(f"opencode-session: session not found: {args.session_id}", file=sys.stderr)
+                _print_error(f"session not found: {args.session_id}")
             else:
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
             return EX_UNAVAILABLE
         if args.raw:
             _write_raw(response.body)
@@ -434,9 +457,9 @@ def main(argv=None):
             response = client.fork_session_response(args.session_id, message_id=args.message_id)
         except OpenCodeApiError as error:
             if _is_session_not_found_error(error):
-                print(f"opencode-session: session not found: {args.session_id}", file=sys.stderr)
+                _print_error(f"session not found: {args.session_id}")
             else:
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
             return EX_UNAVAILABLE
         if args.raw:
             _write_raw(response.body)
@@ -453,9 +476,9 @@ def main(argv=None):
             response = client.list_child_sessions_response(args.session_id)
         except OpenCodeApiError as error:
             if _is_session_not_found_error(error):
-                print(f"opencode-session: session not found: {args.session_id}", file=sys.stderr)
+                _print_error(f"session not found: {args.session_id}")
             else:
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
             return EX_UNAVAILABLE
         if args.raw:
             _write_raw(response.body)
@@ -465,27 +488,27 @@ def main(argv=None):
         if args.json:
             print(json.dumps(children, sort_keys=True))
         elif children:
-            print("\n".join(_format_session_compact(session) for session in children))
+            if len(children) > 1:
+                print(_format_session_table(children))
+            else:
+                print(_format_session_compact(children[0]))
         return 0
 
     if args.command == "watch":
         return _watch_session(args, client)
 
     if args.command == "steer":
-        return _admit_prompt(args, client, "steer")
-
-    if args.command == "queue":
-        return _admit_prompt(args, client, "queue")
+        return _admit_prompt(args, client, args.delivery)
 
     try:
         capabilities = detect_capabilities(client)
     except OpenCodeApiError as error:
-        print(f"opencode-session: {error}", file=sys.stderr)
+        _print_error(str(error))
         return EX_UNAVAILABLE
 
     reasons = unsupported_reasons(capabilities)
     if reasons:
-        print(f"opencode-session: unsupported OpenCode server; {'; '.join(reasons)}", file=sys.stderr)
+        _print_error(f"unsupported OpenCode server; {'; '.join(reasons)}")
         return EX_UNSUPPORTED
 
     if args.json:
@@ -496,7 +519,12 @@ def main(argv=None):
 
 
 def _parse_run_store_args(argv):
-    parser = argparse.ArgumentParser(prog="opencode-session run")
+    parser = argparse.ArgumentParser(prog=f"{CLI_NAME} run")
+    _add_run_store_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def _add_run_store_arguments(parser):
     parser.add_argument("--store", default=default_store_root(), help="local orchestration run store directory")
     run_subparsers = parser.add_subparsers(dest="run_command")
     run_subparsers.required = True
@@ -516,11 +544,11 @@ def _parse_run_store_args(argv):
     run_start_parser.add_argument("--session", dest="session_id", help="existing OpenCode session ID to attach")
     run_start_parser.add_argument("--agent", help="agent name when creating a worker session")
     run_start_parser.add_argument("--model", help="model name when creating a worker session")
-    run_start_parser.add_argument("--cleanup", action="store_true", help="delete a session created by this start after completion")
+    run_start_parser.add_argument("--cleanup", action="store_true", help="delete a session created by this start after it reaches done")
 
     run_status_parser = run_subparsers.add_parser("status")
     run_status_parser.add_argument("name", help="local run name")
-    run_status_parser.add_argument("--json", action="store_true", help="print complete run JSON data")
+    run_status_parser.add_argument("--json", action="store_true", help="print run JSON data")
 
     run_collect_parser = run_subparsers.add_parser("collect")
     run_collect_parser.add_argument("name", help="local run name")
@@ -541,7 +569,6 @@ def _parse_run_store_args(argv):
     run_worker_parser.add_argument("--timeout-seconds", type=int, help="worker timeout in seconds")
     run_worker_parser.add_argument("--blocker", dest="blockers", action="append", help="blocker reference")
     run_worker_parser.add_argument("--output-ref", dest="output_refs", action="append", help="output reference")
-    return parser.parse_args(argv)
 
 
 def _handle_run_store_command(args):
@@ -581,7 +608,7 @@ def _handle_run_store_command(args):
             print(format_run_compact(run))
             return 0
     except RunStoreError as error:
-        print(f"opencode-session: {error}", file=sys.stderr)
+        _print_error(str(error))
         if error.kind == "missing":
             return EX_NOINPUT
         return EX_DATAERR
@@ -591,8 +618,8 @@ def _handle_run_store_command(args):
 def _start_single_worker_run(args, store):
     run = _load_or_create_orchestration_run(store, args)
     worker = _ensure_orchestration_worker(run, args.worker, role=args.role)
-    run["status"] = "running"
-    worker["status"] = "running"
+    run["status"] = "active"
+    worker["status"] = "active"
     _save_orchestration_run(store, run)
 
     client = OpenCodeApiClient(run["server_url"])
@@ -605,7 +632,7 @@ def _start_single_worker_run(args, store):
                 "POST /session/{sessionID}/reply; v2 prompt admission is not execution"
             )
             _mark_orchestration_failed(store, run, worker, message)
-            print(f"opencode-session: {message}", file=sys.stderr)
+            _print_error(message)
             return EX_UNSUPPORTED
 
         session_id = args.session_id or worker.get("session_id")
@@ -630,7 +657,7 @@ def _start_single_worker_run(args, store):
         provider_error = _provider_failure(run_response.data)
         if provider_error:
             _mark_orchestration_failed(store, run, worker, provider_error)
-            print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+            _print_error(f"provider failure: {provider_error}")
             return EX_UNAVAILABLE
 
         event_route = capabilities["route_availability"]["events"]
@@ -641,11 +668,11 @@ def _start_single_worker_run(args, store):
         provider_error = _provider_failure(reply_response.data)
         if provider_error:
             _mark_orchestration_failed(store, run, worker, provider_error)
-            print(f"opencode-session: provider failure: {provider_error}", file=sys.stderr)
+            _print_error(f"provider failure: {provider_error}")
             return EX_UNAVAILABLE
     except OpenCodeApiError as error:
         _mark_orchestration_failed(store, run, worker, str(error))
-        print(f"opencode-session: api failure: {error}", file=sys.stderr)
+        _print_error(f"api failure: {error}")
         return EX_UNAVAILABLE
 
     result = _run_result(session_id, run_response.data, reply_response.data)
@@ -653,7 +680,7 @@ def _start_single_worker_run(args, store):
     worker["result"] = result
     worker["status"] = "done"
     worker["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
-    run["status"] = "complete"
+    run["status"] = "done"
     run["output_refs"] = [f"{worker['id']}:{assistant_message_id}"] if assistant_message_id else []
     if args.cleanup:
         worker["cleanup"] = {"requested": True, "deleted": False}
@@ -754,6 +781,10 @@ def _server_default():
     return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL
 
 
+def _print_error(message):
+    print(f"{CLI_NAME}: {message}", file=sys.stderr)
+
+
 def _utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -770,13 +801,19 @@ def _add_server_argument(parser):
 
 def _add_output_arguments(parser):
     output = parser.add_mutually_exclusive_group()
-    output.add_argument("--json", action="store_true", help="print complete JSON data")
+    output.add_argument("--json", action="store_true", help="print JSON data")
     output.add_argument("--raw", action="store_true", help="print raw API response body")
 
 
 def _add_admission_arguments(parser):
     parser.add_argument("session_id", help="session ID to admit input to")
-    parser.add_argument("text", help="prompt text to admit")
+    parser.add_argument("text", help="input text to admit")
+    parser.add_argument(
+        "--delivery",
+        choices=("steer", "queue"),
+        default="steer",
+        help="admission delivery mode; queue admits input without competing as a top-level command",
+    )
     parser.add_argument("--message-id", help="client-supplied prompt/message ID for idempotent admission")
     _add_server_argument(parser)
     _add_output_arguments(parser)
@@ -786,14 +823,14 @@ def _admit_prompt(args, client, delivery):
     try:
         capabilities = detect_capabilities(client)
     except OpenCodeApiError as error:
-        print(f"opencode-session: {error}", file=sys.stderr)
+        _print_error(str(error))
         return EX_UNAVAILABLE
 
     if not capabilities["v2_prompt_support"]:
         print(
-            "opencode-session: unsupported v2 prompt capability; durable prompt admission requires "
+            f"{CLI_NAME}: unsupported v2 prompt capability; durable prompt admission requires "
             "POST /api/session/{sessionID}/prompt or POST /session/{sessionID}/prompt_async; "
-            "legacy run/reply fallback is not used for steer/queue admission",
+            "legacy run/reply fallback is not used for steer admission",
             file=sys.stderr,
         )
         return EX_UNSUPPORTED
@@ -816,7 +853,13 @@ def _admit_prompt(args, client, delivery):
             if args.raw:
                 _write_raw(error.body or "")
                 return 0
-            admission = _admission_record(args.session_id, delivery, message_id, error.data)
+            admission = _admission_record(
+                args.session_id,
+                delivery,
+                message_id,
+                error.data,
+                capabilities=capabilities,
+            )
             if args.json:
                 print(json.dumps(admission, sort_keys=True))
             else:
@@ -824,13 +867,13 @@ def _admit_prompt(args, client, delivery):
             return 0
         if error.status in {400, 404, 405, 415, 422}:
             print(
-                f"opencode-session: unsupported v2 prompt behavior; {_api_error_detail(error)}; "
+                f"{CLI_NAME}: unsupported v2 prompt behavior; {_api_error_detail(error)}; "
                 "legacy run/reply fallback is not used",
                 file=sys.stderr,
             )
             return EX_UNSUPPORTED
         print(
-            f"opencode-session: prompt admission failed; {error}; legacy run/reply fallback is not used",
+            f"{CLI_NAME}: prompt admission failed; {error}; legacy run/reply fallback is not used",
             file=sys.stderr,
         )
         return EX_UNAVAILABLE
@@ -839,7 +882,7 @@ def _admit_prompt(args, client, delivery):
         _write_raw(response.body)
         return 0
 
-    admission = _admission_record(args.session_id, delivery, message_id, response.data)
+    admission = _admission_record(args.session_id, delivery, message_id, response.data, capabilities=capabilities)
     if args.json:
         print(json.dumps(admission, sort_keys=True))
     else:
@@ -877,13 +920,13 @@ def _watch_session(args, client):
             try:
                 capabilities = detect_capabilities(client)
             except OpenCodeApiError as error:
-                print(f"opencode-session: {error}", file=sys.stderr)
+                _print_error(str(error))
                 return EX_UNAVAILABLE
 
             event_route = capabilities["route_availability"]["events"]
             if not event_route["available"]:
                 print(
-                    "opencode-session: unsupported OpenCode server; missing event stream: GET /api/event or GET /event or GET /global/event",
+                    f"{CLI_NAME}: unsupported OpenCode server; missing event stream: GET /api/event or GET /event or GET /global/event",
                     file=sys.stderr,
                 )
                 return EX_UNSUPPORTED
@@ -901,7 +944,7 @@ def _watch_session(args, client):
                         return 0
             except OpenCodeApiError as error:
                 flush_pending_text()
-                print(f"opencode-session: event stream failure: {error}", file=sys.stderr)
+                _print_error(f"event stream failure: {error}")
                 if _is_invalid_event_stream(error):
                     return EX_DATAERR
                 return EX_UNAVAILABLE
@@ -909,7 +952,7 @@ def _watch_session(args, client):
             return 0
     except _WatchTimeout:
         flush_pending_text()
-        print(f"opencode-session: watch timed out after {_format_timeout(args.timeout)}s", file=sys.stderr)
+        _print_error(f"watch timed out after {_format_timeout(args.timeout)}s")
         return EX_TIMEOUT
 
 
@@ -979,13 +1022,19 @@ def _read_prompt(prompt_words):
 
 
 def _run_result(session_id, run_message, reply_message):
+    raw_status = _message_value(reply_message, "status") or "completed"
+    status = short_status(raw_status)
     return {
         "session_id": session_id,
         "message_ids": {
             "user": _message_value(run_message, "id", "messageID", "messageId"),
             "assistant": _message_value(reply_message, "id", "messageID", "messageId"),
         },
-        "status": _message_value(reply_message, "status") or "completed",
+        "status": status,
+        "raw_status": raw_status,
+        "terminal_state": status,
+        "api_path": {"run": LEGACY_RUN_PATH, "reply": LEGACY_REPLY_PATH},
+        "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
         "cost": _message_value(reply_message, "cost"),
         "tokens": _message_tokens(reply_message),
         "text": _message_text(reply_message),
@@ -995,14 +1044,14 @@ def _run_result(session_id, run_message, reply_message):
 def _format_run_compact(result):
     fields = [
         ("session", result["session_id"]),
+        ("status", result["status"]),
         ("user", result["message_ids"]["user"]),
         ("assistant", result["message_ids"]["assistant"]),
-        ("status", result["status"]),
         ("cost", result["cost"]),
         ("tokens", _tokens_total(result["tokens"])),
         ("text", result["text"]),
     ]
-    return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+    return "run_blocking " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
 def _message_value(message, *names):
@@ -1047,7 +1096,7 @@ def _message_text(message):
 
 
 def _print_cleanup_error(error):
-    print(f"opencode-session: api failure: disposable session cleanup failed: {error}", file=sys.stderr)
+    _print_error(f"api failure: disposable session cleanup failed: {error}")
 
 
 def _is_session_not_found_error(error):
@@ -1122,16 +1171,45 @@ def _format_session_compact(session, blocker_counts=None):
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
+def _format_session_table(sessions, blocker_counts=None):
+    headers = ["id", "title", "dir", "agent", "model", "cost", "tokens", "updated"]
+    if blocker_counts is not None:
+        headers.extend(["permissions", "questions", "blockers"])
+    rows = []
+    for session in sessions:
+        row = [
+            _session_value(session, "id", "sessionID", "sessionId"),
+            _session_value(session, "title"),
+            _session_value(session, "directory", "cwd"),
+            _session_value(session, "agent"),
+            _session_value(session, "model"),
+            _session_value(session, "cost"),
+            _session_tokens(session),
+            _session_value(session, "updatedAt", "updated_at"),
+        ]
+        if blocker_counts is not None:
+            counts = _counts_for_session(blocker_counts, session)
+            row.extend([counts["permissions"], counts["questions"], counts["total"]])
+        rows.append(row)
+    return _format_table(headers, rows)
+
+
+def _format_table(headers, rows):
+    lines = ["\t".join(headers)]
+    lines.extend("\t".join(_compact_value(value) for value in row) for row in rows)
+    return "\n".join(lines)
+
+
 def _format_admission_compact(admission):
     fields = [
-        ("state", admission["state"]),
         ("session", admission["session_id"]),
         ("message", admission["message_id"]),
         ("delivery", admission["delivery"]),
+        ("status", admission["status"]),
         ("admitted", admission["admitted_sequence"]),
         ("promoted", admission["promoted_sequence"]),
     ]
-    return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+    return "steer " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
 def _format_abort_compact(abort):
@@ -1155,14 +1233,15 @@ def _format_fork_compact(fork):
 def _abort_record(session_id, data):
     if not isinstance(data, dict):
         data = {}
-    status = _first_present(data, "status", "state")
+    raw_status = _first_present(data, "status", "state")
     accepted = _bool_value(_first_present(data, "accepted", "aborted", "ok", "success"))
-    if accepted is None and str(status or "").lower() in {"accepted", "aborting", "abort", "aborted", "cancelled", "canceled"}:
+    if accepted is None and str(raw_status or "").lower() in {"accepted", "aborting", "abort", "aborted", "cancelled", "canceled"}:
         accepted = True
     return {
         "session_id": _first_present(data, "sessionID", "sessionId", "session_id", "id") or session_id,
         "accepted": accepted if accepted is not None else True,
-        "status": status,
+        "status": short_status(raw_status),
+        "raw_status": raw_status,
         "response": data,
     }
 
@@ -1200,6 +1279,22 @@ def _format_permission_compact(permission):
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
+def _format_permission_table(permissions):
+    rows = []
+    for permission in permissions:
+        rows.append(
+            [
+                _first_present(permission, "id", "requestID", "requestId"),
+                _blocker_session_id(permission),
+                permission.get("permission"),
+                _compact_list(permission.get("patterns")),
+                _compact_list(permission.get("always")),
+                _tool_ref(permission.get("tool")),
+            ]
+        )
+    return _format_table(["id", "session", "permission", "patterns", "always", "tool"], rows)
+
+
 def _format_permission_reply_compact(result):
     fields = [("id", result["id"]), ("reply", result["reply"]), ("ok", _compact_bool(result["ok"]))]
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
@@ -1218,15 +1313,33 @@ def _format_question_compact(question):
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
+def _format_question_table(questions):
+    rows = []
+    for question in questions:
+        question_items = _question_items(question)
+        rows.append(
+            [
+                _first_present(question, "id", "requestID", "requestId"),
+                _blocker_session_id(question),
+                len(question_items),
+                _compact_list(item.get("header") for item in question_items if isinstance(item, dict)),
+                _first_question_text(question_items),
+                _tool_ref(question.get("tool")),
+            ]
+        )
+    return _format_table(["id", "session", "questions", "headers", "question", "tool"], rows)
+
+
 def _format_question_resolution_compact(result):
     fields = [("id", result["id"]), ("action", result["action"]), ("ok", _compact_bool(result["ok"]))]
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
-def _admission_record(session_id, delivery, message_id, data):
+def _admission_record(session_id, delivery, message_id, data, *, capabilities):
     if not isinstance(data, dict):
         data = {}
     info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    state = _first_present(data, "state", "status", "phase") or "admitted"
     return {
         "session_id": _first_present(data, "sessionID", "sessionId", "session_id")
         or _first_present(info, "sessionID", "sessionId", "session_id")
@@ -1235,7 +1348,16 @@ def _admission_record(session_id, delivery, message_id, data):
         or _first_present(info, "messageID", "messageId", "promptID", "promptId", "id")
         or message_id,
         "delivery": _first_present(data, "delivery", "deliveryMode", "mode") or delivery,
-        "state": _first_present(data, "state", "status", "phase") or "admitted",
+        "state": state,
+        "raw_state": state,
+        "status": short_status(state),
+        "terminal_state": None,
+        "api_path": capabilities["route_availability"]["v2_prompt"]["path"],
+        "fallback": {
+            "available": capabilities["legacy_fallback_available"],
+            "strategy": "legacy_run_reply",
+            "used": False,
+        },
         "admitted_sequence": _first_present(data, "admittedSequence", "admitted_sequence", "sequence"),
         "promoted_sequence": _first_present(data, "promotedSequence", "promoted_sequence"),
     }

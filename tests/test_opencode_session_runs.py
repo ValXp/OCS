@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class RunStoreCliTest(unittest.TestCase):
@@ -39,9 +39,9 @@ class RunStoreCliTest(unittest.TestCase):
             status = self.run_cli("run", "--store", store, "status", "demo")
 
         expected = (
-            f"run=demo status=initialized dir={directory} server=http://opencode.example "
-            "workers=0 pending=0 running=0 done=0 blocked=0 failed=0 "
-            "retries=0 timeout=- blockers=- outputs=-\n"
+            f"run=demo status=queued dir={directory} server=http://opencode.example "
+            "workers=0 queued=0 active=0 done=0 blocked=0 failed=0 aborted=0 timeout=0 "
+            "retries=0 timeout_s=- blockers=- outputs=-\n"
         )
         self.assertEqual(init.returncode, 0, init.stderr)
         self.assertEqual(init.stderr, "")
@@ -85,7 +85,7 @@ class RunStoreCliTest(unittest.TestCase):
                 "--prompt-id",
                 "prompt-123",
                 "--status",
-                "running",
+                "active",
                 "--retry-count",
                 "2",
                 "--timeout-seconds",
@@ -106,9 +106,9 @@ class RunStoreCliTest(unittest.TestCase):
             status = self.run_cli("run", "--store", store, "status", "demo")
 
         expected = (
-            f"run=demo status=initialized dir={directory} server=http://opencode.example "
-            "workers=1 pending=0 running=0 done=1 blocked=0 failed=0 "
-            "retries=0 timeout=- blockers=- outputs=-\n"
+            f"run=demo status=queued dir={directory} server=http://opencode.example "
+            "workers=1 queued=0 active=0 done=1 blocked=0 failed=0 aborted=0 timeout=0 "
+            "retries=0 timeout_s=- blockers=- outputs=-\n"
             "worker=builder role=build status=done session=ses_builder agent=build "
             "model=openai/gpt-5.5 deps=planner,qa prompts=prompt-123 "
             "retries=2 timeout=600 blockers=- outputs=file:summary.md\n"
@@ -116,6 +116,64 @@ class RunStoreCliTest(unittest.TestCase):
         self.assertEqual(init.returncode, 0, init.stderr)
         self.assertEqual(add_worker.returncode, 0, add_worker.stderr)
         self.assertEqual(update_worker.returncode, 0, update_worker.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(status.stderr, "")
+        self.assertEqual(status.stdout, expected)
+
+    def test_status_with_multiple_workers_prints_compact_worker_table(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            init = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                directory,
+                "--server",
+                "http://opencode.example",
+            )
+            builder = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "builder",
+                "--role",
+                "build",
+                "--session",
+                "ses_builder",
+                "--status",
+                "active",
+            )
+            reviewer = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "reviewer",
+                "--role",
+                "qa",
+                "--status",
+                "blocked",
+                "--blocker",
+                "#8",
+            )
+            status = self.run_cli("run", "--store", store, "status", "demo")
+
+        expected = (
+            f"run=demo status=queued dir={directory} server=http://opencode.example "
+            "workers=2 queued=0 active=1 done=0 blocked=1 failed=0 aborted=0 timeout=0 "
+            "retries=0 timeout_s=- blockers=- outputs=-\n"
+            "worker\trole\tstatus\tsession\tagent\tmodel\tdeps\tprompts\tretries\ttimeout\tblockers\toutputs\n"
+            "builder\tbuild\tactive\tses_builder\t-\t-\t-\t-\t0\t-\t-\t-\n"
+            "reviewer\tqa\tblocked\t-\t-\t-\t-\t-\t0\t-\t#8\t-\n"
+        )
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(builder.returncode, 0, builder.stderr)
+        self.assertEqual(reviewer.returncode, 0, reviewer.stderr)
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(status.stderr, "")
         self.assertEqual(status.stdout, expected)
@@ -175,7 +233,7 @@ class RunStoreCliTest(unittest.TestCase):
         self.assertEqual(payload["run_id"], "demo")
         self.assertEqual(payload["directory"], directory)
         self.assertEqual(payload["server_url"], "http://opencode.example")
-        self.assertEqual(payload["status"], "initialized")
+        self.assertEqual(payload["status"], "queued")
         self.assertEqual(payload["retry_count"], 0)
         self.assertIsNone(payload["timeout_seconds"])
         self.assertEqual(payload["blockers"], [])
@@ -220,7 +278,7 @@ class RunStoreCliTest(unittest.TestCase):
         self.assertEqual(payload["run_id"], "legacy")
         self.assertEqual(payload["directory"], directory)
         self.assertEqual(payload["server_url"], "http://127.0.0.1:4096")
-        self.assertEqual(payload["status"], "initialized")
+        self.assertEqual(payload["status"], "queued")
         self.assertEqual(payload["retry_count"], 0)
         self.assertIsNone(payload["timeout_seconds"])
         self.assertEqual(payload["blockers"], [])
@@ -236,7 +294,7 @@ class RunStoreCliTest(unittest.TestCase):
                     "model": None,
                     "dependencies": [],
                     "prompt_ids": [],
-                    "status": "pending",
+                    "status": "queued",
                     "retry_count": 0,
                     "timeout_seconds": None,
                     "blockers": [],
@@ -256,11 +314,11 @@ class RunStoreCliTest(unittest.TestCase):
 
         self.assertEqual(missing.returncode, 66)
         self.assertEqual(missing.stdout, "")
-        self.assertIn("opencode-session: run 'missing' not found", missing.stderr)
+        self.assertIn("ocs: run 'missing' not found", missing.stderr)
         self.assertIn(store, missing.stderr)
         self.assertEqual(corrupted.returncode, 65)
         self.assertEqual(corrupted.stdout, "")
-        self.assertIn("opencode-session: run record for 'broken' is corrupted", corrupted.stderr)
+        self.assertIn("ocs: run record for 'broken' is corrupted", corrupted.stderr)
         self.assertIn("workers must be an object", corrupted.stderr)
 
 

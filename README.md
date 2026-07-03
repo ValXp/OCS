@@ -6,7 +6,7 @@ Small utilities and Codex-facing assets for local automation.
 
 - `ralph-wiggum/`
   - A simple loop that repeatedly runs Codex against a fixed prompt until a `stop.md` file appears.
-- `bin/opencode-session`
+- `bin/ocs`
   - A lightweight OpenCode session orchestration CLI. The first command probes server capabilities.
 - `opencode_session/`
   - Python standard-library API client and capability detection code used by the CLI.
@@ -18,14 +18,14 @@ Small utilities and Codex-facing assets for local automation.
 - `codex` installed and available on `PATH`
 - `tmux` installed for the orchestration skill
 - A shell environment that can run the included Bash script
-- `python3` for `bin/opencode-session` and its tests
+- `python3` for `bin/ocs` and its tests
 
 ## OpenCode session CLI
 
 Probe a local or configured OpenCode server:
 
 ```bash
-bin/opencode-session capabilities --server http://127.0.0.1:4096
+bin/ocs capabilities --server http://127.0.0.1:4096
 ```
 
 Default output is compact:
@@ -37,8 +37,44 @@ health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/pro
 Use `--json` for the stable capability contract:
 
 ```bash
-bin/opencode-session capabilities --server http://127.0.0.1:4096 --json
+bin/ocs capabilities --server http://127.0.0.1:4096 --json
 ```
+
+Admit durable steering input to a session without promising an assistant reply:
+
+```bash
+bin/ocs steer ses_1 "Keep the current approach; focus the failure in auth refresh."
+```
+
+Compact `steer` output reports admission/progress state, not task completion:
+
+```text
+steer session=ses_1 message=msg_123 delivery=steer status=queued admitted=4 promoted=-
+```
+
+Queue delivery is exposed under `steer` rather than as a competing top-level command:
+
+```bash
+bin/ocs steer ses_1 "Run the benchmark after the current turn." --delivery queue
+```
+
+Execute a task and wait for an assistant reply or terminal failure with `run_blocking`:
+
+```bash
+bin/ocs run_blocking --session ses_1 "Finish the worker task"
+```
+
+Compact `run_blocking` output reports terminal state with short status terms:
+
+```text
+run_blocking session=ses_1 status=done user=msg_user_1 assistant=msg_assistant_1 cost=0.015 tokens=20 text="Worker finished."
+```
+
+Multi-item compact output uses a small table; single session or worker output stays one concise status line.
+
+JSON output includes API path, fallback behavior, session ID, prompt/message ID, worker role where applicable, and terminal state.
+
+Live-provider validation is separate and opt-in only. It must not run as part of default smoke tests or mocked API tests.
 
 Server selection:
 

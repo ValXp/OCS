@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class MockOpenCodeServer:

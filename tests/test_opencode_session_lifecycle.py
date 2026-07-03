@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class LifecycleOpenCodeServer:
@@ -91,7 +91,7 @@ class LifecycleCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(result.stdout, "abort session=ses_active accepted=true status=aborting\n")
+        self.assertEqual(result.stdout, "abort session=ses_active accepted=true status=active\n")
         self.assertEqual(server.requests, [("POST", "/session/ses_active/abort", {})])
 
     def test_fork_posts_legacy_route_with_message_id_and_prints_child_session(self):

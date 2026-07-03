@@ -1,5 +1,7 @@
 import json
 
+from opencode_session.status import short_status
+
 
 SUCCESS_STATUSES = {"complete", "completed", "done", "idle", "success", "succeeded"}
 ABORT_STATUSES = {"abort", "aborted", "cancelled", "canceled"}
@@ -65,6 +67,7 @@ def normalize_event(event, target_session_id=None):
 
     event_type = _first_present(sources, "type", "event", "name", "kind")
     status = _first_present(sources, "status", "state", "phase")
+    raw_status = _string_value(status)
     text = _text_value(sources)
     error_text = _error_text(error) or _string_value(_first_present(sources, "error", "reason"))
     tool_name = _tool_name(tool) or _string_value(_first_present([event, properties], "toolName", "tool_name", "tool"))
@@ -77,7 +80,9 @@ def normalize_event(event, target_session_id=None):
         "type": _string_value(event_type),
     }
     _set_if_present(normalized, "message_id", _message_id(sources))
-    _set_if_present(normalized, "status", _string_value(status))
+    _set_if_present(normalized, "status", short_status(raw_status))
+    if raw_status is not None and short_status(raw_status) != raw_status:
+        normalized["raw_status"] = raw_status
     _set_if_present(normalized, "delivery", _string_value(_first_present(sources, "delivery", "deliveryMode", "mode")))
     _set_if_present(normalized, "text", text)
     _set_if_present(normalized, "tool", tool_name)
@@ -157,12 +162,14 @@ def format_watch_event(event):
 
 
 def is_terminal_event(event):
-    status = str(event.get("status") or "").lower()
-    return status in SUCCESS_STATUSES or status in ABORT_STATUSES
+    status = short_status(event.get("status"))
+    if status in {"done", "aborted", "timeout"}:
+        return True
+    return status == "failed" and event.get("kind") == "status"
 
 
 def is_abort_event(event):
-    return str(event.get("status") or "").lower() in ABORT_STATUSES
+    return short_status(event.get("status")) == "aborted"
 
 
 def _event_from_parts(event_name, event_id, data_lines):

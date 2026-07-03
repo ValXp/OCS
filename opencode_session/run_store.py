@@ -3,9 +3,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from opencode_session.status import short_status
+
 
 SCHEMA_VERSION = 1
-DEFAULT_RUN_STATUS = "initialized"
+DEFAULT_RUN_STATUS = "queued"
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 
 
@@ -52,7 +54,7 @@ class RunStore:
 
         for key in ("role", "session_id", "agent", "model", "status", "retry_count", "timeout_seconds"):
             if changes.get(key) is not None:
-                worker[key] = changes[key]
+                worker[key] = short_status(changes[key]) if key == "status" else changes[key]
         for key in ("dependencies", "prompt_ids", "blockers", "output_refs"):
             if changes.get(key) is not None:
                 worker[key] = changes[key]
@@ -91,7 +93,7 @@ class RunStore:
 
 
 def default_store_root():
-    return os.environ.get("OPENCODE_SESSION_RUN_STORE") or str(Path.cwd() / ".opencode-session" / "runs")
+    return os.environ.get("OCS_RUN_STORE") or str(Path.cwd() / ".ocs" / "runs")
 
 
 def format_run_compact(run):
@@ -103,20 +105,24 @@ def format_run_compact(run):
         ("dir", run.get("directory")),
         ("server", run.get("server_url")),
         ("workers", len(workers)),
-        ("pending", counts["pending"]),
-        ("running", counts["running"]),
+        ("queued", counts["queued"]),
+        ("active", counts["active"]),
         ("done", counts["done"]),
         ("blocked", counts["blocked"]),
         ("failed", counts["failed"]),
+        ("aborted", counts["aborted"]),
+        ("timeout", counts["timeout"]),
         ("retries", run.get("retry_count")),
-        ("timeout", run.get("timeout_seconds")),
+        ("timeout_s", run.get("timeout_seconds")),
         ("blockers", _compact_list(run.get("blockers"))),
         ("outputs", _compact_list(run.get("output_refs"))),
     ]
     lines = [" ".join(f"{key}={_compact_value(value)}" for key, value in fields)]
-    for worker_id in sorted(workers):
-        worker = _normalize_worker(workers[worker_id], worker_id)
-        lines.append(_format_worker_compact(worker))
+    worker_records = [_normalize_worker(workers[worker_id], worker_id) for worker_id in sorted(workers)]
+    if len(worker_records) > 1:
+        lines.append(_format_worker_table(worker_records))
+    elif worker_records:
+        lines.append(_format_worker_compact(worker_records[0]))
     return "\n".join(lines)
 
 
@@ -131,6 +137,7 @@ def _normalize_run(run, *, fallback_name):
     if not normalized.get("server_url"):
         normalized["server_url"] = DEFAULT_SERVER_URL
     normalized.setdefault("status", DEFAULT_RUN_STATUS)
+    normalized["status"] = short_status(normalized["status"])
     normalized.setdefault("retry_count", 0)
     normalized.setdefault("timeout_seconds", None)
     normalized.setdefault("blockers", [])
@@ -155,7 +162,7 @@ def _default_worker(worker_id):
         "model": None,
         "dependencies": [],
         "prompt_ids": [],
-        "status": "pending",
+        "status": "queued",
         "retry_count": 0,
         "timeout_seconds": None,
         "blockers": [],
@@ -174,7 +181,9 @@ def _normalize_worker(worker, worker_id):
     if normalized.get("retry_count") is None:
         normalized["retry_count"] = 0
     if not normalized.get("status"):
-        normalized["status"] = "pending"
+        normalized["status"] = "queued"
+    else:
+        normalized["status"] = short_status(normalized["status"])
     return normalized
 
 
@@ -196,10 +205,35 @@ def _format_worker_compact(worker):
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
+def _format_worker_table(workers):
+    rows = []
+    for worker in workers:
+        rows.append(
+            [
+                worker.get("id"),
+                worker.get("role"),
+                worker.get("status"),
+                worker.get("session_id"),
+                worker.get("agent"),
+                worker.get("model"),
+                _compact_list(worker.get("dependencies")),
+                _compact_list(worker.get("prompt_ids")),
+                worker.get("retry_count"),
+                worker.get("timeout_seconds"),
+                _compact_list(worker.get("blockers")),
+                _compact_list(worker.get("output_refs")),
+            ]
+        )
+    return _format_table(
+        ["worker", "role", "status", "session", "agent", "model", "deps", "prompts", "retries", "timeout", "blockers", "outputs"],
+        rows,
+    )
+
+
 def _worker_status_counts(workers):
-    counts = {"pending": 0, "running": 0, "done": 0, "blocked": 0, "failed": 0}
+    counts = {"queued": 0, "active": 0, "done": 0, "blocked": 0, "failed": 0, "aborted": 0, "timeout": 0}
     for worker in workers.values():
-        status = worker.get("status") if isinstance(worker, dict) else None
+        status = short_status(worker.get("status")) if isinstance(worker, dict) else None
         if status in counts:
             counts[status] += 1
     return counts
@@ -218,6 +252,12 @@ def _compact_value(value):
     if any(character.isspace() for character in text):
         return json.dumps(text)
     return text
+
+
+def _format_table(headers, rows):
+    lines = ["\t".join(headers)]
+    lines.extend("\t".join(_compact_value(value) for value in row) for row in rows)
+    return "\n".join(lines)
 
 
 def _utc_now():

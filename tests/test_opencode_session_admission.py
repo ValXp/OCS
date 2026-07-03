@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class AdmissionOpenCodeServer:
@@ -92,7 +92,7 @@ class AdmissionCliTest(unittest.TestCase):
             check=False,
         )
 
-    def test_steer_admits_prompt_and_prints_admitted_state(self):
+    def test_steer_admits_input_and_prints_queued_admission_status(self):
         response = {
             "sessionID": "ses_1",
             "messageID": "msg_steer_1",
@@ -116,7 +116,7 @@ class AdmissionCliTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             result.stdout,
-            "state=admitted session=ses_1 message=msg_steer_1 delivery=steer admitted=4 promoted=-\n",
+            "steer session=ses_1 message=msg_steer_1 delivery=steer status=queued admitted=4 promoted=-\n",
         )
         self.assertEqual(
             server.requests,
@@ -135,7 +135,7 @@ class AdmissionCliTest(unittest.TestCase):
             ],
         )
 
-    def test_queue_admits_prompt_and_json_reports_promoted_state_when_observed(self):
+    def test_steer_delivery_queue_json_reports_admission_metadata_when_promoted(self):
         response = {
             "sessionID": "ses_1",
             "promptID": "prompt_queue_1",
@@ -147,9 +147,11 @@ class AdmissionCliTest(unittest.TestCase):
 
         with AdmissionOpenCodeServer(prompt_response=response) as server:
             result = self.run_cli(
-                "queue",
+                "steer",
                 "ses_1",
                 "After this, run the benchmark.",
+                "--delivery",
+                "queue",
                 "--message-id",
                 "msg_queue_1",
                 "--json",
@@ -166,6 +168,11 @@ class AdmissionCliTest(unittest.TestCase):
                 "message_id": "prompt_queue_1",
                 "delivery": "queue",
                 "state": "promoted",
+                "status": "active",
+                "raw_state": "promoted",
+                "terminal_state": None,
+                "api_path": "/api/session/{sessionID}/prompt",
+                "fallback": {"available": False, "strategy": "legacy_run_reply", "used": False},
                 "admitted_sequence": 5,
                 "promoted_sequence": 6,
             },
@@ -208,7 +215,7 @@ class AdmissionCliTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             result.stdout,
-            "state=admitted session=ses_1 message=msg_repeat_1 delivery=steer admitted=8 promoted=-\n",
+            "steer session=ses_1 message=msg_repeat_1 delivery=steer status=queued admitted=8 promoted=-\n",
         )
 
     def test_unsupported_v2_prompt_behavior_reports_no_legacy_fallback(self):
@@ -259,9 +266,11 @@ class AdmissionCliTest(unittest.TestCase):
 
         with AdmissionOpenCodeServer(doc=doc) as server:
             result = self.run_cli(
-                "queue",
+                "steer",
                 "ses_1",
                 "After this, write tests for the module.",
+                "--delivery",
+                "queue",
                 "--message-id",
                 "msg_no_prompt_1",
                 "--server",

@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class WatchOpenCodeServer:
@@ -158,9 +158,9 @@ class WatchCliTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             result.stdout,
-            "admission session=ses_target message=msg_1 delivery=queue status=admitted\n"
-            "tool session=ses_target message=msg_1 call=call_1 tool=bash status=running\n"
-            "status session=ses_target status=completed\n",
+            "admission session=ses_target message=msg_1 delivery=queue status=queued\n"
+            "tool session=ses_target message=msg_1 call=call_1 tool=bash status=active\n"
+            "status session=ses_target status=done\n",
         )
         self.assertEqual(
             server.requests,
@@ -212,7 +212,7 @@ class WatchCliTest(unittest.TestCase):
         self.assertEqual(
             result.stdout,
             "text session=ses_target message=msg_assistant chars=11 text=\"Hello world\"\n"
-            "status session=ses_target status=completed\n",
+            "status session=ses_target status=done\n",
         )
 
     def test_watch_json_outputs_normalized_events_for_automation(self):
@@ -273,7 +273,8 @@ class WatchCliTest(unittest.TestCase):
                     "session_id": "ses_target",
                     "type": "permission.requested",
                     "message_id": "msg_assistant",
-                    "status": "pending",
+                    "status": "queued",
+                    "raw_status": "pending",
                     "blocker": "permission",
                     "blocker_id": "perm_1",
                     "question": "Allow bash?",
@@ -282,7 +283,8 @@ class WatchCliTest(unittest.TestCase):
                     "kind": "status",
                     "session_id": "ses_target",
                     "type": "session.status",
-                    "status": "completed",
+                    "status": "done",
+                    "raw_status": "completed",
                 },
             ],
         )
@@ -303,7 +305,7 @@ class WatchCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(result.stdout, "status session=ses_target status=completed\n")
+        self.assertEqual(result.stdout, "status session=ses_target status=done\n")
 
     def test_watch_malformed_stream_exits_with_stable_data_error(self):
         with WatchOpenCodeServer(raw_event_body="data: {not-json\n\n") as server:
@@ -353,10 +355,10 @@ class WatchCliTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             result.stdout,
-            "prompt session=ses_target message=msg_user status=running\n"
-            "step session=ses_target message=msg_assistant step=step_1 status=started title=\"Plan changes\"\n"
+            "prompt session=ses_target message=msg_user status=active\n"
+            "step session=ses_target message=msg_assistant step=step_1 status=active title=\"Plan changes\"\n"
             "error session=ses_target message=msg_assistant status=failed error=\"provider overloaded\"\n"
-            "status session=ses_target status=completed\n",
+            "status session=ses_target status=done\n",
         )
 
 

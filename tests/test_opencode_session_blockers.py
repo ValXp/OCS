@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class BlockerOpenCodeServer:
@@ -161,6 +161,39 @@ class BlockerCliTest(unittest.TestCase):
             result.stdout,
             'id=per_build session=ses_build permission=bash patterns="pytest tests/test_auth.py" '
             'always="pytest *" tool=-\n',
+        )
+        self.assertEqual(server.requests, [("GET", "/permission", None)])
+
+    def test_permission_list_multiple_requests_prints_compact_table(self):
+        permissions = [
+            {
+                "id": "per_build",
+                "sessionID": "ses_build",
+                "permission": "bash",
+                "patterns": ["pytest tests/test_auth.py"],
+                "always": ["pytest *"],
+                "metadata": {},
+            },
+            {
+                "id": "per_plan",
+                "sessionID": "ses_plan",
+                "permission": "edit",
+                "patterns": ["docs/plan.md"],
+                "always": [],
+                "metadata": {},
+            },
+        ]
+
+        with BlockerOpenCodeServer(permissions=permissions) as server:
+            result = self.run_cli("permission", "list", "--server", server.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            result.stdout,
+            "id\tsession\tpermission\tpatterns\talways\ttool\n"
+            "per_build\tses_build\tbash\t\"pytest tests/test_auth.py\"\t\"pytest *\"\t-\n"
+            "per_plan\tses_plan\tedit\tdocs/plan.md\t-\t-\n",
         )
         self.assertEqual(server.requests, [("GET", "/permission", None)])
 

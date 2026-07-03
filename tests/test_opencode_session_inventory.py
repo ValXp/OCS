@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class InventoryOpenCodeServer:
@@ -199,6 +199,43 @@ class SessionInventoryCliTest(unittest.TestCase):
             result.stdout,
             f'id=ses_build title="Build task" dir={directory} agent=build model=openai/gpt-5.5 '
             "cost=1.25 tokens=150 created=2026-07-02T00:00:00Z updated=2026-07-02T00:00:02Z\n",
+        )
+        self.assertEqual(server.requests, [("GET", "/api/session", None)])
+
+    def test_list_multiple_sessions_prints_compact_table(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other_directory:
+            sessions = [
+                {
+                    "id": "ses_build",
+                    "title": "Build task",
+                    "directory": directory,
+                    "agent": "build",
+                    "model": "openai/gpt-5.5",
+                    "cost": 1.25,
+                    "tokens": {"input": 100, "output": 50, "total": 150},
+                    "updatedAt": "2026-07-02T00:00:02Z",
+                },
+                {
+                    "id": "ses_plan",
+                    "title": "Plan task",
+                    "directory": other_directory,
+                    "agent": "plan",
+                    "model": "openai/gpt-5.5",
+                    "cost": 0.5,
+                    "tokens": {"input": 20, "output": 10, "total": 30},
+                    "updatedAt": "2026-07-02T00:01:02Z",
+                },
+            ]
+            with InventoryOpenCodeServer(sessions=sessions) as server:
+                result = self.run_cli("list", "--server", server.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            result.stdout,
+            "id\ttitle\tdir\tagent\tmodel\tcost\ttokens\tupdated\n"
+            f"ses_build\t\"Build task\"\t{directory}\tbuild\topenai/gpt-5.5\t1.25\t150\t2026-07-02T00:00:02Z\n"
+            f"ses_plan\t\"Plan task\"\t{other_directory}\tplan\topenai/gpt-5.5\t0.5\t30\t2026-07-02T00:01:02Z\n",
         )
         self.assertEqual(server.requests, [("GET", "/api/session", None)])
 

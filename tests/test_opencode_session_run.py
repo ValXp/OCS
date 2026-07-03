@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class RunOpenCodeServer:
@@ -123,10 +123,10 @@ class RunCliTest(unittest.TestCase):
             check=False,
         )
 
-    def test_run_existing_session_prints_compact_assistant_reply(self):
+    def test_run_blocking_existing_session_prints_compact_terminal_reply(self):
         with RunOpenCodeServer() as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--server",
@@ -138,8 +138,8 @@ class RunCliTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             result.stdout,
-            "session=ses_existing user=msg_user_1 assistant=msg_assistant_1 "
-            "status=completed cost=0.015 tokens=20 text=\"Worker finished.\"\n",
+            "run_blocking session=ses_existing status=done user=msg_user_1 assistant=msg_assistant_1 "
+            "cost=0.015 tokens=20 text=\"Worker finished.\"\n",
         )
         self.assertEqual(
             server.requests,
@@ -153,7 +153,7 @@ class RunCliTest(unittest.TestCase):
     def test_run_without_session_creates_and_cleans_up_disposable_session(self):
         with tempfile.TemporaryDirectory() as directory, RunOpenCodeServer() as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--directory",
                 directory,
                 "--server",
@@ -178,7 +178,7 @@ class RunCliTest(unittest.TestCase):
     def test_run_missing_session_has_distinct_error(self):
         with RunOpenCodeServer() as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_missing",
                 "--server",
@@ -206,7 +206,7 @@ class RunCliTest(unittest.TestCase):
             }
         ) as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--server",
@@ -223,7 +223,7 @@ class RunCliTest(unittest.TestCase):
     def test_run_invalid_api_response_has_distinct_api_failure(self):
         with RunOpenCodeServer(doc_body="not json") as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--server",
@@ -241,7 +241,7 @@ class RunCliTest(unittest.TestCase):
     def test_run_doc_404_is_api_failure_not_missing_session(self):
         with RunOpenCodeServer(doc_status=404) as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--server",
@@ -261,7 +261,7 @@ class RunCliTest(unittest.TestCase):
             run_payload={"id": "msg_user_1", "status": "failed", "error": "provider rejected request"}
         ) as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--server",
@@ -290,7 +290,7 @@ class RunCliTest(unittest.TestCase):
             }
         ) as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--server",
@@ -314,7 +314,7 @@ class RunCliTest(unittest.TestCase):
     def test_run_reads_prompt_from_stdin_when_arguments_are_omitted(self):
         with RunOpenCodeServer() as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--server",
@@ -333,10 +333,10 @@ class RunCliTest(unittest.TestCase):
             ],
         )
 
-    def test_run_json_output_includes_message_ids_status_cost_tokens_and_text(self):
+    def test_run_blocking_json_output_includes_paths_fallback_and_terminal_state(self):
         with RunOpenCodeServer() as server:
             result = self.run_cli(
-                "run",
+                "run_blocking",
                 "--session",
                 "ses_existing",
                 "--json",
@@ -352,7 +352,14 @@ class RunCliTest(unittest.TestCase):
             {
                 "session_id": "ses_existing",
                 "message_ids": {"user": "msg_user_1", "assistant": "msg_assistant_1"},
-                "status": "completed",
+                "status": "done",
+                "raw_status": "completed",
+                "terminal_state": "done",
+                "api_path": {
+                    "run": "/session/{sessionID}/run",
+                    "reply": "/session/{sessionID}/reply",
+                },
+                "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
                 "cost": 0.015,
                 "tokens": {"input": 12, "output": 8, "total": 20},
                 "text": "Worker finished.",

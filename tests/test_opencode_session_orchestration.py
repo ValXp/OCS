@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "opencode-session"
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class OrchestrationOpenCodeServer:
@@ -157,12 +157,12 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertIn("admission session=ses_new message=msg_user_1 delivery=run status=admitted\n", result.stdout)
-        self.assertIn("status session=ses_new status=completed\n", result.stdout)
-        self.assertIn("run=demo status=complete", result.stdout)
+        self.assertIn("admission session=ses_new message=msg_user_1 delivery=run status=queued\n", result.stdout)
+        self.assertIn("status session=ses_new status=done\n", result.stdout)
+        self.assertIn("run=demo status=done", result.stdout)
         self.assertEqual(status.returncode, 0, status.stderr)
         payload = json.loads(status.stdout)
-        self.assertEqual(payload["status"], "complete")
+        self.assertEqual(payload["status"], "done")
         self.assertNotIn("transcript", payload)
         worker = payload["workers"]["worker"]
         self.assertEqual(worker["status"], "done")
@@ -175,7 +175,14 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             {
                 "session_id": "ses_new",
                 "message_ids": {"user": "msg_user_1", "assistant": "msg_assistant_1"},
-                "status": "completed",
+                "status": "done",
+                "raw_status": "completed",
+                "terminal_state": "done",
+                "api_path": {
+                    "run": "/session/{sessionID}/run",
+                    "reply": "/session/{sessionID}/reply",
+                },
+                "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
                 "cost": 0.015,
                 "tokens": {"input": 12, "output": 8, "total": 20},
                 "text": "Worker finished.",
@@ -264,8 +271,8 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(collect.stderr, "")
         self.assertEqual(
             collect.stdout,
-            "session=ses_new user=msg_user_1 assistant=msg_assistant_1 "
-            "status=completed cost=0.015 tokens=20 text=\"Worker finished.\"\n",
+            "run_blocking session=ses_new status=done user=msg_user_1 assistant=msg_assistant_1 "
+            "cost=0.015 tokens=20 text=\"Worker finished.\"\n",
         )
 
     def test_start_attaches_session_then_reloads_it_from_store_on_restart(self):
