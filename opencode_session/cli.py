@@ -12,14 +12,25 @@ from opencode_session.capabilities import (
     legacy_run_reply_supported,
     unsupported_reasons,
 )
+from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 EX_UNAVAILABLE = 69
 EX_UNSUPPORTED = 70
+EX_DATAERR = 65
+EX_NOINPUT = 66
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+
+    if argv and argv[0] == "run" and "--store" in argv[1:]:
+        return _handle_run_store_command(_parse_run_store_args(argv[1:]))
+
     parser = argparse.ArgumentParser(prog="opencode-session")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -237,6 +248,78 @@ def main(argv=None):
     else:
         print(format_compact(capabilities))
     return 0
+
+
+def _parse_run_store_args(argv):
+    parser = argparse.ArgumentParser(prog="opencode-session run")
+    parser.add_argument("--store", default=default_store_root(), help="local orchestration run store directory")
+    run_subparsers = parser.add_subparsers(dest="run_command")
+    run_subparsers.required = True
+
+    run_init_parser = run_subparsers.add_parser("init")
+    run_init_parser.add_argument("name", help="local run name")
+    run_init_parser.add_argument("--directory", default=".", help="target directory for the run")
+    _add_server_argument(run_init_parser)
+
+    run_status_parser = run_subparsers.add_parser("status")
+    run_status_parser.add_argument("name", help="local run name")
+    run_status_parser.add_argument("--json", action="store_true", help="print complete run JSON data")
+
+    run_worker_parser = run_subparsers.add_parser("worker")
+    run_worker_parser.add_argument("name", help="local run name")
+    run_worker_parser.add_argument("worker_id", help="worker record ID")
+    run_worker_parser.add_argument("--role", help="worker role")
+    run_worker_parser.add_argument("--session", dest="session_id", help="OpenCode session ID reference")
+    run_worker_parser.add_argument("--agent", help="agent metadata")
+    run_worker_parser.add_argument("--model", help="model metadata")
+    run_worker_parser.add_argument("--depends-on", dest="dependencies", action="append", help="worker dependency ID")
+    run_worker_parser.add_argument("--prompt-id", dest="prompt_ids", action="append", help="prompt admission ID")
+    run_worker_parser.add_argument("--status", help="worker status")
+    run_worker_parser.add_argument("--retry-count", type=int, help="worker retry count")
+    run_worker_parser.add_argument("--timeout-seconds", type=int, help="worker timeout in seconds")
+    run_worker_parser.add_argument("--blocker", dest="blockers", action="append", help="blocker reference")
+    run_worker_parser.add_argument("--output-ref", dest="output_refs", action="append", help="output reference")
+    return parser.parse_args(argv)
+
+
+def _handle_run_store_command(args):
+    store = RunStore(args.store)
+    try:
+        if args.run_command == "init":
+            run = store.create_run(args.name, directory=args.directory, server_url=args.server)
+            print(format_run_compact(run))
+            return 0
+        if args.run_command == "status":
+            run = store.load_run(args.name)
+            if args.json:
+                print(json.dumps(run, sort_keys=True))
+                return 0
+            print(format_run_compact(run))
+            return 0
+        if args.run_command == "worker":
+            run = store.upsert_worker(
+                args.name,
+                args.worker_id,
+                role=args.role,
+                session_id=args.session_id,
+                agent=args.agent,
+                model=args.model,
+                dependencies=args.dependencies,
+                prompt_ids=args.prompt_ids,
+                status=args.status,
+                retry_count=args.retry_count,
+                timeout_seconds=args.timeout_seconds,
+                blockers=args.blockers,
+                output_refs=args.output_refs,
+            )
+            print(format_run_compact(run))
+            return 0
+    except RunStoreError as error:
+        print(f"opencode-session: {error}", file=sys.stderr)
+        if error.kind == "missing":
+            return EX_NOINPUT
+        return EX_DATAERR
+    return 64
 
 
 def _add_server_argument(parser):
