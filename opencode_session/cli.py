@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -12,6 +13,7 @@ from opencode_session.capabilities import (
     legacy_run_reply_supported,
     unsupported_reasons,
 )
+from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event, normalize_event
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 
 
@@ -20,6 +22,7 @@ EX_UNAVAILABLE = 69
 EX_UNSUPPORTED = 70
 EX_DATAERR = 65
 EX_NOINPUT = 66
+EX_TIMEOUT = 124
 
 
 def main(argv=None):
@@ -62,6 +65,12 @@ def main(argv=None):
     delete_parser.add_argument("session_id", help="session ID to delete")
     _add_server_argument(delete_parser)
     _add_output_arguments(delete_parser)
+
+    watch_parser = subparsers.add_parser("watch")
+    watch_parser.add_argument("session_id", help="session ID to watch")
+    _add_server_argument(watch_parser)
+    watch_parser.add_argument("--json", action="store_true", help="print normalized event JSON lines")
+    watch_parser.add_argument("--timeout", type=_positive_float, help="stop watching after this many seconds")
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("prompt", nargs="*", help="prompt text; stdin is used when omitted")
@@ -225,6 +234,9 @@ def main(argv=None):
             return EX_UNAVAILABLE
         print(f"opencode-session: delete verification failed; session {args.session_id} is still readable", file=sys.stderr)
         return EX_UNAVAILABLE
+
+    if args.command == "watch":
+        return _watch_session(args, client)
 
     if args.command == "steer":
         return _admit_prompt(args, client, "steer")
@@ -409,6 +421,122 @@ def _admit_prompt(args, client, delivery):
     else:
         print(_format_admission_compact(admission))
     return 0
+
+
+def _watch_session(args, client):
+    pending_text = None
+
+    def flush_pending_text():
+        nonlocal pending_text
+        if pending_text is not None:
+            print(format_watch_event(pending_text), flush=True)
+            pending_text = None
+
+    def emit_event(event):
+        nonlocal pending_text
+        if args.json:
+            print(json.dumps(event, sort_keys=True), flush=True)
+            return
+        if event["kind"] == "text":
+            if pending_text is not None and _same_watch_text_group(pending_text, event):
+                pending_text = dict(pending_text)
+                pending_text["text"] = (pending_text.get("text") or "") + (event.get("text") or "")
+            else:
+                flush_pending_text()
+                pending_text = dict(event)
+            return
+        flush_pending_text()
+        print(format_watch_event(event), flush=True)
+
+    try:
+        with _watch_deadline(args.timeout):
+            try:
+                capabilities = detect_capabilities(client)
+            except OpenCodeApiError as error:
+                print(f"opencode-session: {error}", file=sys.stderr)
+                return EX_UNAVAILABLE
+
+            event_route = capabilities["route_availability"]["events"]
+            if not event_route["available"]:
+                print(
+                    "opencode-session: unsupported OpenCode server; missing event stream: GET /api/event or GET /event or GET /global/event",
+                    file=sys.stderr,
+                )
+                return EX_UNSUPPORTED
+
+            try:
+                for raw_event in client.stream_events(event_route["path"]):
+                    event = normalize_event(raw_event, args.session_id)
+                    if event is None:
+                        continue
+                    emit_event(event)
+                    if is_terminal_event(event):
+                        flush_pending_text()
+                        if is_abort_event(event):
+                            return 130
+                        return 0
+            except OpenCodeApiError as error:
+                flush_pending_text()
+                print(f"opencode-session: event stream failure: {error}", file=sys.stderr)
+                if _is_invalid_event_stream(error):
+                    return EX_DATAERR
+                return EX_UNAVAILABLE
+            flush_pending_text()
+            return 0
+    except _WatchTimeout:
+        flush_pending_text()
+        print(f"opencode-session: watch timed out after {_format_timeout(args.timeout)}s", file=sys.stderr)
+        return EX_TIMEOUT
+
+
+def _same_watch_text_group(left, right):
+    return left.get("session_id") == right.get("session_id") and left.get("message_id") == right.get("message_id")
+
+
+def _is_invalid_event_stream(error):
+    return isinstance(error.data, dict) and error.data.get("kind") == "invalid_event_stream"
+
+
+class _WatchTimeout(Exception):
+    pass
+
+
+class _watch_deadline:
+    def __init__(self, timeout):
+        self.timeout = timeout
+        self.previous_handler = None
+
+    def __enter__(self):
+        if self.timeout is None:
+            return self
+        self.previous_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _raise_watch_timeout)
+        signal.setitimer(signal.ITIMER_REAL, self.timeout)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.timeout is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, self.previous_handler)
+        return False
+
+
+def _raise_watch_timeout(signum, frame):
+    raise _WatchTimeout()
+
+
+def _positive_float(value):
+    try:
+        number = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a number") from error
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
+def _format_timeout(timeout):
+    return str(timeout)
 
 
 def _write_raw(body):

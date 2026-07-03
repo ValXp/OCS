@@ -3,6 +3,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 
+from opencode_session.events import EventStreamError, iter_event_stream
+
 
 class OpenCodeApiError(Exception):
     def __init__(self, message, *, status=None, method=None, path=None, body=None, data=None):
@@ -60,6 +62,42 @@ class OpenCodeApiClient:
 
     def delete_response(self, path):
         return self._request_json("DELETE", path)
+
+    def stream_events(self, path):
+        url = urljoin(self.base_url, path.lstrip("/"))
+        headers = {"Accept": "text/event-stream, application/json"}
+        request = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                # SSE reads are long-lived; watch --timeout is the user-facing deadline.
+                response.fp.raw._sock.settimeout(None)
+                yield from iter_event_stream(response)
+        except EventStreamError as error:
+            raise OpenCodeApiError(
+                f"GET /{path.lstrip('/')} returned invalid event stream: {error}",
+                method="GET",
+                path=f"/{path.lstrip('/')}",
+                data={"kind": "invalid_event_stream"},
+            ) from error
+        except HTTPError as error:
+            error_body = error.read().decode("utf-8")
+            error_data = None
+            try:
+                error_data = json.loads(error_body or "{}")
+            except json.JSONDecodeError:
+                pass
+            raise OpenCodeApiError(
+                f"GET /{path.lstrip('/')} failed: HTTP {error.code}",
+                status=error.code,
+                method="GET",
+                path=f"/{path.lstrip('/')}",
+                body=error_body,
+                data=error_data,
+            ) from error
+        except URLError as error:
+            raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
+        except TimeoutError as error:
+            raise OpenCodeApiError(f"OpenCode event stream timed out at {self.base_url.rstrip('/')}") from error
 
     def _request_json(self, method, path, payload=None):
         response_body = self._request_body(method, path, payload)
