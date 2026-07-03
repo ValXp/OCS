@@ -142,15 +142,19 @@ class OpenCodeApiClient:
         except TimeoutError as error:
             raise OpenCodeApiError(f"OpenCode server timed out at {self.base_url.rstrip('/')}") from error
 
-    def create_session(self, directory, *, agent=None, model=None):
-        return self.create_session_response(directory, agent=agent, model=model).data
+    def create_session(self, directory, *, agent=None, model=None, title=None, metadata=None):
+        return self.create_session_response(directory, agent=agent, model=model, title=title, metadata=metadata).data
 
-    def create_session_response(self, directory, *, agent=None, model=None):
+    def create_session_response(self, directory, *, agent=None, model=None, title=None, metadata=None):
         payload = {"directory": directory}
         if agent is not None:
             payload["agent"] = agent
         if model is not None:
             payload["model"] = model
+        if title is not None:
+            payload["title"] = title
+        if metadata is not None:
+            payload["metadata"] = metadata
         return self.post_response("api/session", payload)
 
     def list_sessions(self):

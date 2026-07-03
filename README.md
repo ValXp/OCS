@@ -76,6 +76,20 @@ JSON output includes API path, fallback behavior, session ID, prompt/message ID,
 
 Live-provider validation is separate and opt-in only. It must not run as part of default smoke tests or mocked API tests.
 
+Run a deterministic smoke check in no-live-model mode:
+
+```bash
+bin/ocs smoke --directory /path/to/target --server http://127.0.0.1:4096
+```
+
+Default smoke verifies health, capabilities, disposable create/delete cleanup, v2 steer admission, event stream connectivity, and blocker listing. Legacy run/reply execution is route-checked and reported as skipped in no-live-model mode; no provider-backed prompt is sent.
+
+Smoke sessions use the recognizable `ocs-smoke-` prefix and are deleted before the command exits. Remove stale disposable sessions left by interrupted runs:
+
+```bash
+bin/ocs cleanup --directory /path/to/target --prefix ocs-smoke-
+```
+
 Server selection:
 
 - `--server URL`
