@@ -5,9 +5,9 @@ import unittest
 import uuid
 
 from harness import (
+    add_session_cleanup,
     assert_success,
     create_session_fixture,
-    delete_session_fixture,
     format_completed_process,
     load_json,
     require_server_url,
@@ -203,7 +203,7 @@ class NoLiveSmokeCleanupE2ETest(unittest.TestCase):
     def _create_session_fixture(self, server_url, directory, *, title, metadata):
         session = create_session_fixture(self, server_url, directory, title=title, metadata=metadata)
         session_id = self._session_id(session, "fixture create payload")
-        self.addCleanup(delete_session_fixture, self, server_url, session_id, ignore_not_found=True)
+        add_session_cleanup(self, server_url, session_id, label="smoke cleanup fixture")
         return session_id
 
     def _assert_session_deleted(self, server_url, session_id):

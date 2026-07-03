@@ -1,6 +1,6 @@
 import json
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from opencode_session.events import EventStreamError, iter_event_stream
@@ -24,6 +24,7 @@ class OpenCodeApiResponse:
 
 class OpenCodeApiClient:
     def __init__(self, base_url, *, timeout=3):
+        _validate_base_url(base_url)
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
 
@@ -224,3 +225,9 @@ def _session_prompt_path(prompt_path, session_id):
     for placeholder in ("{sessionID}", ":sessionID", "{id}", ":id"):
         path = path.replace(placeholder, quoted_session_id)
     return path
+
+
+def _validate_base_url(base_url):
+    parsed = urlparse(base_url or "")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise OpenCodeApiError(f"invalid OpenCode server URL {base_url!r}: expected http(s) URL")

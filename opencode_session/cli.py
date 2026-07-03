@@ -207,7 +207,11 @@ def main(argv=None):
     if args.command == "run":
         return _handle_run_store_command(args)
 
-    client = OpenCodeApiClient(args.server)
+    try:
+        client = OpenCodeApiClient(args.server)
+    except OpenCodeApiError as error:
+        _print_error(str(error))
+        return EX_UNAVAILABLE
     if args.command == "permission":
         if args.permission_command == "list":
             try:
@@ -722,8 +726,8 @@ def _start_orchestration_run(args, store):
 
 
 def _start_prompted_workers_run(args, store, run):
-    client = OpenCodeApiClient(run["server_url"])
     try:
+        client = OpenCodeApiClient(run["server_url"])
         capabilities = detect_capabilities(client)
         if not capabilities["legacy_fallback_available"]:
             message = (
@@ -1486,9 +1490,9 @@ def _start_single_worker_run(args, store):
     worker["status"] = "active"
     _save_orchestration_run(store, run)
 
-    client = OpenCodeApiClient(run["server_url"])
     created_session_id = None
     try:
+        client = OpenCodeApiClient(run["server_url"])
         capabilities = detect_capabilities(client)
         if not capabilities["legacy_fallback_available"]:
             message = (
@@ -1661,8 +1665,8 @@ def _collect_single_worker_result(args, run, worker_id):
 def _steer_run_worker(args, store):
     run = store.load_run(args.name)
     worker = _run_worker_with_session(run, args.worker_id)
-    client = OpenCodeApiClient(run["server_url"])
     try:
+        client = OpenCodeApiClient(run["server_url"])
         capabilities = detect_capabilities(client)
     except OpenCodeApiError as error:
         _print_error(str(error))
@@ -1707,8 +1711,8 @@ def _steer_run_worker(args, store):
 def _abort_run_worker(args, store):
     run = store.load_run(args.name)
     worker = _run_worker_with_session(run, args.worker_id)
-    client = OpenCodeApiClient(run["server_url"])
     try:
+        client = OpenCodeApiClient(run["server_url"])
         response = client.abort_session_response(worker["session_id"])
     except OpenCodeApiError as error:
         if _is_session_not_found_error(error):

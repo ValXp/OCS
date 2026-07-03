@@ -6,6 +6,7 @@ import unittest
 import uuid
 
 from harness import (
+    add_session_cleanup,
     assert_success,
     format_completed_process,
     load_json,
@@ -46,51 +47,42 @@ class BlockerCommandsE2ETest(unittest.TestCase):
     def test_session_list_and_inspect_include_blocker_counts_without_active_blockers(self):
         server_url = require_server_url(self)
         marker = f"ocs-e2e-blockers-{uuid.uuid4().hex}"
-        session_id = None
-        deleted = False
 
         with tempfile.TemporaryDirectory(prefix=f"{marker}-") as directory:
-            try:
-                create_result = run_ocs("create", directory, "--json", "--server", server_url)
-                assert_success(self, create_result)
-                created_session = load_json(self, create_result, "create --json")
-                session_id = self._session_id(created_session, "create payload")
+            create_result = run_ocs("create", directory, "--json", "--server", server_url)
+            assert_success(self, create_result)
+            created_session = load_json(self, create_result, "create --json")
+            session_id = self._session_id(created_session, "create payload")
+            add_session_cleanup(self, server_url, session_id, label="blocker command session")
 
-                list_result = run_ocs(
-                    "list",
-                    "--directory",
-                    directory,
-                    "--blockers",
-                    "--json",
-                    "--server",
-                    server_url,
-                )
-                assert_success(self, list_result)
-                listed_sessions = load_json(self, list_result, "list --blockers --json")
-                listed_session = self._only_session(
-                    listed_sessions,
-                    session_id,
-                    "list --blockers --json payload",
-                )
-                self._assert_blocker_counts(
-                    listed_session.get("blockers"),
-                    self._context(listed_session),
-                )
+            list_result = run_ocs(
+                "list",
+                "--directory",
+                directory,
+                "--blockers",
+                "--json",
+                "--server",
+                server_url,
+            )
+            assert_success(self, list_result)
+            listed_sessions = load_json(self, list_result, "list --blockers --json")
+            listed_session = self._only_session(
+                listed_sessions,
+                session_id,
+                "list --blockers --json payload",
+            )
+            self._assert_blocker_counts(
+                listed_session.get("blockers"),
+                self._context(listed_session),
+            )
 
-                inspect_result = run_ocs("inspect", session_id, "--blockers", "--server", server_url)
-                assert_success(self, inspect_result)
-                self.assertEqual(inspect_result.stderr, "", format_completed_process(inspect_result))
-                self._assert_compact_blocker_counts(inspect_result.stdout, session_id)
+            inspect_result = run_ocs("inspect", session_id, "--blockers", "--server", server_url)
+            assert_success(self, inspect_result)
+            self.assertEqual(inspect_result.stderr, "", format_completed_process(inspect_result))
+            self._assert_compact_blocker_counts(inspect_result.stdout, session_id)
 
-                delete_result = run_ocs("delete", session_id, "--json", "--server", server_url)
-                assert_success(self, delete_result)
-                deleted = True
-            finally:
-                if session_id and not deleted:
-                    try:
-                        run_ocs("delete", session_id, "--json", "--server", server_url)
-                    except AssertionError:
-                        pass
+            delete_result = run_ocs("delete", session_id, "--json", "--server", server_url)
+            assert_success(self, delete_result)
 
     def _only_session(self, sessions, session_id, label):
         if not isinstance(sessions, list):

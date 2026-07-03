@@ -5,6 +5,7 @@ import unittest
 import uuid
 
 from harness import (
+    add_session_cleanup,
     assert_success,
     format_completed_process,
     load_json,
@@ -93,16 +94,8 @@ class NoLiveSteerWatchAbortE2ETest(unittest.TestCase):
         assert_success(self, create_result)
         created_session = load_json(self, create_result, "create --json")
         session_id = self._session_id(created_session, "create payload")
-        self.addCleanup(self._delete_session, server_url, session_id)
+        add_session_cleanup(self, server_url, session_id, label="steer/watch/abort session")
         return session_id
-
-    def _delete_session(self, server_url, session_id):
-        delete_result = run_ocs("delete", session_id, "--json", "--server", server_url)
-        assert_success(self, delete_result)
-        delete_payload = load_json(self, delete_result, "delete --json")
-        self.assertEqual(delete_payload.get("id"), session_id, self._context(delete_payload))
-        self.assertTrue(delete_payload.get("deleted"), self._context(delete_payload))
-        self.assertEqual(delete_payload.get("verified"), "unreadable", self._context(delete_payload))
 
     def _assert_admission(self, admission, session_id, message_id):
         self.assertIsInstance(admission, dict, self._context(admission))

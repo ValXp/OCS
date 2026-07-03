@@ -1,6 +1,7 @@
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -47,8 +48,9 @@ def live_validate_selection_args():
     return args
 
 
-def run_ocs(*args):
+def run_ocs(*args, timeout_seconds=None):
     command = [sys.executable, str(CLI), *args]
+    timeout = _timeout_seconds(timeout_seconds)
     try:
         return subprocess.run(
             command,
@@ -58,7 +60,7 @@ def run_ocs(*args):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=_timeout_seconds(),
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise AssertionError(_format_timeout(error, command)) from error
@@ -110,6 +112,24 @@ def delete_session_fixture(testcase, server_url, session_id, *, ignore_not_found
     )
 
 
+def add_session_cleanup(testcase, server_url, session_id, *, label="session"):
+    testcase.addCleanup(cleanup_session_fixture, testcase, server_url, session_id, label=label)
+
+
+def cleanup_session_fixture(testcase, server_url, session_id, *, label="session"):
+    try:
+        delete_session_fixture(testcase, server_url, session_id, ignore_not_found=True)
+    except Exception as error:
+        testcase.fail(f"cleanup failed for {label} {session_id!r} at {server_url}: {error}")
+
+
+def unused_local_server_url():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return f"http://127.0.0.1:{port}"
+
+
 def http_json(testcase, method, server_url, path, payload=None, *, ignored_statuses=None):
     ignored_statuses = ignored_statuses or set()
     body = None
@@ -159,17 +179,21 @@ def _server_url(server_url, path):
     return urljoin(server_url.rstrip("/") + "/", path.lstrip("/"))
 
 
-def _timeout_seconds():
-    raw_timeout = os.environ.get(TIMEOUT_ENV)
+def _timeout_seconds(value=None):
+    raw_timeout = value if value is not None else os.environ.get(TIMEOUT_ENV)
     if raw_timeout is None:
         return DEFAULT_TIMEOUT_SECONDS
     try:
         timeout = float(raw_timeout)
     except ValueError as error:
-        raise AssertionError(f"{TIMEOUT_ENV} must be a positive number; got {raw_timeout!r}") from error
+        raise AssertionError(f"{_timeout_label(value)} must be a positive number; got {raw_timeout!r}") from error
     if timeout <= 0:
-        raise AssertionError(f"{TIMEOUT_ENV} must be a positive number; got {raw_timeout!r}")
+        raise AssertionError(f"{_timeout_label(value)} must be a positive number; got {raw_timeout!r}")
     return timeout
+
+
+def _timeout_label(value):
+    return "timeout_seconds" if value is not None else TIMEOUT_ENV
 
 
 def _format_timeout(error, command):
