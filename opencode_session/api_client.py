@@ -192,6 +192,24 @@ class OpenCodeApiClient:
     def admit_prompt_response(self, session_id, payload, prompt_path):
         return self.post_response(_session_prompt_path(prompt_path, session_id), payload)
 
+    def list_permissions_response(self):
+        return self.get_response("permission")
+
+    def reply_permission_response(self, request_id, reply, *, message=None):
+        payload = {"reply": reply}
+        if message is not None:
+            payload["message"] = message
+        return self.post_response(f"permission/{quote(request_id, safe='')}/reply", payload)
+
+    def list_questions_response(self):
+        return self.get_response("question")
+
+    def answer_question_response(self, request_id, answers):
+        return self.post_response(f"question/{quote(request_id, safe='')}/reply", {"answers": answers})
+
+    def reject_question_response(self, request_id):
+        return self.post_response(f"question/{quote(request_id, safe='')}/reject", {})
+
 
 def _session_prompt_path(prompt_path, session_id):
     path = prompt_path.lstrip("/")
