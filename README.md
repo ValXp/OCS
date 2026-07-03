@@ -10,6 +10,8 @@ OCS is a lightweight OpenCode session orchestration CLI.
   - Python standard-library API client and capability detection code used by the CLI.
 - `tests/`
   - Unit and UX-contract tests for the CLI and API client.
+- `tests/e2e/`
+  - Skipped-by-default subprocess E2E tests for an existing OpenCode server.
 
 ## Prerequisites
 
@@ -102,6 +104,25 @@ Smoke sessions use the recognizable `ocs-smoke-` prefix and are deleted before t
 
 ```bash
 bin/ocs cleanup --directory /path/to/target --prefix ocs-smoke-
+```
+
+Run the default deterministic unit suite without live server or model access:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+```
+
+Optional E2E tests live under `tests/e2e/` and are not discovered by the default unit command. They run `bin/ocs` as a subprocess against an existing OpenCode server and are no-live-model by default; the current tracer only probes `capabilities --json` and does not send prompts.
+
+E2E environment variables:
+
+- `OCS_E2E_SERVER_URL`: existing OpenCode server URL. When unset, E2E tests are skipped cleanly.
+- `OCS_E2E_TIMEOUT_SECONDS`: optional subprocess timeout in seconds. Default: `20`.
+
+Run the E2E harness explicitly:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
 ```
 
 Server selection:
