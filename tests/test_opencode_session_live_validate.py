@@ -98,7 +98,7 @@ class LiveValidationOpenCodeServer:
                     session = {
                         "id": session_id,
                         "title": payload["title"],
-                        "directory": payload["directory"],
+                        "directory": _payload_directory(payload),
                         "metadata": payload["metadata"],
                     }
                     parent.sessions.append(session)
@@ -108,7 +108,7 @@ class LiveValidationOpenCodeServer:
                     self._write_json(
                         {
                             "sessionID": "ses_live_1",
-                            "messageID": payload["messageID"],
+                            "messageID": _prompt_message_id(payload),
                             "delivery": "steer",
                             "state": "admitted",
                             "admittedSequence": 1,
@@ -253,7 +253,7 @@ class LiveValidateCliTest(unittest.TestCase):
         )
         self.assertTrue(server.requests[2][2]["title"].startswith("ocs-live-test-"))
         self.assertEqual(server.requests[2][2]["metadata"]["kind"], "live-provider-validation")
-        self.assertEqual(server.requests[3][2]["parts"], [{"type": "text", "text": "Reply exactly PONG."}])
+        self.assertEqual(_prompt_text(server.requests[3][2]), "Reply exactly PONG.")
         self.assertEqual(server.requests[3][2]["delivery"], "steer")
         self.assertEqual(server.requests[4][2], {})
         self.assertTrue(server.requests[6][2]["title"].startswith("ocs-live-test-"))
@@ -279,6 +279,7 @@ class LiveValidateCliTest(unittest.TestCase):
         create_payloads = [payload for method, path, payload in server.requests if method == "POST" and path == "/api/session"]
         self.assertEqual(len(create_payloads), 2)
         for payload in create_payloads:
+            self.assertEqual(_payload_directory(payload), directory)
             self.assertEqual(payload["agent"], "build")
             self.assertEqual(payload["model"], "openai/gpt-5.5")
 
@@ -420,6 +421,23 @@ class LiveValidateCliTest(unittest.TestCase):
 
 def parent_paths(requests):
     return [(method, path) for method, path, _payload in requests]
+
+
+def _payload_directory(payload):
+    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    return location.get("directory") or payload.get("directory")
+
+
+def _prompt_message_id(payload):
+    return payload.get("messageID") or payload.get("id")
+
+
+def _prompt_text(payload):
+    prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
+    if prompt.get("text") is not None:
+        return prompt.get("text")
+    parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
+    return "".join(part.get("text", "") for part in parts if isinstance(part, dict))
 
 
 if __name__ == "__main__":

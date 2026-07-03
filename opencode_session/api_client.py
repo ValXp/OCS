@@ -64,7 +64,7 @@ class OpenCodeApiClient:
     def delete_response(self, path):
         return self._request_json("DELETE", path)
 
-    def stream_events(self, path):
+    def stream_events(self, path, *, on_open=None):
         url = urljoin(self.base_url, path.lstrip("/"))
         headers = {"Accept": "text/event-stream, application/json"}
         request = Request(url, headers=headers, method="GET")
@@ -72,6 +72,8 @@ class OpenCodeApiClient:
             with urlopen(request, timeout=self.timeout) as response:
                 # SSE reads are long-lived; watch --timeout is the user-facing deadline.
                 response.fp.raw._sock.settimeout(None)
+                if on_open is not None:
+                    on_open()
                 yield from iter_event_stream(response)
         except EventStreamError as error:
             raise OpenCodeApiError(
@@ -147,7 +149,7 @@ class OpenCodeApiClient:
         return self.create_session_response(directory, agent=agent, model=model, title=title, metadata=metadata).data
 
     def create_session_response(self, directory, *, agent=None, model=None, title=None, metadata=None):
-        payload = {"directory": directory}
+        payload = {"location": {"directory": directory}}
         if agent is not None:
             payload["agent"] = agent
         if model is not None:
@@ -174,7 +176,13 @@ class OpenCodeApiClient:
         return self.delete_session_response(session_id).data
 
     def delete_session_response(self, session_id):
-        return self.delete_response(f"api/session/{quote(session_id, safe='')}")
+        quoted_session_id = quote(session_id, safe="")
+        try:
+            return self.delete_response(f"api/session/{quoted_session_id}")
+        except OpenCodeApiError as error:
+            if error.method == "DELETE" and error.path == f"/api/session/{quoted_session_id}" and "invalid JSON" in str(error):
+                return self.delete_response(f"session/{quoted_session_id}")
+            raise
 
     def abort_session_response(self, session_id):
         return self.post_response(f"session/{quote(session_id, safe='')}/abort", {})
@@ -193,6 +201,12 @@ class OpenCodeApiClient:
 
     def reply_session_response(self, session_id):
         return self.post_response(f"session/{quote(session_id, safe='')}/reply", {})
+
+    def message_session_response(self, session_id, message, *, message_id=None):
+        payload = {"parts": [{"type": "text", "text": message}]}
+        if message_id is not None:
+            payload["messageID"] = message_id
+        return self.post_response(f"session/{quote(session_id, safe='')}/message", payload)
 
     def admit_prompt_response(self, session_id, payload, prompt_path):
         return self.post_response(_session_prompt_path(prompt_path, session_id), payload)

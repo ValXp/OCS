@@ -22,19 +22,19 @@ STATUS_TERMS = {"queued", "active", "blocked", "done", "failed", "aborted", "tim
 
 
 @unittest.skipUnless(os.environ.get(SERVER_ENV), f"set {SERVER_ENV} to run OpenCode E2E tests")
-class NoLiveSteerWatchAbortE2ETest(unittest.TestCase):
+class RealServerSteerWatchAbortE2ETest(unittest.TestCase):
     def test_steer_json_admits_durable_prompt_without_execution_claim(self):
         server_url = require_server_url(self)
         marker = f"{SESSION_MARKER_PREFIX}{uuid.uuid4().hex[:12]}"
 
         with tempfile.TemporaryDirectory(prefix=f"{marker}-") as directory:
             session_id = self._create_disposable_session(server_url, directory)
-            message_id = f"{marker}-steer"
+            message_id = f"msg_{marker}-steer"
 
             result = run_ocs(
                 "steer",
                 session_id,
-                f"no-live e2e admission marker {marker}",
+                f"real-server e2e admission marker {marker}",
                 "--message-id",
                 message_id,
                 "--json",
@@ -55,9 +55,9 @@ class NoLiveSteerWatchAbortE2ETest(unittest.TestCase):
             steer_result = run_ocs(
                 "steer",
                 session_id,
-                f"no-live e2e watch marker {marker}",
+                f"real-server e2e watch marker {marker}",
                 "--message-id",
-                f"{marker}-watch-steer",
+                f"msg_{marker}-watch-steer",
                 "--json",
                 "--server",
                 server_url,
@@ -142,6 +142,8 @@ class NoLiveSteerWatchAbortE2ETest(unittest.TestCase):
         self.assertIn("response", abort, self._context(abort))
 
     def _session_id(self, session, label):
+        if isinstance(session, dict) and isinstance(session.get("data"), dict):
+            session = session["data"]
         if not isinstance(session, dict):
             self.fail(f"{label} was not a JSON object:\n{self._context(session)}")
         for name in ("id", "sessionID", "sessionId"):

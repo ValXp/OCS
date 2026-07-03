@@ -95,7 +95,7 @@ class SmokeOpenCodeServer:
                     session = {
                         "id": "ses_smoke_1",
                         "title": payload["title"],
-                        "directory": payload["directory"],
+                        "directory": _payload_directory(payload),
                         "metadata": payload["metadata"],
                     }
                     parent.sessions.append(session)
@@ -106,7 +106,7 @@ class SmokeOpenCodeServer:
                         parent.prompt_response
                         or {
                             "sessionID": "ses_smoke_1",
-                            "messageID": payload["messageID"],
+                            "messageID": _prompt_message_id(payload),
                             "delivery": "steer",
                             "state": "admitted",
                             "admittedSequence": 1,
@@ -186,19 +186,20 @@ class SmokeCliTest(unittest.TestCase):
             ("GET", "/global/health"),
             ("GET", "/doc"),
             ("POST", "/api/session"),
-            ("POST", "/api/session/ses_smoke_1/prompt"),
             ("GET", "/api/event"),
+            ("POST", "/api/session/ses_smoke_1/prompt"),
             ("GET", "/permission"),
             ("GET", "/question"),
             ("DELETE", "/api/session/ses_smoke_1"),
             ("GET", "/api/session/ses_smoke_1"),
         ])
         create_payload = server.requests[2][2]
-        self.assertEqual(create_payload["directory"], directory)
+        self.assertEqual(_payload_directory(create_payload), directory)
         self.assertTrue(create_payload["title"].startswith("ocs-smoke-test-"))
         self.assertEqual(create_payload["metadata"]["prefix"], "ocs-smoke-test-")
-        steer_payload = server.requests[3][2]
-        self.assertTrue(steer_payload["messageID"].startswith("ocs-smoke-test-"))
+        steer_payload = server.requests[4][2]
+        self.assertTrue(_prompt_message_id(steer_payload).startswith("msg_ocs-smoke-test-"))
+        self.assertEqual(_prompt_text(steer_payload), "ocs smoke steer")
         self.assertEqual(steer_payload["delivery"], "steer")
 
     def test_cleanup_deletes_stale_disposable_sessions_in_target_directory(self):
@@ -241,6 +242,7 @@ class SmokeCliTest(unittest.TestCase):
             ("GET", "/global/health"),
             ("GET", "/doc"),
             ("POST", "/api/session"),
+            ("GET", "/api/event"),
             ("POST", "/api/session/ses_smoke_1/prompt"),
             ("DELETE", "/api/session/ses_smoke_1"),
             ("GET", "/api/session/ses_smoke_1"),
@@ -315,6 +317,23 @@ class SmokeCliTest(unittest.TestCase):
 
 def parent_paths(requests):
     return [(method, path) for method, path, _payload in requests]
+
+
+def _payload_directory(payload):
+    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    return location.get("directory") or payload.get("directory")
+
+
+def _prompt_message_id(payload):
+    return payload.get("messageID") or payload.get("id")
+
+
+def _prompt_text(payload):
+    prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
+    if prompt.get("text") is not None:
+        return prompt.get("text")
+    parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
+    return "".join(part.get("text", "") for part in parts if isinstance(part, dict))
 
 
 if __name__ == "__main__":

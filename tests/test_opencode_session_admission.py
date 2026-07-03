@@ -127,8 +127,8 @@ class AdmissionCliTest(unittest.TestCase):
                     "POST",
                     "/api/session/ses_1/prompt",
                     {
-                        "messageID": "msg_steer_1",
-                        "parts": [{"type": "text", "text": "Actually use the v2 prompt API."}],
+                        "id": "msg_steer_1",
+                        "prompt": {"text": "Actually use the v2 prompt API."},
                         "delivery": "steer",
                     },
                 ),
@@ -183,8 +183,8 @@ class AdmissionCliTest(unittest.TestCase):
                 "POST",
                 "/api/session/ses_1/prompt",
                 {
-                    "messageID": "msg_queue_1",
-                    "parts": [{"type": "text", "text": "After this, run the benchmark."}],
+                    "id": "msg_queue_1",
+                    "prompt": {"text": "After this, run the benchmark."},
                     "delivery": "queue",
                 },
             ),

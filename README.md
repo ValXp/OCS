@@ -116,21 +116,17 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 
 ## Manual E2E runbook
 
-Optional E2E tests live under `tests/e2e/` and are skipped by default because they are not discovered by the default unit command. They run `bin/ocs` as a subprocess. Server-backed E2E tests target an existing OpenCode server selected with `OCS_E2E_SERVER_URL`; the harness does not start or manage a server. Negative E2E tests use intentionally unreachable loopback addresses and do not require a real OpenCode server.
+Optional E2E tests live under `tests/e2e/` and are skipped by default because they are not discovered by the default unit command. They run `bin/ocs` as a subprocess against an existing OpenCode server selected with `OCS_E2E_SERVER_URL`; the harness does not start, manage, or mock a server. Tests that consume provider tokens additionally require `OCS_E2E_LIVE=1` and `OCS_LIVE_VALIDATE=1`.
 
 GitHub Actions/CI setup for these E2E suites is intentionally deferred. Run them manually from a local checkout when you have an OpenCode server and, for live tests, explicit approval to spend provider tokens.
 
-Run deterministic skip-safe E2E checks with all server/live configuration unset. Server-backed tests skip cleanly; no-server negative tests still run:
+Run real-server E2E against an existing OpenCode server:
 
 ```bash
-env -u OCS_E2E_SERVER_URL -u OCS_E2E_LIVE -u OCS_LIVE_VALIDATE PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
+PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
 ```
 
-Run no-live server-backed E2E against an existing OpenCode server. The command unsets live-provider gates so it stays no-live even if your shell has live variables set. These tests probe `capabilities --json`, session lifecycle, durable steer/watch/abort behavior, `smoke --json`, and stale disposable session cleanup without waiting for assistant execution:
-
-```bash
-env -u OCS_E2E_LIVE -u OCS_LIVE_VALIDATE PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
-```
+This probes `capabilities --json`, session lifecycle, durable steer/watch/abort behavior, `smoke --json`, and stale disposable session cleanup using the real server. Provider-consuming E2E tests in the same directory skip unless the live gates are set.
 
 Run live-provider E2E only by explicit manual opt-in. These tests call the configured provider and may consume provider tokens. Both `OCS_E2E_LIVE=1` and `OCS_LIVE_VALIDATE=1` are required:
 
@@ -142,7 +138,7 @@ Manual live-provider E2E tests cover direct `run_blocking --json` execution and 
 
 E2E environment variables:
 
-- `OCS_E2E_SERVER_URL`: existing OpenCode server URL. When unset, server-backed E2E tests are skipped cleanly; no-server negative tests still run.
+- `OCS_E2E_SERVER_URL`: existing OpenCode server URL. Required for tests under `tests/e2e/`.
 - `OCS_E2E_LIVE`: set to `1` to include manual live-provider E2E tests that may consume provider tokens.
 - `OCS_LIVE_VALIDATE`: set to `1` with `OCS_E2E_LIVE=1` to allow `live_validate` provider calls from E2E.
 - `OCS_E2E_AGENT`: optional OpenCode agent passed to live E2E commands that support `--agent`.

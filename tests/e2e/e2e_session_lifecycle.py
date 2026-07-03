@@ -62,6 +62,8 @@ class SessionLifecycleE2ETest(unittest.TestCase):
             self.assertIn(session_id, unreadable_result.stderr, format_completed_process(unreadable_result))
 
     def _session_id(self, session, label):
+        if isinstance(session, dict) and isinstance(session.get("data"), dict):
+            session = session["data"]
         if not isinstance(session, dict):
             self.fail(f"{label} was not a JSON object:\n{self._context(session)}")
         for name in ("id", "sessionID", "sessionId"):
@@ -71,8 +73,13 @@ class SessionLifecycleE2ETest(unittest.TestCase):
         self.fail(f"{label} did not include a session id:\n{self._context(session)}")
 
     def _session_directory(self, session):
+        if isinstance(session, dict) and isinstance(session.get("data"), dict):
+            session = session["data"]
         if not isinstance(session, dict):
             return None
+        location = session.get("location") if isinstance(session.get("location"), dict) else {}
+        if location.get("directory") is not None:
+            return location.get("directory")
         return session.get("directory") or session.get("cwd")
 
     def _context(self, payload):

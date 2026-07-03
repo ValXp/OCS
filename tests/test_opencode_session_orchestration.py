@@ -70,7 +70,7 @@ class OrchestrationOpenCodeServer:
                 payload = json.loads(body or "{}")
                 parent.requests.append(("POST", self.path, payload))
                 if self.path == "/api/session":
-                    self._write_json({"id": "ses_new", "directory": payload["directory"]})
+                    self._write_json({"id": "ses_new", "directory": _payload_directory(payload)})
                     return
                 for session_id in parent.session_ids:
                     if self.path == f"/session/{session_id}/run":
@@ -166,7 +166,7 @@ class RetryPolicyOpenCodeServer:
                 payload = json.loads(body or "{}")
                 parent.requests.append(("POST", self.path, payload))
                 if self.path == "/api/session":
-                    self._write_json({"id": parent.session_id, "directory": payload["directory"]})
+                    self._write_json({"id": parent.session_id, "directory": _payload_directory(payload)})
                     return
                 if self.path == f"/session/{parent.session_id}/run":
                     self._write_retry_payload(parent.run_payloads.pop(0))
@@ -271,7 +271,7 @@ class MultiWorkerOrchestrationServer:
                 parent.requests.append(("POST", self.path, payload))
                 if self.path == "/api/session":
                     session_id = parent.session_ids.pop(0)
-                    response = {"id": session_id, "directory": payload["directory"]}
+                    response = {"id": session_id, "directory": _payload_directory(payload)}
                     self._write_json(response)
                     return
                 for session_id, run_payload in parent.run_payloads.items():
@@ -448,6 +448,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
                     "run": "/session/{sessionID}/run",
                     "reply": "/session/{sessionID}/reply",
                 },
+                "execution_strategy": "legacy_run_reply",
                 "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
                 "cost": 0.015,
                 "tokens": {"input": 12, "output": 8, "total": 20},
@@ -460,7 +461,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_new/run", {"message": "Finish the worker task"}),
                 ("GET", "/api/event", None),
                 ("POST", "/session/ses_new/reply", {}),
@@ -530,12 +531,12 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
                 (
                     "POST",
                     "/api/session",
-                    {"directory": directory, "agent": "build", "model": "openai/gpt-5.5-mini"},
+                    {"location": {"directory": directory}, "agent": "build", "model": "openai/gpt-5.5-mini"},
                 ),
                 (
                     "POST",
                     "/api/session",
-                    {"directory": directory, "agent": "plan", "model": "openai/gpt-5.5"},
+                    {"location": {"directory": directory}, "agent": "plan", "model": "openai/gpt-5.5"},
                 ),
                 ("POST", "/session/ses_docs/run", {"message": "Draft the release notes"}),
                 ("POST", "/session/ses_plan/run", {"message": "Create the implementation plan"}),
@@ -617,7 +618,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_build/run", {"message": "Run the implementation"}),
             ],
         )
@@ -749,7 +750,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
                 ("POST", "/session/ses_retry/reply", {}),
@@ -818,7 +819,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
             ],
@@ -885,7 +886,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
                 ("POST", "/session/ses_retry/reply", {}),
@@ -954,7 +955,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
                 ("POST", "/session/ses_retry/reply", {}),
@@ -1011,7 +1012,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
             ],
         )
@@ -1191,10 +1192,10 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_plan/run", {"message": "Plan the work"}),
                 ("POST", "/session/ses_plan/reply", {}),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_review/run", {"message": "Review the plan"}),
                 ("POST", "/session/ses_review/reply", {}),
             ],
@@ -1274,8 +1275,8 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
                     "POST",
                     "/api/session/ses_plan/prompt",
                     {
-                        "messageID": "msg_steer_1",
-                        "parts": [{"type": "text", "text": "Incorporate the review feedback"}],
+                        "id": "msg_steer_1",
+                        "prompt": {"text": "Incorporate the review feedback"},
                         "delivery": "steer",
                     },
                 ),
@@ -1370,7 +1371,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_new/run", {"message": "Finish the worker task"}),
             ],
         )
@@ -1491,7 +1492,7 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
             [
                 ("GET", "/global/health", None),
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_new/run", {"message": "Finish the worker task"}),
                 ("GET", "/api/event", None),
                 ("POST", "/session/ses_new/reply", {}),
@@ -1502,3 +1503,8 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _payload_directory(payload):
+    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    return location.get("directory") or payload.get("directory")

@@ -1,7 +1,6 @@
 import json
 import os
 import shlex
-import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -93,12 +92,17 @@ def load_json_lines(testcase, result, description="CLI"):
 
 
 def create_session_fixture(testcase, server_url, directory, *, title=None, metadata=None):
-    payload = {"directory": str(Path(directory).resolve())}
-    if title is not None:
-        payload["title"] = title
-    if metadata is not None:
-        payload["metadata"] = metadata
-    return http_json(testcase, "POST", server_url, "api/session", payload)
+    payload = {"location": {"directory": str(Path(directory).resolve())}}
+    session = http_json(testcase, "POST", server_url, "api/session", payload)
+    if title is not None or metadata is not None:
+        session_id = _session_id(session)
+        patch = {}
+        if title is not None:
+            patch["title"] = title
+        if metadata is not None:
+            patch["metadata"] = metadata
+        return http_json(testcase, "PATCH", server_url, f"session/{quote(session_id, safe='')}", patch)
+    return session
 
 
 def delete_session_fixture(testcase, server_url, session_id, *, ignore_not_found=False):
@@ -107,7 +111,7 @@ def delete_session_fixture(testcase, server_url, session_id, *, ignore_not_found
         testcase,
         "DELETE",
         server_url,
-        f"api/session/{quote(session_id, safe='')}",
+        f"session/{quote(session_id, safe='')}",
         ignored_statuses=ignored_statuses,
     )
 
@@ -121,13 +125,6 @@ def cleanup_session_fixture(testcase, server_url, session_id, *, label="session"
         delete_session_fixture(testcase, server_url, session_id, ignore_not_found=True)
     except Exception as error:
         testcase.fail(f"cleanup failed for {label} {session_id!r} at {server_url}: {error}")
-
-
-def unused_local_server_url():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    return f"http://127.0.0.1:{port}"
 
 
 def http_json(testcase, method, server_url, path, payload=None, *, ignored_statuses=None):
@@ -177,6 +174,16 @@ def format_completed_process(result):
 
 def _server_url(server_url, path):
     return urljoin(server_url.rstrip("/") + "/", path.lstrip("/"))
+
+
+def _session_id(session):
+    if isinstance(session, dict) and isinstance(session.get("data"), dict):
+        session = session["data"]
+    if isinstance(session, dict):
+        for name in ("id", "sessionID", "sessionId"):
+            if session.get(name):
+                return session[name]
+    raise AssertionError(f"session fixture response did not include a session id: {session!r}")
 
 
 def _timeout_seconds(value=None):

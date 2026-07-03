@@ -1,9 +1,17 @@
+import os
+import shlex
+import socket
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
-from harness import format_completed_process, run_ocs, unused_local_server_url
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CLI = REPO_ROOT / "bin" / "ocs"
 
 
-class NegativeFailureE2ETest(unittest.TestCase):
+class CliFailureContractTest(unittest.TestCase):
     def test_bad_server_url_exits_69_with_clear_stderr(self):
         result = run_ocs("capabilities", "--server", "not-a-url", "--json")
 
@@ -43,7 +51,7 @@ class NegativeFailureE2ETest(unittest.TestCase):
             "--directory",
             ".",
             "--prefix",
-            "ocs-e2e-",
+            "ocs-test-",
             "--server",
             server_url,
             "--json",
@@ -56,6 +64,40 @@ class NegativeFailureE2ETest(unittest.TestCase):
         self.assertIn("cannot reach OpenCode server", result.stderr, context)
         self.assertIn(server_url, result.stderr, context)
         self.assertNotIn("Traceback", result.stderr, context)
+
+
+def run_ocs(*args, timeout_seconds=None):
+    command = [sys.executable, str(CLI), *args]
+    return subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=timeout_seconds,
+    )
+
+
+def unused_local_server_url():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return f"http://127.0.0.1:{port}"
+
+
+def format_completed_process(result):
+    return "\n".join(
+        [
+            f"command: {shlex.join(str(part) for part in result.args)}",
+            f"exit code: {result.returncode}",
+            "stdout:",
+            result.stdout or "(empty)",
+            "stderr:",
+            result.stderr or "(empty)",
+        ]
+    )
 
 
 if __name__ == "__main__":

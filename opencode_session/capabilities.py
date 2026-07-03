@@ -2,6 +2,7 @@ SESSION_PATHS = ["/api/session", "/session"]
 PROMPT_PATHS = ["/api/session/{sessionID}/prompt", "/session/{sessionID}/prompt_async"]
 WAIT_PATHS = ["/api/session/{sessionID}/wait"]
 EVENT_PATHS = ["/api/event", "/event", "/global/event"]
+SESSION_MESSAGE_PATH = "/session/{sessionID}/message"
 LEGACY_RUN_PATH = "/session/{sessionID}/run"
 LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 
@@ -18,14 +19,17 @@ def detect_capabilities(client):
         wait_path = f"{prompt_path}?wait=true"
         wait_available = True
     event_path, events_available = _first_available_route(paths, EVENT_PATHS, "get")
+    blocking_message_available = _route_available(paths, SESSION_MESSAGE_PATH, "post")
     legacy_run_available = _route_available(paths, LEGACY_RUN_PATH, "post")
     legacy_reply_available = _route_available(paths, LEGACY_REPLY_PATH, "post")
+    legacy_fallback_available = legacy_run_available and legacy_reply_available
 
     route_availability = {
         "session": _route(session_path, "POST", session_available),
         "v2_prompt": _route(prompt_path, "POST", prompt_available),
         "v2_wait": _route(wait_path, "POST", wait_available),
         "events": _route(event_path, "GET", events_available),
+        "blocking_message": _route(SESSION_MESSAGE_PATH, "POST", blocking_message_available),
         "legacy_run": _route(LEGACY_RUN_PATH, "POST", legacy_run_available),
         "legacy_reply": _route(LEGACY_REPLY_PATH, "POST", legacy_reply_available),
     }
@@ -37,7 +41,9 @@ def detect_capabilities(client):
         "v2_prompt_support": prompt_available,
         "v2_wait_support": wait_available,
         "event_support": events_available,
-        "legacy_fallback_available": legacy_run_available and legacy_reply_available,
+        "blocking_message_available": blocking_message_available,
+        "blocking_execution_available": blocking_message_available or legacy_fallback_available,
+        "legacy_fallback_available": legacy_fallback_available,
     }
 
 
@@ -47,6 +53,11 @@ def format_compact(capabilities):
     legacy = "unsupported"
     if route_availability["legacy_run"]["available"] and route_availability["legacy_reply"]["available"]:
         legacy = f"{route_availability['legacy_run']['path']},{route_availability['legacy_reply']['path']}"
+    execution = "unsupported"
+    if route_availability["blocking_message"]["available"]:
+        execution = route_availability["blocking_message"]["path"]
+    elif legacy != "unsupported":
+        execution = legacy
 
     return " ".join(
         [
@@ -56,6 +67,7 @@ def format_compact(capabilities):
             f"prompt={route_availability['v2_prompt']['path'] if route_availability['v2_prompt']['available'] else 'unsupported'}",
             f"wait={wait}",
             f"events={route_availability['events']['path'] if route_availability['events']['available'] else 'unsupported'}",
+            f"execution={execution}",
             f"legacy={legacy}",
         ]
     )
@@ -66,12 +78,18 @@ def unsupported_reasons(capabilities):
     reasons = []
     if not route_availability["session"]["available"]:
         reasons.append("missing session control: POST /api/session or POST /session")
-    if not capabilities["v2_prompt_support"] and not capabilities["legacy_fallback_available"]:
+    if not capabilities["v2_prompt_support"] and not capabilities["blocking_execution_available"]:
         reasons.append(
-            "missing prompt admission: POST /api/session/{sessionID}/prompt or legacy "
+            "missing prompt admission or blocking execution: POST /api/session/{sessionID}/prompt, "
+            "POST /session/{sessionID}/message, or legacy "
             "POST /session/{sessionID}/run + POST /session/{sessionID}/reply"
         )
     return reasons
+
+
+def blocking_message_supported(doc):
+    paths = doc.get("paths") or {}
+    return _route_available(paths, SESSION_MESSAGE_PATH, "post")
 
 
 def legacy_run_reply_supported(doc):

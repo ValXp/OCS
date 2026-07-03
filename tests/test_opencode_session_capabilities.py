@@ -79,6 +79,7 @@ class CapabilityProbeCliTest(unittest.TestCase):
                 "/api/session/{sessionID}/prompt": {"post": {}},
                 "/api/session/{sessionID}/wait": {"post": {}},
                 "/api/event": {"get": {}},
+                "/session/{sessionID}/message": {"post": {}},
             },
         }
 
@@ -90,7 +91,8 @@ class CapabilityProbeCliTest(unittest.TestCase):
         self.assertEqual(
             result.stdout.strip(),
             "health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/prompt "
-            "wait=/api/session/{sessionID}/wait events=/api/event legacy=unsupported",
+            "wait=/api/session/{sessionID}/wait events=/api/event execution=/session/{sessionID}/message "
+            "legacy=unsupported",
         )
 
     def test_json_output_exposes_capability_contract(self):
@@ -101,6 +103,7 @@ class CapabilityProbeCliTest(unittest.TestCase):
                 "/api/session/{sessionID}/prompt": {"post": {}},
                 "/api/session/{sessionID}/wait": {"post": {}},
                 "/api/event": {"get": {}},
+                "/session/{sessionID}/message": {"post": {}},
                 "/session/{sessionID}/run": {"post": {}},
                 "/session/{sessionID}/reply": {"post": {}},
             },
@@ -118,6 +121,8 @@ class CapabilityProbeCliTest(unittest.TestCase):
         self.assertTrue(payload["v2_prompt_support"])
         self.assertTrue(payload["v2_wait_support"])
         self.assertTrue(payload["event_support"])
+        self.assertTrue(payload["blocking_message_available"])
+        self.assertTrue(payload["blocking_execution_available"])
         self.assertTrue(payload["legacy_fallback_available"])
         self.assertEqual(
             payload["route_availability"],
@@ -134,6 +139,11 @@ class CapabilityProbeCliTest(unittest.TestCase):
                     "available": True,
                 },
                 "events": {"path": "/api/event", "method": "GET", "available": True},
+                "blocking_message": {
+                    "path": "/session/{sessionID}/message",
+                    "method": "POST",
+                    "available": True,
+                },
                 "legacy_run": {
                     "path": "/session/{sessionID}/run",
                     "method": "POST",
@@ -158,7 +168,7 @@ class CapabilityProbeCliTest(unittest.TestCase):
         self.assertIn("unsupported OpenCode server", result.stderr)
         self.assertIn("missing session control: POST /api/session or POST /session", result.stderr)
         self.assertIn(
-            "missing prompt admission: POST /api/session/{sessionID}/prompt or legacy POST /session/{sessionID}/run + POST /session/{sessionID}/reply",
+            "missing prompt admission or blocking execution: POST /api/session/{sessionID}/prompt, POST /session/{sessionID}/message, or legacy POST /session/{sessionID}/run + POST /session/{sessionID}/reply",
             result.stderr,
         )
 

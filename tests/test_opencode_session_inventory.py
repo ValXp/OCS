@@ -37,7 +37,7 @@ class InventoryOpenCodeServer:
                         {
                             "id": "ses_new",
                             "title": "New session",
-                            "directory": payload["directory"],
+                            "directory": _payload_directory(payload),
                             "agent": payload["agent"],
                             "model": payload["model"],
                             "cost": 0,
@@ -151,7 +151,7 @@ class SessionInventoryCliTest(unittest.TestCase):
                 (
                     "POST",
                     "/api/session",
-                    {"directory": directory, "agent": "build", "model": "openai/gpt-5.5"},
+                    {"location": {"directory": directory}, "agent": "build", "model": "openai/gpt-5.5"},
                 )
             ],
         )
@@ -344,3 +344,8 @@ class SessionInventoryCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _payload_directory(payload):
+    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    return location.get("directory") or payload.get("directory")

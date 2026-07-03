@@ -126,6 +126,8 @@ class BlockerCommandsE2ETest(unittest.TestCase):
         self.fail(f"{label} did not include a session id:\n{self._context(session)}")
 
     def _session_id_or_none(self, session):
+        if isinstance(session, dict) and isinstance(session.get("data"), dict):
+            session = session["data"]
         for name in ("id", "sessionID", "sessionId"):
             value = session.get(name)
             if value:

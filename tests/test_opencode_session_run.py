@@ -14,7 +14,16 @@ CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class RunOpenCodeServer:
-    def __init__(self, *, doc_paths=None, doc_body=None, doc_status=200, run_payload=None, reply_payload=None):
+    def __init__(
+        self,
+        *,
+        doc_paths=None,
+        doc_body=None,
+        doc_status=200,
+        run_payload=None,
+        reply_payload=None,
+        message_payload=None,
+    ):
         self.doc_paths = doc_paths or {
             "/session/{sessionID}/run": {"post": {}},
             "/session/{sessionID}/reply": {"post": {}},
@@ -28,6 +37,16 @@ class RunOpenCodeServer:
             "cost": 0.015,
             "tokens": {"input": 12, "output": 8, "total": 20},
             "text": "Worker finished.",
+        }
+        self.message_payload = message_payload or {
+            "info": {
+                "id": "msg_assistant_modern_1",
+                "sessionID": "ses_existing",
+                "role": "assistant",
+                "cost": 0.025,
+                "tokens": {"input": 4, "output": 3, "total": 7},
+            },
+            "parts": [{"type": "text", "text": "PONG"}],
         }
         self.requests = []
         self.server = None
@@ -63,13 +82,16 @@ class RunOpenCodeServer:
                 payload = json.loads(body or "{}")
                 parent.requests.append(("POST", self.path, payload))
                 if self.path == "/api/session":
-                    self._write_json({"id": "ses_new", "directory": payload["directory"]})
+                    self._write_json({"id": "ses_new", "directory": _payload_directory(payload)})
                     return
                 if self.path in ("/session/ses_existing/run", "/session/ses_new/run"):
                     self._write_json(parent.run_payload)
                     return
                 if self.path in ("/session/ses_existing/reply", "/session/ses_new/reply"):
                     self._write_json(parent.reply_payload)
+                    return
+                if self.path in ("/session/ses_existing/message", "/session/ses_new/message"):
+                    self._write_json(parent.message_payload)
                     return
                 self.send_error(404)
 
@@ -150,6 +172,67 @@ class RunCliTest(unittest.TestCase):
             ],
         )
 
+    def test_run_blocking_prefers_modern_session_message_when_available(self):
+        with RunOpenCodeServer(
+            doc_paths={
+                "/session/{sessionID}/message": {"post": {}},
+                "/session/{sessionID}/run": {"post": {}},
+                "/session/{sessionID}/reply": {"post": {}},
+            }
+        ) as server:
+            result = self.run_cli(
+                "run_blocking",
+                "--session",
+                "ses_existing",
+                "--json",
+                "--server",
+                server.url,
+                "Reply exactly PONG.",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["session_id"], "ses_existing")
+        self.assertTrue(payload["message_ids"]["user"].startswith("msg_"))
+        self.assertEqual(payload["message_ids"]["assistant"], "msg_assistant_modern_1")
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(payload["terminal_state"], "done")
+        self.assertEqual(payload["execution_strategy"], "session_message")
+        self.assertEqual(payload["api_path"], {"message": "/session/{sessionID}/message"})
+        self.assertEqual(payload["fallback"], {"available": True, "strategy": "legacy_run_reply", "used": False})
+        self.assertEqual(payload["tokens"], {"input": 4, "output": 3, "total": 7})
+        self.assertEqual(payload["cost"], 0.025)
+        self.assertEqual(payload["text"], "PONG")
+        request_payload = server.requests[1][2]
+        self.assertTrue(request_payload["messageID"].startswith("msg_"))
+        self.assertEqual(request_payload["parts"], [{"type": "text", "text": "Reply exactly PONG."}])
+        self.assertEqual(
+            [(method, path) for method, path, _payload in server.requests],
+            [("GET", "/doc"), ("POST", "/session/ses_existing/message")],
+        )
+
+    def test_run_blocking_uses_modern_session_message_without_legacy_routes(self):
+        with RunOpenCodeServer(doc_paths={"/session/{sessionID}/message": {"post": {}}}) as server:
+            result = self.run_cli(
+                "run_blocking",
+                "--session",
+                "ses_existing",
+                "--json",
+                "--server",
+                server.url,
+                "Reply exactly PONG.",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["execution_strategy"], "session_message")
+        self.assertEqual(payload["fallback"], {"available": False, "strategy": "legacy_run_reply", "used": False})
+        self.assertEqual(
+            [(method, path) for method, path, _payload in server.requests],
+            [("GET", "/doc"), ("POST", "/session/ses_existing/message")],
+        )
+
     def test_run_without_session_creates_and_cleans_up_disposable_session(self):
         with tempfile.TemporaryDirectory() as directory, RunOpenCodeServer() as server:
             result = self.run_cli(
@@ -168,7 +251,7 @@ class RunCliTest(unittest.TestCase):
             server.requests,
             [
                 ("GET", "/doc", None),
-                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
                 ("POST", "/session/ses_new/run", {"message": "Run in a disposable session"}),
                 ("POST", "/session/ses_new/reply", {}),
                 ("DELETE", "/api/session/ses_new", None),
@@ -217,6 +300,8 @@ class RunCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 70)
         self.assertEqual(result.stdout, "")
         self.assertIn("unsupported route behavior", result.stderr)
+        self.assertIn("POST /session/{sessionID}/message", result.stderr)
+        self.assertIn("POST /session/{sessionID}/run + POST /session/{sessionID}/reply", result.stderr)
         self.assertIn("v2 prompt admission is not execution", result.stderr)
         self.assertEqual(server.requests, [("GET", "/doc", None)])
 
@@ -359,6 +444,7 @@ class RunCliTest(unittest.TestCase):
                     "run": "/session/{sessionID}/run",
                     "reply": "/session/{sessionID}/reply",
                 },
+                "execution_strategy": "legacy_run_reply",
                 "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
                 "cost": 0.015,
                 "tokens": {"input": 12, "output": 8, "total": 20},
@@ -377,3 +463,8 @@ class RunCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _payload_directory(payload):
+    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    return location.get("directory") or payload.get("directory")

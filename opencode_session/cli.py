@@ -1,8 +1,11 @@
 import argparse
 import json
 import os
+import queue
 import signal
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +14,8 @@ from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import (
     LEGACY_REPLY_PATH,
     LEGACY_RUN_PATH,
+    SESSION_MESSAGE_PATH,
+    blocking_message_supported,
     detect_capabilities,
     format_compact,
     legacy_run_reply_supported,
@@ -24,6 +29,8 @@ from opencode_session.status import short_status
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 CLI_NAME = "ocs"
 SMOKE_SESSION_PREFIX = "ocs-smoke-"
+SMOKE_EVENT_TIMEOUT_SECONDS = 10.0
+BLOCKING_EXECUTION_TIMEOUT_SECONDS = 120
 LIVE_VALIDATE_ENV = "OCS_LIVE_VALIDATE"
 LIVE_SESSION_PREFIX = "ocs-live-"
 LIVE_VALIDATE_PROMPT = "Reply exactly PONG."
@@ -136,7 +143,12 @@ def main(argv=None):
         default=True,
         help="keep smoke in no-live-model mode; live-provider validation is separate",
     )
-    smoke_parser.add_argument("--event-timeout", type=_positive_float, default=1.0, help="event watch timeout in seconds")
+    smoke_parser.add_argument(
+        "--event-timeout",
+        type=_positive_float,
+        default=SMOKE_EVENT_TIMEOUT_SECONDS,
+        help="event watch timeout in seconds",
+    )
     smoke_parser.add_argument("--event-limit", type=_positive_int, default=3, help="maximum matching events to observe")
     _add_server_argument(smoke_parser)
     smoke_parser.add_argument("--json", action="store_true", help="print smoke result JSON")
@@ -324,13 +336,9 @@ def main(argv=None):
         session_id = args.session
         created_session_id = None
         try:
-            if not legacy_run_reply_supported(client.require_openapi_doc()):
-                print(
-                    f"{CLI_NAME}: unsupported route behavior: missing legacy POST "
-                    "/session/{sessionID}/run + POST /session/{sessionID}/reply; "
-                    "v2 prompt admission is not execution",
-                    file=sys.stderr,
-                )
+            capabilities = _blocking_execution_capabilities(client.require_openapi_doc())
+            if _blocking_execution_strategy(capabilities) is None:
+                _print_error(_unsupported_blocking_execution_message())
                 return EX_UNSUPPORTED
             if session_id is None:
                 directory = str(Path(args.directory or ".").resolve())
@@ -341,22 +349,13 @@ def main(argv=None):
                 )
                 session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
                 created_session_id = session_id
-            run_response = client.run_session_response(session_id, prompt)
-            provider_error = _provider_failure(run_response.data)
-            if provider_error:
-                cleanup_error = _delete_disposable_session(client, created_session_id)
-                if cleanup_error:
-                    _print_cleanup_error(cleanup_error)
-                _print_error(f"provider failure: {provider_error}")
-                return EX_UNAVAILABLE
-            reply_response = client.reply_session_response(session_id)
-            provider_error = _provider_failure(reply_response.data)
-            if provider_error:
-                cleanup_error = _delete_disposable_session(client, created_session_id)
-                if cleanup_error:
-                    _print_cleanup_error(cleanup_error)
-                _print_error(f"provider failure: {provider_error}")
-                return EX_UNAVAILABLE
+            result = _execute_blocking_prompt(client, session_id, prompt, capabilities)
+        except _BlockingProviderFailure as error:
+            cleanup_error = _delete_disposable_session(client, created_session_id)
+            if cleanup_error:
+                _print_cleanup_error(cleanup_error)
+            _print_error(f"provider failure: {error}")
+            return EX_UNAVAILABLE
         except OpenCodeApiError as error:
             cleanup_error = _delete_disposable_session(client, created_session_id)
             if cleanup_error:
@@ -370,7 +369,6 @@ def main(argv=None):
         if cleanup_error:
             _print_cleanup_error(cleanup_error)
             return EX_UNAVAILABLE
-        result = _run_result(session_id, run_response.data, reply_response.data)
         if args.json:
             print(json.dumps(result, sort_keys=True))
             return 0
@@ -923,26 +921,26 @@ def _run_smoke(args, client):
         result["session_id"] = session_id
         result["checks"]["create"] = {"status": "done", "session_id": session_id, "title": smoke_id}
 
-        steer_message_id = f"{smoke_id}-steer"
+        prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
+        event_collector = _SmokeEventCollector(
+            client,
+            session_id,
+            capabilities["route_availability"]["events"]["path"],
+            args.event_limit,
+        )
+        event_collector.start()
+        event_collector.wait_open(args.event_timeout)
+
+        steer_message_id = f"msg_{smoke_id}-steer"
         steer_response = client.admit_prompt_response(
             session_id,
-            {
-                "messageID": steer_message_id,
-                "parts": [{"type": "text", "text": "ocs smoke steer"}],
-                "delivery": "steer",
-            },
-            capabilities["route_availability"]["v2_prompt"]["path"],
+            _prompt_admission_payload(steer_message_id, "ocs smoke steer", "steer", prompt_path),
+            prompt_path,
         )
         admission = _admission_record(session_id, "steer", steer_message_id, steer_response.data, capabilities=capabilities)
         result["checks"]["steer"] = admission
 
-        event_types = _collect_smoke_event_types(
-            client,
-            session_id,
-            capabilities["route_availability"]["events"]["path"],
-            args.event_timeout,
-            args.event_limit,
-        )
+        event_types = event_collector.collect(args.event_timeout)
         result["event_types"] = event_types
         result["checks"]["events"] = {"status": "done", "types": event_types}
 
@@ -1003,12 +1001,6 @@ def _require_smoke_capabilities(capabilities):
     if not capabilities["event_support"]:
         raise _SmokeFailure(
             "unsupported OpenCode server; missing event stream: GET /api/event or GET /event or GET /global/event",
-            exit_code=EX_UNSUPPORTED,
-        )
-    if not capabilities["legacy_fallback_available"]:
-        raise _SmokeFailure(
-            "unsupported route behavior: missing legacy POST /session/{sessionID}/run + POST /session/{sessionID}/reply; "
-            "v2 prompt admission is not execution",
             exit_code=EX_UNSUPPORTED,
         )
 
@@ -1076,15 +1068,12 @@ def _run_live_validate(args, client):
 
         steer_session_id = create_live_session("steer")
         result["session_ids"]["steer"] = steer_session_id
-        steer_message_id = f"{validation_id}-steer"
+        steer_message_id = f"msg_{validation_id}-steer"
+        prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
         steer_response = client.admit_prompt_response(
             steer_session_id,
-            {
-                "messageID": steer_message_id,
-                "parts": [{"type": "text", "text": LIVE_VALIDATE_PROMPT}],
-                "delivery": "steer",
-            },
-            capabilities["route_availability"]["v2_prompt"]["path"],
+            _prompt_admission_payload(steer_message_id, LIVE_VALIDATE_PROMPT, "steer", prompt_path),
+            prompt_path,
         )
         steer = _admission_record(
             steer_session_id,
@@ -1322,26 +1311,81 @@ def _format_live_validate_compact(result):
     return "live_validate " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
-def _collect_smoke_event_types(client, session_id, event_path, timeout, event_limit):
-    event_types = []
-    try:
-        with _watch_deadline(timeout):
-            for raw_event in client.stream_events(event_path):
-                event = normalize_event(raw_event, session_id)
-                if event is None:
-                    continue
-                event_type = event.get("type") or event.get("kind")
-                if event_type and event_type not in event_types:
-                    event_types.append(event_type)
-                if len(event_types) >= event_limit or is_terminal_event(event):
-                    break
-    except _WatchTimeout as error:
+class _SmokeEventCollector:
+    def __init__(self, client, session_id, event_path, event_limit):
+        self.client = client
+        self.session_id = session_id
+        self.event_path = event_path
+        self.event_limit = event_limit
+        self.opened = threading.Event()
+        self.items = queue.Queue()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def wait_open(self, timeout):
+        if self.opened.wait(timeout):
+            return
+        error = self._first_error()
+        if error is not None:
+            raise error
+        raise _SmokeFailure(f"event stream did not open within {_format_timeout(timeout)}s")
+
+    def collect(self, timeout):
+        event_types = []
+        deadline = time.monotonic() + timeout
+        while len(event_types) < self.event_limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                kind, value = self.items.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if kind == "error":
+                raise value
+            if kind == "done":
+                break
+            event = value
+            event_type = event.get("type") or event.get("kind")
+            if event_type and event_type not in event_types:
+                event_types.append(event_type)
+            if is_terminal_event(event):
+                break
         if event_types:
             return event_types
-        raise _SmokeFailure(f"event stream timed out after {_format_timeout(timeout)}s") from error
-    if not event_types:
+        if self.thread.is_alive():
+            raise _SmokeFailure(f"event stream timed out after {_format_timeout(timeout)}s")
         raise _SmokeFailure("event stream produced no events for disposable session")
-    return event_types
+
+    def _run(self):
+        try:
+            for raw_event in self.client.stream_events(self.event_path, on_open=self.opened.set):
+                event = normalize_event(raw_event, self.session_id)
+                if event is None:
+                    continue
+                self.items.put(("event", event))
+        except OpenCodeApiError as error:
+            self.items.put(("error", error))
+        finally:
+            self.items.put(("done", None))
+
+    def _first_error(self):
+        pending = []
+        error = None
+        while True:
+            try:
+                item = self.items.get_nowait()
+            except queue.Empty:
+                break
+            pending.append(item)
+            if item[0] == "error":
+                error = item[1]
+                break
+        for item in pending:
+            self.items.put(item)
+        return error
 
 
 def _smoke_blocker_summary(client, session_id):
@@ -1680,15 +1724,10 @@ def _steer_run_worker(args, store):
         return EX_UNSUPPORTED
 
     message_id = args.message_id or f"msg_{uuid.uuid4().hex}"
-    payload = {
-        "messageID": message_id,
-        "parts": [{"type": "text", "text": args.text}],
-        "delivery": args.delivery,
-    }
+    prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
+    payload = _prompt_admission_payload(message_id, args.text, args.delivery, prompt_path)
     try:
-        response = client.admit_prompt_response(
-            worker["session_id"], payload, capabilities["route_availability"]["v2_prompt"]["path"]
-        )
+        response = client.admit_prompt_response(worker["session_id"], payload, prompt_path)
     except OpenCodeApiError as error:
         if error.status in {400, 404, 405, 415, 422}:
             _print_error(f"unsupported v2 prompt behavior; {_api_error_detail(error)}; legacy run/reply fallback is not used")
@@ -2123,17 +2162,14 @@ def _admit_prompt(args, client, delivery):
         return EX_UNSUPPORTED
 
     message_id = args.message_id or f"msg_{uuid.uuid4().hex}"
-    payload = {
-        "messageID": message_id,
-        "parts": [{"type": "text", "text": args.text}],
-        "delivery": delivery,
-    }
+    prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
+    payload = _prompt_admission_payload(message_id, args.text, delivery, prompt_path)
 
     try:
         response = client.admit_prompt_response(
             args.session_id,
             payload,
-            capabilities["route_availability"]["v2_prompt"]["path"],
+            prompt_path,
         )
     except OpenCodeApiError as error:
         if _is_idempotent_admission_replay(error, message_id):
@@ -2318,6 +2354,122 @@ def _read_prompt(prompt_words):
     return prompt
 
 
+class _BlockingProviderFailure(Exception):
+    pass
+
+
+def _blocking_execution_capabilities(doc):
+    blocking_message_available = blocking_message_supported(doc)
+    legacy_fallback_available = legacy_run_reply_supported(doc)
+    return {
+        "route_availability": {
+            "blocking_message": _execution_route(SESSION_MESSAGE_PATH, "POST", blocking_message_available),
+            "legacy_run": _execution_route(LEGACY_RUN_PATH, "POST", legacy_fallback_available),
+            "legacy_reply": _execution_route(LEGACY_REPLY_PATH, "POST", legacy_fallback_available),
+        },
+        "blocking_message_available": blocking_message_available,
+        "blocking_execution_available": blocking_message_available or legacy_fallback_available,
+        "legacy_fallback_available": legacy_fallback_available,
+    }
+
+
+def _execution_route(path, method, available):
+    return {"path": path, "method": method, "available": available}
+
+
+def _blocking_execution_strategy(capabilities):
+    routes = capabilities.get("route_availability") or {}
+    blocking_message = routes.get("blocking_message") or {}
+    if capabilities.get("blocking_message_available") or blocking_message.get("available"):
+        return "session_message"
+    if capabilities.get("legacy_fallback_available"):
+        return "legacy_run_reply"
+    return None
+
+
+def _unsupported_blocking_execution_message():
+    return (
+        "unsupported route behavior: missing blocking execution: POST /session/{sessionID}/message or legacy "
+        "POST /session/{sessionID}/run + POST /session/{sessionID}/reply; v2 prompt admission is not execution"
+    )
+
+
+def _execute_blocking_prompt(client, session_id, prompt, capabilities):
+    strategy = _blocking_execution_strategy(capabilities)
+    if strategy == "session_message":
+        return _execute_session_message_prompt(client, session_id, prompt, capabilities)
+    if strategy == "legacy_run_reply":
+        return _execute_legacy_run_reply_prompt(client, session_id, prompt)
+    raise OpenCodeApiError(_unsupported_blocking_execution_message())
+
+
+def _execute_session_message_prompt(client, session_id, prompt, capabilities):
+    message_id = f"msg_{uuid.uuid4().hex}"
+    response = _call_with_client_timeout(
+        client,
+        BLOCKING_EXECUTION_TIMEOUT_SECONDS,
+        lambda: client.message_session_response(session_id, prompt, message_id=message_id),
+    )
+    provider_error = _provider_failure(response.data)
+    if provider_error:
+        raise _BlockingProviderFailure(provider_error)
+    return _session_message_result(session_id, message_id, response.data, capabilities)
+
+
+def _execute_legacy_run_reply_prompt(client, session_id, prompt):
+    run_response = _call_with_client_timeout(
+        client,
+        BLOCKING_EXECUTION_TIMEOUT_SECONDS,
+        lambda: client.run_session_response(session_id, prompt),
+    )
+    provider_error = _provider_failure(run_response.data)
+    if provider_error:
+        raise _BlockingProviderFailure(provider_error)
+    reply_response = _call_with_client_timeout(
+        client,
+        BLOCKING_EXECUTION_TIMEOUT_SECONDS,
+        lambda: client.reply_session_response(session_id),
+    )
+    provider_error = _provider_failure(reply_response.data)
+    if provider_error:
+        raise _BlockingProviderFailure(provider_error)
+    return _run_result(session_id, run_response.data, reply_response.data)
+
+
+def _call_with_client_timeout(client, timeout, callback):
+    previous_timeout = client.timeout
+    client.timeout = max(previous_timeout or 0, timeout)
+    try:
+        return callback()
+    finally:
+        client.timeout = previous_timeout
+
+
+def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities):
+    raw_status = _message_value(assistant_message, "status") or "completed"
+    status = short_status(raw_status)
+    return {
+        "session_id": session_id,
+        "message_ids": {
+            "user": prompt_message_id,
+            "assistant": _message_value(assistant_message, "id", "messageID", "messageId"),
+        },
+        "status": status,
+        "raw_status": raw_status,
+        "terminal_state": status,
+        "api_path": {"message": SESSION_MESSAGE_PATH},
+        "execution_strategy": "session_message",
+        "fallback": {
+            "available": capabilities.get("legacy_fallback_available", False),
+            "strategy": "legacy_run_reply",
+            "used": False,
+        },
+        "cost": _message_value(assistant_message, "cost"),
+        "tokens": _message_tokens(assistant_message),
+        "text": _message_text(assistant_message),
+    }
+
+
 def _run_result(session_id, run_message, reply_message):
     raw_status = _message_value(reply_message, "status") or "completed"
     status = short_status(raw_status)
@@ -2331,6 +2483,7 @@ def _run_result(session_id, run_message, reply_message):
         "raw_status": raw_status,
         "terminal_state": status,
         "api_path": {"run": LEGACY_RUN_PATH, "reply": LEGACY_REPLY_PATH},
+        "execution_strategy": "legacy_run_reply",
         "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
         "cost": _message_value(reply_message, "cost"),
         "tokens": _message_tokens(reply_message),
@@ -2420,7 +2573,7 @@ def _is_session_not_found_error(error):
     path = str(getattr(error, "path", "") or "").split("?", 1)[0]
     parts = path.split("/")
     if method == "POST" and len(parts) == 4 and parts[1] == "session":
-        return bool(parts[2]) and parts[3] in {"run", "reply", "abort", "fork"}
+        return bool(parts[2]) and parts[3] in {"run", "reply", "message", "abort", "fork"}
     if method == "GET" and len(parts) == 4 and parts[1] == "session":
         return bool(parts[2]) and parts[3] == "children"
     return method in {"GET", "DELETE"} and len(parts) == 4 and parts[1:3] == ["api", "session"] and bool(parts[3])
@@ -2454,11 +2607,15 @@ def _delete_disposable_session(client, session_id):
 
 def _provider_failure(message):
     status = str(_message_value(message, "status") or "").lower()
-    if status not in {"failed", "error", "errored"}:
-        return None
     error = _message_value(message, "error", "reason", "message")
+    if status not in {"failed", "error", "errored"}:
+        if not status and error:
+            if isinstance(error, dict):
+                return error.get("message") or json.dumps(error, sort_keys=True)
+            return str(error)
+        return None
     if isinstance(error, dict):
-        error = error.get("message") or json.dumps(error, sort_keys=True)
+        return error.get("message") or json.dumps(error, sort_keys=True)
     return error or status
 
 
@@ -2650,6 +2807,8 @@ def _format_question_resolution_compact(result):
 
 
 def _admission_record(session_id, delivery, message_id, data, *, capabilities):
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data["data"]
     if not isinstance(data, dict):
         data = {}
     info = data.get("info") if isinstance(data.get("info"), dict) else {}
@@ -2672,8 +2831,18 @@ def _admission_record(session_id, delivery, message_id, data, *, capabilities):
             "strategy": "legacy_run_reply",
             "used": False,
         },
-        "admitted_sequence": _first_present(data, "admittedSequence", "admitted_sequence", "sequence"),
-        "promoted_sequence": _first_present(data, "promotedSequence", "promoted_sequence"),
+        "admitted_sequence": _first_present(data, "admittedSeq", "admittedSequence", "admitted_sequence", "sequence"),
+        "promoted_sequence": _first_present(data, "promotedSeq", "promotedSequence", "promoted_sequence"),
+    }
+
+
+def _prompt_admission_payload(message_id, text, delivery, prompt_path):
+    if prompt_path.split("?", 1)[0].rstrip("/") == "/api/session/{sessionID}/prompt":
+        return {"id": message_id, "prompt": {"text": text}, "delivery": delivery}
+    return {
+        "messageID": message_id,
+        "parts": [{"type": "text", "text": text}],
+        "delivery": delivery,
     }
 
 
@@ -2835,11 +3004,30 @@ def _session_with_blocker_counts(session, counts):
 
 
 def _session_value(session, *names):
+    session = _session_record(session)
     for name in names:
         value = session.get(name)
         if value is not None:
             return value
+    location = session.get("location")
+    if isinstance(location, dict):
+        for name in names:
+            if name in {"directory", "cwd"} and location.get("directory") is not None:
+                return location.get("directory")
+    time = session.get("time")
+    if isinstance(time, dict):
+        for name in names:
+            if name in {"createdAt", "created_at"} and time.get("created") is not None:
+                return time.get("created")
+            if name in {"updatedAt", "updated_at"} and time.get("updated") is not None:
+                return time.get("updated")
     return None
+
+
+def _session_record(session):
+    if isinstance(session, dict) and isinstance(session.get("data"), dict):
+        return session["data"]
+    return session if isinstance(session, dict) else {}
 
 
 def _first_present(mapping, *names):
@@ -2851,6 +3039,7 @@ def _first_present(mapping, *names):
 
 
 def _session_tokens(session):
+    session = _session_record(session)
     tokens = session.get("tokens")
     if isinstance(tokens, dict):
         if tokens.get("total") is not None:
