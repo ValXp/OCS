@@ -259,6 +259,29 @@ class LiveValidateCliTest(unittest.TestCase):
         self.assertTrue(server.requests[6][2]["title"].startswith("ocs-live-test-"))
         self.assertEqual(server.requests[7][2], {"message": "Reply exactly PONG."})
 
+    def test_live_validate_passes_agent_and_model_to_disposable_sessions(self):
+        with tempfile.TemporaryDirectory() as directory, LiveValidationOpenCodeServer() as server:
+            result = self.run_cli(
+                "live_validate",
+                "--directory",
+                directory,
+                "--agent",
+                "build",
+                "--model",
+                "openai/gpt-5.5",
+                "--json",
+                "--server",
+                server.url,
+                env={"OCS_LIVE_VALIDATE": "1"},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create_payloads = [payload for method, path, payload in server.requests if method == "POST" and path == "/api/session"]
+        self.assertEqual(len(create_payloads), 2)
+        for payload in create_payloads:
+            self.assertEqual(payload["agent"], "build")
+            self.assertEqual(payload["model"], "openai/gpt-5.5")
+
     def test_live_validate_marks_steer_executed_true_from_wait_completion_evidence(self):
         with tempfile.TemporaryDirectory() as directory, LiveValidationOpenCodeServer(
             wait_payload={"sessionID": "ses_live_1", "status": "completed"}

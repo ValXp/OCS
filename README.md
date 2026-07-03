@@ -90,7 +90,7 @@ Run optional live-provider validation only when you explicitly allow provider ca
 OCS_LIVE_VALIDATE=1 bin/ocs live_validate --directory /path/to/target --server http://127.0.0.1:4096
 ```
 
-`live_validate` uses the minimal prompt `Reply exactly PONG.`. Expected token use is two minimal PONG prompts at most: one v2 steer admission and one legacy run/reply used by `run_blocking`. It records v2 steer admission, v2 wait availability, and the legacy run/reply result. Live validation creates disposable `ocs-live-` sessions and verifies they are deleted before the command exits.
+`live_validate` uses the minimal prompt `Reply exactly PONG.`. Expected token use is two minimal PONG prompts at most: one v2 steer admission and one legacy run/reply used by `run_blocking`. It records v2 steer admission, v2 wait availability, and the legacy run/reply result. Live validation creates disposable `ocs-live-` sessions and verifies they are deleted before the command exits. Use `--agent` and `--model` when you need to select a non-default configured OpenCode agent or model.
 
 Run a deterministic smoke check in no-live-model mode:
 
@@ -117,12 +117,22 @@ Optional E2E tests live under `tests/e2e/` and are not discovered by the default
 E2E environment variables:
 
 - `OCS_E2E_SERVER_URL`: existing OpenCode server URL. When unset, E2E tests are skipped cleanly.
+- `OCS_E2E_LIVE`: set to `1` to include manual live-provider E2E tests that may consume provider tokens.
+- `OCS_LIVE_VALIDATE`: set to `1` with `OCS_E2E_LIVE=1` to allow `live_validate` provider calls from E2E.
+- `OCS_E2E_AGENT`: optional agent passed to live `bin/ocs live_validate --agent`.
+- `OCS_E2E_MODEL`: optional model passed to live `bin/ocs live_validate --model`.
 - `OCS_E2E_TIMEOUT_SECONDS`: optional subprocess timeout in seconds. Default: `20`.
 
 Run the E2E harness explicitly:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
+```
+
+Run live E2E only by explicit manual opt-in. These tests call the configured provider and may consume provider tokens:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 OCS_E2E_LIVE=1 OCS_LIVE_VALIDATE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
 ```
 
 Server selection:

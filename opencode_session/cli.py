@@ -153,6 +153,8 @@ def main(argv=None):
     )
     live_parser.add_argument("--directory", default=".", help="target directory for disposable live validation sessions")
     live_parser.add_argument("--prefix", default=LIVE_SESSION_PREFIX, help="recognizable disposable live session prefix")
+    live_parser.add_argument("--agent", help="agent name for disposable live validation sessions")
+    live_parser.add_argument("--model", help="model name for disposable live validation sessions")
     _add_server_argument(live_parser)
     live_parser.add_argument("--json", action="store_true", help="print live validation result JSON")
 
@@ -1037,6 +1039,8 @@ def _run_live_validate(args, client):
     def create_live_session(role):
         create_response = client.create_session_response(
             directory,
+            agent=args.agent,
+            model=args.model,
             title=f"{validation_id}-{role}",
             metadata={
                 "disposable": True,

@@ -12,6 +12,10 @@ from urllib.request import Request, urlopen
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "bin" / "ocs"
 SERVER_ENV = "OCS_E2E_SERVER_URL"
+LIVE_E2E_ENV = "OCS_E2E_LIVE"
+LIVE_VALIDATE_ENV = "OCS_LIVE_VALIDATE"
+AGENT_ENV = "OCS_E2E_AGENT"
+MODEL_ENV = "OCS_E2E_MODEL"
 TIMEOUT_ENV = "OCS_E2E_TIMEOUT_SECONDS"
 DEFAULT_TIMEOUT_SECONDS = 20.0
 
@@ -21,6 +25,26 @@ def require_server_url(testcase):
     if not server_url:
         testcase.skipTest(f"set {SERVER_ENV} to run OpenCode E2E tests")
     return server_url
+
+
+def require_live_server_url(testcase):
+    server_url = require_server_url(testcase)
+    if os.environ.get(LIVE_E2E_ENV) != "1":
+        testcase.skipTest(f"set {LIVE_E2E_ENV}=1 to run token-consuming live OpenCode E2E tests")
+    if os.environ.get(LIVE_VALIDATE_ENV) != "1":
+        testcase.skipTest(f"set {LIVE_VALIDATE_ENV}=1 to allow live_validate provider calls")
+    return server_url
+
+
+def live_validate_selection_args():
+    args = []
+    agent = os.environ.get(AGENT_ENV)
+    if agent:
+        args.extend(["--agent", agent])
+    model = os.environ.get(MODEL_ENV)
+    if model:
+        args.extend(["--model", model])
+    return args
 
 
 def run_ocs(*args):
