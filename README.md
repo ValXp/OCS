@@ -74,6 +74,16 @@ Multi-item compact output uses a small table; single session or worker output st
 
 JSON output includes API path, fallback behavior, session ID, prompt/message ID, worker role where applicable, and terminal state.
 
+Local orchestration runs are managed with `ocs run`. Workers can declare retry and timeout policy in local metadata before `start`:
+
+```bash
+bin/ocs run --store .ocs/runs worker demo builder --role build --prompt "Run tests" --retry-limit 2 --retryable api --retryable provider --timeout-seconds 600 --timeout-policy timeout
+```
+
+Retryable failure categories are `api`, `provider`, `timeout`, or `all`. Timeout policy can mark the worker `timeout`, `blocked`, `failed`, or `aborted`. JSON run status includes retry counts, retry limits, retryable categories, timeout metadata, failure category/reason, and `next_eligible_action`.
+
+The finalized short status terms remain `queued`, `active`, `blocked`, `done`, `failed`, `aborted`, and `timeout`. Longer orchestration states map to those terms: pending is `queued`, running and retrying are `active` with `next_eligible_action`, complete is `done`, and timed out is `timeout`. Deleted session cleanup is reported in worker `cleanup.deleted` while the worker status remains the work outcome.
+
 Live-provider validation is separate and opt-in only. It must not run as part of default smoke tests or mocked API tests.
 
 Run a deterministic smoke check in no-live-model mode:
@@ -103,6 +113,15 @@ Exit codes:
 - `64`: command usage error
 - `69`: server unavailable or health response unreadable
 - `70`: server is reachable but lacks required session/prompt capabilities
+
+Run policy exit codes:
+
+- `0`: run completed with all workers `done`
+- `1`: partial failure after at least one worker completed
+- `75`: run is blocked
+- `124`: run timed out
+- `130`: run was aborted
+- `69`: run failed before any worker completed, or the server/API is unavailable
 
 ## Ralph Wiggum loop
 

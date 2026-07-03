@@ -49,6 +49,9 @@ class OcsUxContractTest(unittest.TestCase):
         self.assertIn("run_blocking", readme)
         self.assertIn("steer", readme)
         self.assertIn("Live-provider validation is separate and opt-in", readme)
+        self.assertIn("queued`, `active`, `blocked`, `done`, `failed`, `aborted`, and `timeout`", readme)
+        self.assertIn("`124`: run timed out", readme)
+        self.assertIn("`130`: run was aborted", readme)
         self.assertNotIn("bin/opencode-session", readme)
         self.assertNotIn("top-level `queue`", readme)
 

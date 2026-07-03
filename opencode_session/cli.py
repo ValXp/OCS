@@ -29,6 +29,9 @@ EX_UNSUPPORTED = 70
 EX_DATAERR = 65
 EX_NOINPUT = 66
 EX_TIMEOUT = 124
+EX_PARTIAL = 1
+EX_BLOCKED = 75
+EX_ABORTED = 130
 
 
 def main(argv=None):
@@ -594,7 +597,21 @@ def _add_run_store_arguments(parser):
     run_worker_parser.add_argument("--prompt-id", dest="prompt_ids", action="append", help="prompt admission ID")
     run_worker_parser.add_argument("--status", help="worker status")
     run_worker_parser.add_argument("--retry-count", type=int, help="worker retry count")
+    run_worker_parser.add_argument("--retry-limit", type=int, help="maximum automatic retries for retryable failures")
+    run_worker_parser.add_argument(
+        "--retryable",
+        "--retryable-failure",
+        dest="retryable_failures",
+        action="append",
+        choices=("api", "provider", "timeout", "all"),
+        help="failure category eligible for automatic retry; repeat for multiple categories",
+    )
     run_worker_parser.add_argument("--timeout-seconds", type=int, help="worker timeout in seconds")
+    run_worker_parser.add_argument(
+        "--timeout-policy",
+        choices=("timeout", "blocked", "failed", "aborted"),
+        help="status to apply when the worker timeout elapses",
+    )
     run_worker_parser.add_argument("--blocker", dest="blockers", action="append", help="blocker reference")
     run_worker_parser.add_argument("--output-ref", dest="output_refs", action="append", help="output reference")
 
@@ -643,7 +660,10 @@ def _handle_run_store_command(args):
                 prompt_ids=args.prompt_ids,
                 status=args.status,
                 retry_count=args.retry_count,
+                retry_limit=args.retry_limit,
+                retryable_failures=args.retryable_failures,
                 timeout_seconds=args.timeout_seconds,
+                timeout_policy=args.timeout_policy,
                 blockers=args.blockers,
                 output_refs=args.output_refs,
             )
@@ -698,9 +718,9 @@ def _start_prompted_workers_run(args, store, run):
             if not ready_workers:
                 _mark_dependency_blocked_workers(run)
                 break
-            started_workers = []
             for worker in ready_workers:
                 worker["status"] = "active"
+                worker["next_eligible_action"] = "wait"
             _save_orchestration_run(store, run)
             for worker in ready_workers:
                 if not worker.get("session_id"):
@@ -709,40 +729,100 @@ def _start_prompted_workers_run(args, store, run):
                     )
                     worker["session_id"] = _session_value(create_response.data, "id", "sessionID", "sessionId")
             _save_orchestration_run(store, run)
-            for worker in ready_workers:
-                run_response = client.run_session_response(worker["session_id"], _worker_prompt(worker))
-                prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
-                if prompt_id is not None:
-                    worker["prompt_ids"] = [prompt_id]
-                provider_error = _provider_failure(run_response.data)
-                if provider_error:
-                    worker["status"] = "failed"
-                    worker["error"] = provider_error
-                    _mark_dependency_blocked_workers(run)
-                    _refresh_orchestration_run_summary(run)
-                    _save_orchestration_run(store, run)
-                    _print_error(f"provider failure: {provider_error}")
-                    return EX_UNAVAILABLE
-                started_workers.append((worker, run_response.data))
-            _save_orchestration_run(store, run)
-            for worker, run_message in started_workers:
-                reply_response = client.reply_session_response(worker["session_id"])
-                provider_error = _provider_failure(reply_response.data)
-                if provider_error:
-                    worker["status"] = "failed"
-                    worker["error"] = provider_error
-                    _mark_dependency_blocked_workers(run)
-                    _refresh_orchestration_run_summary(run)
-                    _save_orchestration_run(store, run)
-                    _print_error(f"provider failure: {provider_error}")
-                    return EX_UNAVAILABLE
-                result = _run_result(worker["session_id"], run_message, reply_response.data)
-                assistant_message_id = result["message_ids"].get("assistant")
-                worker["result"] = result
-                worker["status"] = "done"
-                worker["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
-            _refresh_orchestration_run_summary(run)
-            _save_orchestration_run(store, run)
+            attempt_workers = list(ready_workers)
+            while attempt_workers:
+                retry_workers = []
+                started_workers = []
+                for worker in attempt_workers:
+                    worker["status"] = "active"
+                    worker["next_eligible_action"] = "wait"
+                    worker["timeout_started_at"] = _utc_now() if worker.get("timeout_seconds") else None
+                    try:
+                        run_response = _call_worker_with_timeout(
+                            worker,
+                            lambda: client.run_session_response(worker["session_id"], _worker_prompt(worker)),
+                        )
+                    except _WatchTimeout:
+                        reason = _worker_timeout_reason(worker)
+                        if _schedule_worker_retry(worker, "timeout", reason):
+                            worker["timed_out_at"] = _utc_now()
+                            retry_workers.append(worker)
+                            continue
+                        _mark_worker_timeout(worker, reason)
+                        _mark_dependency_blocked_workers(run)
+                        _refresh_orchestration_run_summary(run)
+                        _save_orchestration_run(store, run)
+                        _print_error(reason)
+                        return _exit_code_for_orchestration_run(run)
+                    except OpenCodeApiError as error:
+                        if _schedule_worker_retry(worker, "api", str(error)):
+                            retry_workers.append(worker)
+                            continue
+                        _mark_worker_failed(worker, "api", str(error))
+                        _mark_dependency_blocked_workers(run)
+                        _refresh_orchestration_run_summary(run)
+                        _save_orchestration_run(store, run)
+                        _print_error(f"api failure: {error}")
+                        return _exit_code_for_orchestration_run(run)
+                    prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
+                    if prompt_id is not None:
+                        worker["prompt_ids"] = [prompt_id]
+                    provider_error = _provider_failure(run_response.data)
+                    if provider_error:
+                        if _schedule_worker_retry(worker, "provider", provider_error):
+                            retry_workers.append(worker)
+                            continue
+                        _mark_worker_failed(worker, "provider", provider_error)
+                        _mark_dependency_blocked_workers(run)
+                        _refresh_orchestration_run_summary(run)
+                        _save_orchestration_run(store, run)
+                        _print_error(f"provider failure: {provider_error}")
+                        return _exit_code_for_orchestration_run(run)
+                    started_workers.append((worker, run_response.data))
+                _save_orchestration_run(store, run)
+                for worker, run_message in started_workers:
+                    try:
+                        reply_response = _call_worker_with_timeout(worker, lambda: client.reply_session_response(worker["session_id"]))
+                    except _WatchTimeout:
+                        reason = _worker_timeout_reason(worker)
+                        if _schedule_worker_retry(worker, "timeout", reason):
+                            worker["timed_out_at"] = _utc_now()
+                            retry_workers.append(worker)
+                            continue
+                        _mark_worker_timeout(worker, reason)
+                        _mark_dependency_blocked_workers(run)
+                        _refresh_orchestration_run_summary(run)
+                        _save_orchestration_run(store, run)
+                        _print_error(reason)
+                        return _exit_code_for_orchestration_run(run)
+                    except OpenCodeApiError as error:
+                        if _schedule_worker_retry(worker, "api", str(error)):
+                            retry_workers.append(worker)
+                            continue
+                        _mark_worker_failed(worker, "api", str(error))
+                        _mark_dependency_blocked_workers(run)
+                        _refresh_orchestration_run_summary(run)
+                        _save_orchestration_run(store, run)
+                        _print_error(f"api failure: {error}")
+                        return _exit_code_for_orchestration_run(run)
+                    provider_error = _provider_failure(reply_response.data)
+                    if provider_error:
+                        if _schedule_worker_retry(worker, "provider", provider_error):
+                            retry_workers.append(worker)
+                            continue
+                        _mark_worker_failed(worker, "provider", provider_error)
+                        _mark_dependency_blocked_workers(run)
+                        _refresh_orchestration_run_summary(run)
+                        _save_orchestration_run(store, run)
+                        _print_error(f"provider failure: {provider_error}")
+                        return _exit_code_for_orchestration_run(run)
+                    result = _run_result(worker["session_id"], run_message, reply_response.data)
+                    _apply_worker_result(worker, result)
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                if not retry_workers:
+                    break
+                attempt_workers = retry_workers
             if not _ready_prompted_workers(run.get("workers", {})):
                 _mark_dependency_blocked_workers(run)
                 _refresh_orchestration_run_summary(run)
@@ -755,7 +835,7 @@ def _start_prompted_workers_run(args, store, run):
         return EX_UNAVAILABLE
 
     print(format_run_compact(run))
-    return 0 if run.get("status") == "done" else EX_UNAVAILABLE
+    return _exit_code_for_orchestration_run(run)
 
 
 class _SmokeFailure(Exception):
@@ -1099,40 +1179,94 @@ def _start_single_worker_run(args, store):
         if args.model is not None:
             worker["model"] = args.model
 
-        run_response = client.run_session_response(session_id, args.prompt)
-        prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
-        if prompt_id is not None:
-            worker["prompt_ids"] = [prompt_id]
-            _save_orchestration_run(store, run)
+        while True:
+            worker["status"] = "active"
+            worker["next_eligible_action"] = "wait"
+            worker["timeout_started_at"] = _utc_now() if worker.get("timeout_seconds") else None
+            try:
+                run_response = _call_worker_with_timeout(worker, lambda: client.run_session_response(session_id, args.prompt))
+            except _WatchTimeout:
+                reason = _worker_timeout_reason(worker)
+                if _schedule_worker_retry(worker, "timeout", reason):
+                    worker["timed_out_at"] = _utc_now()
+                    _save_orchestration_run(store, run)
+                    continue
+                _mark_worker_timeout(worker, reason)
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                _print_error(reason)
+                return _exit_code_for_orchestration_run(run)
+            except OpenCodeApiError as error:
+                if _schedule_worker_retry(worker, "api", str(error)):
+                    _save_orchestration_run(store, run)
+                    continue
+                _mark_worker_failed(worker, "api", str(error))
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                _print_error(f"api failure: {error}")
+                return _exit_code_for_orchestration_run(run)
 
-        provider_error = _provider_failure(run_response.data)
-        if provider_error:
-            _mark_orchestration_failed(store, run, worker, provider_error)
-            _print_error(f"provider failure: {provider_error}")
-            return EX_UNAVAILABLE
+            prompt_id = _message_value(run_response.data, "id", "messageID", "messageId")
+            if prompt_id is not None:
+                worker["prompt_ids"] = [prompt_id]
+                _save_orchestration_run(store, run)
 
-        event_route = capabilities["route_availability"]["events"]
-        if event_route["available"]:
-            _stream_orchestration_progress(client, session_id, event_route["path"])
+            provider_error = _provider_failure(run_response.data)
+            if provider_error:
+                if _schedule_worker_retry(worker, "provider", provider_error):
+                    _save_orchestration_run(store, run)
+                    continue
+                _mark_worker_failed(worker, "provider", provider_error)
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                _print_error(f"provider failure: {provider_error}")
+                return _exit_code_for_orchestration_run(run)
 
-        reply_response = client.reply_session_response(session_id)
-        provider_error = _provider_failure(reply_response.data)
-        if provider_error:
-            _mark_orchestration_failed(store, run, worker, provider_error)
-            _print_error(f"provider failure: {provider_error}")
-            return EX_UNAVAILABLE
+            event_route = capabilities["route_availability"]["events"]
+            if event_route["available"]:
+                _stream_orchestration_progress(client, session_id, event_route["path"])
+
+            try:
+                reply_response = _call_worker_with_timeout(worker, lambda: client.reply_session_response(session_id))
+            except _WatchTimeout:
+                reason = _worker_timeout_reason(worker)
+                if _schedule_worker_retry(worker, "timeout", reason):
+                    worker["timed_out_at"] = _utc_now()
+                    _save_orchestration_run(store, run)
+                    continue
+                _mark_worker_timeout(worker, reason)
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                _print_error(reason)
+                return _exit_code_for_orchestration_run(run)
+            except OpenCodeApiError as error:
+                if _schedule_worker_retry(worker, "api", str(error)):
+                    _save_orchestration_run(store, run)
+                    continue
+                _mark_worker_failed(worker, "api", str(error))
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                _print_error(f"api failure: {error}")
+                return _exit_code_for_orchestration_run(run)
+            provider_error = _provider_failure(reply_response.data)
+            if provider_error:
+                if _schedule_worker_retry(worker, "provider", provider_error):
+                    _save_orchestration_run(store, run)
+                    continue
+                _mark_worker_failed(worker, "provider", provider_error)
+                _refresh_orchestration_run_summary(run)
+                _save_orchestration_run(store, run)
+                _print_error(f"provider failure: {provider_error}")
+                return _exit_code_for_orchestration_run(run)
+            break
     except OpenCodeApiError as error:
         _mark_orchestration_failed(store, run, worker, str(error))
         _print_error(f"api failure: {error}")
         return EX_UNAVAILABLE
 
     result = _run_result(session_id, run_response.data, reply_response.data)
-    assistant_message_id = result["message_ids"].get("assistant")
-    worker["result"] = result
-    worker["status"] = "done"
-    worker["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
-    run["status"] = "done"
-    run["output_refs"] = [f"{worker['id']}:{assistant_message_id}"] if assistant_message_id else []
+    _apply_worker_result(worker, result)
+    _refresh_orchestration_run_summary(run)
     if args.cleanup:
         worker["cleanup"] = {"requested": True, "deleted": False}
         if created_session_id is not None:
@@ -1146,7 +1280,7 @@ def _start_single_worker_run(args, store):
             worker["cleanup"]["deleted"] = True
     _save_orchestration_run(store, run)
     print(format_run_compact(run))
-    return 0
+    return _exit_code_for_orchestration_run(run)
 
 
 def _collect_run_results(args, store):
@@ -1303,7 +1437,17 @@ def _ensure_orchestration_worker(run, worker_id, *, role):
     worker.setdefault("dependencies", [])
     worker.setdefault("prompt_ids", [])
     worker.setdefault("retry_count", 0)
+    worker.setdefault("retry_limit", 0)
+    worker.setdefault("retryable_failures", [])
     worker.setdefault("timeout_seconds", None)
+    worker.setdefault("timeout_policy", "timeout")
+    worker.setdefault("timeout_started_at", None)
+    worker.setdefault("timed_out_at", None)
+    worker.setdefault("failure_category", None)
+    worker.setdefault("failure_reason", None)
+    worker.setdefault("last_failure_category", None)
+    worker.setdefault("last_failure_reason", None)
+    worker.setdefault("next_eligible_action", "start")
     worker.setdefault("blockers", [])
     worker.setdefault("output_refs", [])
     if not worker.get("role"):
@@ -1327,15 +1471,118 @@ def _mark_orchestration_failed(store, run, worker, error):
     run["status"] = "failed"
     worker["status"] = "failed"
     worker["error"] = error
+    worker["failure_category"] = "api"
+    worker["failure_reason"] = error
+    worker["last_failure_category"] = "api"
+    worker["last_failure_reason"] = error
+    worker["next_eligible_action"] = "none"
     _save_orchestration_run(store, run)
+
+
+def _mark_worker_failed(worker, category, reason):
+    worker["status"] = "failed"
+    worker["error"] = reason
+    worker["failure_category"] = category
+    worker["failure_reason"] = reason
+    worker["last_failure_category"] = category
+    worker["last_failure_reason"] = reason
+    worker["next_eligible_action"] = "retry" if _worker_retry_available(worker, category) else "none"
+
+
+def _schedule_worker_retry(worker, category, reason):
+    if not _worker_retry_available(worker, category):
+        return False
+    worker["retry_count"] = int(worker.get("retry_count") or 0) + 1
+    worker["status"] = "active"
+    worker["failure_category"] = None
+    worker["failure_reason"] = None
+    worker["last_failure_category"] = category
+    worker["last_failure_reason"] = reason
+    worker["next_eligible_action"] = "retry"
+    return True
+
+
+def _worker_retry_available(worker, category):
+    retryable = set(worker.get("retryable_failures") or [])
+    if category not in retryable and "all" not in retryable:
+        return False
+    try:
+        retry_count = int(worker.get("retry_count") or 0)
+        retry_limit = int(worker.get("retry_limit") or 0)
+    except (TypeError, ValueError):
+        return False
+    return retry_count < retry_limit
+
+
+def _call_worker_with_timeout(worker, callback):
+    timeout = worker.get("timeout_seconds")
+    if timeout is None:
+        return callback()
+    with _watch_deadline(timeout):
+        return callback()
+
+
+def _worker_timeout_reason(worker):
+    return f"worker timed out after {_format_timeout(worker.get('timeout_seconds'))}s"
+
+
+def _mark_worker_timeout(worker, reason):
+    status = worker.get("timeout_policy") or "timeout"
+    if status == "failed":
+        status = "failed"
+    worker["status"] = status
+    worker["error"] = reason
+    worker["failure_category"] = "timeout"
+    worker["failure_reason"] = reason
+    worker["last_failure_category"] = "timeout"
+    worker["last_failure_reason"] = reason
+    worker["timed_out_at"] = _utc_now()
+    worker["output_refs"] = []
+    if status == "blocked":
+        worker["blockers"] = ["timeout"]
+        worker["next_eligible_action"] = "resolve_blocker"
+    else:
+        worker["next_eligible_action"] = "none"
+
+
+def _apply_worker_result(worker, result):
+    worker["result"] = result
+    worker["status"] = result["status"]
+    worker["failure_category"] = None
+    worker["failure_reason"] = None
+    worker["next_eligible_action"] = "collect" if result["status"] == "done" else "none"
+    assistant_message_id = result["message_ids"].get("assistant")
+    worker["output_refs"] = [f"assistant:{assistant_message_id}"] if result["status"] == "done" and assistant_message_id else []
+
+
+def _exit_code_for_orchestration_run(run):
+    status = run.get("status")
+    if status == "done":
+        return 0
+    if status == "timeout":
+        return EX_TIMEOUT
+    if status == "blocked":
+        return EX_BLOCKED
+    if status == "aborted":
+        return EX_ABORTED
+    if _has_partial_worker_success(run):
+        return EX_PARTIAL
+    return EX_UNAVAILABLE
+
+
+def _has_partial_worker_success(run):
+    workers = [worker for worker in (run.get("workers") or {}).values() if isinstance(worker, dict) and _worker_prompt(worker)]
+    if not workers:
+        return False
+    statuses = {worker.get("status") for worker in workers}
+    return "done" in statuses and any(status in {"failed", "blocked", "aborted", "timeout"} for status in statuses)
 
 
 def _mark_prompted_workers_failed(store, run, error):
     run["status"] = "failed"
     for worker in run.get("workers", {}).values():
         if isinstance(worker, dict) and _worker_prompt(worker) and worker.get("status") not in {"done", "failed"}:
-            worker["status"] = "failed"
-            worker["error"] = error
+            _mark_worker_failed(worker, "api", error)
     _save_orchestration_run(store, run)
 
 
@@ -1404,7 +1651,7 @@ def _refresh_orchestration_run_summary(run):
         run["status"] = "done"
     elif any(status == "failed" for status in statuses):
         run["status"] = "failed"
-    elif statuses == {"aborted"}:
+    elif any(status == "aborted" for status in statuses):
         run["status"] = "aborted"
     elif any(status == "timeout" for status in statuses):
         run["status"] = "timeout"

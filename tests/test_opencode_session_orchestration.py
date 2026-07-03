@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -93,7 +94,107 @@ class OrchestrationOpenCodeServer:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except BrokenPipeError:
+                    return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.daemon = True
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.server_close()
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.server.server_port}"
+
+
+class RetryPolicyOpenCodeServer:
+    def __init__(self, *, run_payloads, reply_payloads=None, session_id="ses_retry"):
+        self.run_payloads = list(run_payloads)
+        self.reply_payloads = list(
+            reply_payloads
+            or [
+                {
+                    "id": "msg_assistant_1",
+                    "status": "completed",
+                    "cost": 0.015,
+                    "tokens": {"total": 20},
+                    "text": "Worker finished after retry.",
+                }
+            ]
+        )
+        self.session_id = session_id
+        self.requests = []
+        self.server = None
+        self.thread = None
+
+    def __enter__(self):
+        parent = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                return
+
+            def do_GET(self):
+                parent.requests.append(("GET", self.path, None))
+                if self.path == "/global/health":
+                    self._write_json({"status": "ok", "version": "2.0.0"})
+                    return
+                if self.path == "/doc":
+                    self._write_json(
+                        {
+                            "openapi": "3.1.0",
+                            "paths": {
+                                "/api/session": {"get": {}, "post": {}},
+                                "/session/{sessionID}/run": {"post": {}},
+                                "/session/{sessionID}/reply": {"post": {}},
+                            },
+                        }
+                    )
+                    return
+                self.send_error(404)
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
+                payload = json.loads(body or "{}")
+                parent.requests.append(("POST", self.path, payload))
+                if self.path == "/api/session":
+                    self._write_json({"id": parent.session_id, "directory": payload["directory"]})
+                    return
+                if self.path == f"/session/{parent.session_id}/run":
+                    self._write_retry_payload(parent.run_payloads.pop(0))
+                    return
+                if self.path == f"/session/{parent.session_id}/reply":
+                    self._write_retry_payload(parent.reply_payloads.pop(0))
+                    return
+                self.send_error(404)
+
+            def _write_retry_payload(self, payload):
+                status = 200
+                if isinstance(payload, tuple) and payload and payload[0] == "sleep":
+                    _, delay, payload = payload
+                    time.sleep(delay)
+                if isinstance(payload, tuple):
+                    status, payload = payload
+                self._write_json(payload, status=status)
+
+            def _write_json(self, payload, *, status=200):
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except BrokenPipeError:
+                    return
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever)
@@ -528,6 +629,490 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["status"], "blocked")
         self.assertEqual(payload["workers"]["review"]["session_id"], None)
         self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency:build"])
+
+    def test_start_returns_partial_failure_exit_code_when_some_workers_complete_before_failure(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with MultiWorkerOrchestrationServer(
+                session_ids=["ses_docs", "ses_plan"],
+                run_payloads={
+                    "ses_docs": {"id": "msg_docs_user", "status": "submitted"},
+                    "ses_plan": {"id": "msg_plan_user", "status": "submitted"},
+                },
+                reply_payloads={
+                    "ses_docs": {
+                        "id": "msg_docs_assistant",
+                        "status": "completed",
+                        "cost": 0.02,
+                        "tokens": {"total": 17},
+                        "text": "Docs ready.",
+                    },
+                    "ses_plan": {"id": "msg_plan_assistant", "status": "failed", "error": "planner failed"},
+                },
+            ) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                docs = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "docs",
+                    "--role",
+                    "write",
+                    "--prompt",
+                    "Draft the release notes",
+                )
+                planner = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "planner",
+                    "--role",
+                    "plan",
+                    "--prompt",
+                    "Create the implementation plan",
+                )
+                start = self.run_cli("run", "--store", store, "start", "demo")
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(docs.returncode, 0, docs.stderr)
+        self.assertEqual(planner.returncode, 0, planner.stderr)
+        self.assertEqual(start.returncode, 1)
+        self.assertIn("planner failed", start.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["output_refs"], ["docs:msg_docs_assistant"])
+        self.assertEqual(payload["workers"]["docs"]["status"], "done")
+        self.assertEqual(payload["workers"]["planner"]["status"], "failed")
+        self.assertEqual(payload["workers"]["planner"]["failure_category"], "provider")
+        self.assertEqual(payload["workers"]["planner"]["failure_reason"], "planner failed")
+
+    def test_start_retries_retryable_provider_failure_and_persists_success_metadata(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with RetryPolicyOpenCodeServer(
+                run_payloads=[
+                    {"id": "msg_user_failed", "status": "failed", "error": "transient provider outage"},
+                    {"id": "msg_user_retry", "status": "submitted"},
+                ]
+            ) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "worker",
+                    "--role",
+                    "worker",
+                    "--prompt",
+                    "Finish the worker task",
+                    "--retry-limit",
+                    "1",
+                    "--retryable",
+                    "provider",
+                )
+                start = self.run_cli("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(start.returncode, 0, start.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/global/health", None),
+                ("GET", "/doc", None),
+                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/reply", {}),
+            ],
+        )
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "done")
+        retry_worker = payload["workers"]["worker"]
+        self.assertEqual(retry_worker["status"], "done")
+        self.assertEqual(retry_worker["retry_count"], 1)
+        self.assertEqual(retry_worker["retry_limit"], 1)
+        self.assertEqual(retry_worker["retryable_failures"], ["provider"])
+        self.assertEqual(retry_worker["last_failure_category"], "provider")
+        self.assertEqual(retry_worker["last_failure_reason"], "transient provider outage")
+        self.assertIsNone(retry_worker["failure_reason"])
+        self.assertEqual(retry_worker["next_eligible_action"], "collect")
+        self.assertEqual(retry_worker["result"]["message_ids"], {"user": "msg_user_retry", "assistant": "msg_assistant_1"})
+
+    def test_start_stops_after_retry_exhaustion_and_records_failure_reason(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with RetryPolicyOpenCodeServer(
+                run_payloads=[
+                    {"id": "msg_user_failed_1", "status": "failed", "error": "provider temporarily unavailable"},
+                    {"id": "msg_user_failed_2", "status": "failed", "error": "provider still unavailable"},
+                ]
+            ) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "worker",
+                    "--role",
+                    "worker",
+                    "--prompt",
+                    "Finish the worker task",
+                    "--retry-limit",
+                    "1",
+                    "--retryable",
+                    "provider",
+                )
+                start = self.run_cli("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(start.returncode, 69)
+        self.assertEqual(start.stdout, "")
+        self.assertIn("provider still unavailable", start.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/global/health", None),
+                ("GET", "/doc", None),
+                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+            ],
+        )
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "failed")
+        retry_worker = payload["workers"]["worker"]
+        self.assertEqual(retry_worker["status"], "failed")
+        self.assertEqual(retry_worker["retry_count"], 1)
+        self.assertEqual(retry_worker["retry_limit"], 1)
+        self.assertEqual(retry_worker["retryable_failures"], ["provider"])
+        self.assertEqual(retry_worker["prompt_ids"], ["msg_user_failed_2"])
+        self.assertEqual(retry_worker["failure_category"], "provider")
+        self.assertEqual(retry_worker["failure_reason"], "provider still unavailable")
+        self.assertEqual(retry_worker["last_failure_category"], "provider")
+        self.assertEqual(retry_worker["last_failure_reason"], "provider still unavailable")
+        self.assertEqual(retry_worker["next_eligible_action"], "none")
+
+    def test_start_retries_retryable_api_failure_and_persists_success_metadata(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with RetryPolicyOpenCodeServer(
+                run_payloads=[
+                    (503, {"error": "upstream overloaded"}),
+                    {"id": "msg_user_retry", "status": "submitted"},
+                ]
+            ) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "worker",
+                    "--role",
+                    "worker",
+                    "--prompt",
+                    "Finish the worker task",
+                    "--retry-limit",
+                    "1",
+                    "--retryable",
+                    "api",
+                )
+                start = self.run_cli("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(start.returncode, 0, start.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/global/health", None),
+                ("GET", "/doc", None),
+                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/reply", {}),
+            ],
+        )
+        retry_worker = json.loads(status.stdout)["workers"]["worker"]
+        self.assertEqual(retry_worker["status"], "done")
+        self.assertEqual(retry_worker["retry_count"], 1)
+        self.assertEqual(retry_worker["retry_limit"], 1)
+        self.assertEqual(retry_worker["retryable_failures"], ["api"])
+        self.assertEqual(retry_worker["last_failure_category"], "api")
+        self.assertIn("HTTP 503", retry_worker["last_failure_reason"])
+        self.assertEqual(retry_worker["next_eligible_action"], "collect")
+
+    def test_start_prompt_uses_stored_worker_retry_policy(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with RetryPolicyOpenCodeServer(
+                run_payloads=[
+                    {"id": "msg_user_failed", "status": "failed", "error": "transient provider outage"},
+                    {"id": "msg_user_retry", "status": "submitted"},
+                ]
+            ) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "worker",
+                    "--role",
+                    "worker",
+                    "--retry-limit",
+                    "1",
+                    "--retryable",
+                    "provider",
+                )
+                start = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "start",
+                    "demo",
+                    "--prompt",
+                    "Finish the worker task",
+                )
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(start.returncode, 0, start.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/global/health", None),
+                ("GET", "/doc", None),
+                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/reply", {}),
+            ],
+        )
+        retry_worker = json.loads(status.stdout)["workers"]["worker"]
+        self.assertEqual(retry_worker["status"], "done")
+        self.assertEqual(retry_worker["retry_count"], 1)
+        self.assertEqual(retry_worker["last_failure_category"], "provider")
+        self.assertEqual(retry_worker["next_eligible_action"], "collect")
+
+    def test_start_times_out_stuck_worker_and_records_timeout_metadata(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with RetryPolicyOpenCodeServer(
+                run_payloads=[("sleep", 2, {"id": "msg_user_late", "status": "submitted"})]
+            ) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "worker",
+                    "--role",
+                    "worker",
+                    "--prompt",
+                    "Finish the worker task",
+                    "--timeout-seconds",
+                    "1",
+                )
+                start = self.run_cli("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(start.returncode, 124)
+        self.assertEqual(start.stdout, "")
+        self.assertIn("timed out after 1s", start.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/global/health", None),
+                ("GET", "/doc", None),
+                ("POST", "/api/session", {"directory": directory}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+            ],
+        )
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "timeout")
+        timeout_worker = payload["workers"]["worker"]
+        self.assertEqual(timeout_worker["status"], "timeout")
+        self.assertEqual(timeout_worker["timeout_seconds"], 1)
+        self.assertEqual(timeout_worker["timeout_policy"], "timeout")
+        self.assertIsNotNone(timeout_worker["timeout_started_at"])
+        self.assertIsNotNone(timeout_worker["timed_out_at"])
+        self.assertEqual(timeout_worker["failure_category"], "timeout")
+        self.assertEqual(timeout_worker["failure_reason"], "worker timed out after 1s")
+        self.assertEqual(timeout_worker["next_eligible_action"], "none")
+        self.assertNotIn("result", timeout_worker)
+
+    def test_timeout_policy_maps_timed_out_worker_to_declared_terminal_status(self):
+        expectations = {
+            "blocked": (75, "blocked", "resolve_blocker", ["timeout"]),
+            "failed": (69, "failed", "none", []),
+            "aborted": (130, "aborted", "none", []),
+        }
+        for policy, (exit_code, expected_status, next_action, blockers) in expectations.items():
+            with self.subTest(policy=policy):
+                with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+                    with RetryPolicyOpenCodeServer(
+                        run_payloads=[("sleep", 2, {"id": "msg_user_late", "status": "submitted"})]
+                    ) as server:
+                        init = self.run_cli(
+                            "run",
+                            "--store",
+                            store,
+                            "init",
+                            "demo",
+                            "--directory",
+                            directory,
+                            "--server",
+                            server.url,
+                        )
+                        worker = self.run_cli(
+                            "run",
+                            "--store",
+                            store,
+                            "worker",
+                            "demo",
+                            "worker",
+                            "--role",
+                            "worker",
+                            "--prompt",
+                            "Finish the worker task",
+                            "--timeout-seconds",
+                            "1",
+                            "--timeout-policy",
+                            policy,
+                        )
+                        start = self.run_cli("run", "--store", store, "start", "demo")
+                    status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+                self.assertEqual(init.returncode, 0, init.stderr)
+                self.assertEqual(worker.returncode, 0, worker.stderr)
+                self.assertEqual(start.returncode, exit_code)
+                self.assertEqual(status.returncode, 0, status.stderr)
+                payload = json.loads(status.stdout)
+                self.assertEqual(payload["status"], expected_status)
+                timeout_worker = payload["workers"]["worker"]
+                self.assertEqual(timeout_worker["status"], expected_status)
+                self.assertEqual(timeout_worker["timeout_policy"], policy)
+                self.assertEqual(timeout_worker["failure_category"], "timeout")
+                self.assertEqual(timeout_worker["failure_reason"], "worker timed out after 1s")
+                self.assertEqual(timeout_worker["next_eligible_action"], next_action)
+                self.assertEqual(timeout_worker["blockers"], blockers)
+
+    def test_start_prompt_returns_aborted_exit_code_when_worker_result_is_aborted(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with OrchestrationOpenCodeServer(
+                reply_payload={"id": "msg_abort", "status": "aborted", "error": "user aborted run"}
+            ) as server:
+                start = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "start",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                    "--prompt",
+                    "Finish the worker task",
+                )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(start.returncode, 130)
+        self.assertEqual(start.stderr, "")
+        self.assertIn("run=demo status=aborted", start.stdout)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "aborted")
+        self.assertEqual(payload["workers"]["worker"]["status"], "aborted")
+        self.assertEqual(payload["workers"]["worker"]["result"]["terminal_state"], "aborted")
+        self.assertEqual(payload["workers"]["worker"]["next_eligible_action"], "none")
 
     def test_collect_prints_completed_worker_outputs_in_dependency_order(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
