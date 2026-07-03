@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 import subprocess
@@ -38,6 +39,13 @@ def run_ocs(*args):
 
 def assert_success(testcase, result):
     testcase.assertEqual(result.returncode, 0, format_completed_process(result))
+
+
+def load_json(testcase, result, description="CLI"):
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        testcase.fail(f"{description} did not emit valid JSON: {error}\n{format_completed_process(result)}")
 
 
 def format_completed_process(result):

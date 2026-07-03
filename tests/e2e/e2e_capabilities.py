@@ -2,7 +2,7 @@ import json
 import os
 import unittest
 
-from harness import assert_success, format_completed_process, require_server_url, run_ocs
+from harness import assert_success, load_json, require_server_url, run_ocs
 
 
 SERVER_ENV = "OCS_E2E_SERVER_URL"
@@ -24,7 +24,7 @@ class CapabilitiesTracerE2ETest(unittest.TestCase):
         result = run_ocs("capabilities", "--server", server_url, "--json")
 
         assert_success(self, result)
-        payload = self._load_json(result)
+        payload = load_json(self, result, "capabilities --json")
         context = self._payload_context(payload)
         self.assertIsInstance(payload, dict, context)
         for field in ("health", "version"):
@@ -65,12 +65,6 @@ class CapabilitiesTracerE2ETest(unittest.TestCase):
             context,
         )
         self.assertTrue(payload["v2_prompt_support"] or payload["legacy_fallback_available"], context)
-
-    def _load_json(self, result):
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            self.fail(f"capabilities --json did not emit valid JSON: {error}\n{format_completed_process(result)}")
 
     def _payload_context(self, payload):
         return "capabilities payload:\n" + json.dumps(payload, indent=2, sort_keys=True)

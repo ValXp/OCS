@@ -112,7 +112,7 @@ Run the default deterministic unit suite without live server or model access:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
-Optional E2E tests live under `tests/e2e/` and are not discovered by the default unit command. They run `bin/ocs` as a subprocess against an existing OpenCode server and are no-live-model by default; the current tracer only probes `capabilities --json` and does not send prompts.
+Optional E2E tests live under `tests/e2e/` and are not discovered by the default unit command. They run `bin/ocs` as a subprocess against an existing OpenCode server and are no-live-model by default; the current tracers probe `capabilities --json` and the session lifecycle without sending prompts.
 
 E2E environment variables:
 
