@@ -48,6 +48,21 @@ def load_json(testcase, result, description="CLI"):
         testcase.fail(f"{description} did not emit valid JSON: {error}\n{format_completed_process(result)}")
 
 
+def load_json_lines(testcase, result, description="CLI"):
+    records = []
+    for line_number, line in enumerate(result.stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            testcase.fail(
+                f"{description} line {line_number} did not emit valid JSON: {error}\n"
+                f"{format_completed_process(result)}"
+            )
+    return records
+
+
 def format_completed_process(result):
     return "\n".join(
         [
