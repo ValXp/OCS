@@ -171,6 +171,18 @@ class OpenCodeApiClient:
     def delete_session_response(self, session_id):
         return self.delete_response(f"api/session/{quote(session_id, safe='')}")
 
+    def abort_session_response(self, session_id):
+        return self.post_response(f"session/{quote(session_id, safe='')}/abort", {})
+
+    def fork_session_response(self, session_id, *, message_id=None):
+        payload = {}
+        if message_id is not None:
+            payload["messageID"] = message_id
+        return self.post_response(f"session/{quote(session_id, safe='')}/fork", payload)
+
+    def list_child_sessions_response(self, session_id):
+        return self.get_response(f"session/{quote(session_id, safe='')}/children")
+
     def run_session_response(self, session_id, message):
         return self.post_response(f"session/{quote(session_id, safe='')}/run", {"message": message})
 

@@ -66,6 +66,23 @@ def main(argv=None):
     _add_server_argument(delete_parser)
     _add_output_arguments(delete_parser)
 
+    abort_parser = subparsers.add_parser("abort")
+    abort_parser.add_argument("session_id", help="session ID to abort")
+    _add_server_argument(abort_parser)
+    _add_output_arguments(abort_parser)
+
+    fork_parser = subparsers.add_parser("fork")
+    fork_parser.add_argument("session_id", help="session ID to fork")
+    fork_parser.add_argument("--message-id", help="message ID to fork from")
+    _add_server_argument(fork_parser)
+    _add_output_arguments(fork_parser)
+
+    children_parser = subparsers.add_parser("children")
+    children_parser.add_argument("session_id", help="parent session ID")
+    children_parser.add_argument("--directory", help="only show child sessions for this target directory")
+    _add_server_argument(children_parser)
+    _add_output_arguments(children_parser)
+
     watch_parser = subparsers.add_parser("watch")
     watch_parser.add_argument("session_id", help="session ID to watch")
     _add_server_argument(watch_parser)
@@ -234,6 +251,64 @@ def main(argv=None):
             return EX_UNAVAILABLE
         print(f"opencode-session: delete verification failed; session {args.session_id} is still readable", file=sys.stderr)
         return EX_UNAVAILABLE
+
+    if args.command == "abort":
+        try:
+            response = client.abort_session_response(args.session_id)
+        except OpenCodeApiError as error:
+            if _is_session_not_found_error(error):
+                print(f"opencode-session: session not found: {args.session_id}", file=sys.stderr)
+            else:
+                print(f"opencode-session: {error}", file=sys.stderr)
+            return EX_UNAVAILABLE
+        if args.raw:
+            _write_raw(response.body)
+            return 0
+        abort = _abort_record(args.session_id, response.data)
+        if args.json:
+            print(json.dumps(abort, sort_keys=True))
+        else:
+            print(_format_abort_compact(abort))
+        return 0
+
+    if args.command == "fork":
+        try:
+            response = client.fork_session_response(args.session_id, message_id=args.message_id)
+        except OpenCodeApiError as error:
+            if _is_session_not_found_error(error):
+                print(f"opencode-session: session not found: {args.session_id}", file=sys.stderr)
+            else:
+                print(f"opencode-session: {error}", file=sys.stderr)
+            return EX_UNAVAILABLE
+        if args.raw:
+            _write_raw(response.body)
+            return 0
+        fork = _fork_record(args.session_id, args.message_id, response.data)
+        if args.json:
+            print(json.dumps(fork, sort_keys=True))
+        else:
+            print(_format_fork_compact(fork))
+        return 0
+
+    if args.command == "children":
+        try:
+            response = client.list_child_sessions_response(args.session_id)
+        except OpenCodeApiError as error:
+            if _is_session_not_found_error(error):
+                print(f"opencode-session: session not found: {args.session_id}", file=sys.stderr)
+            else:
+                print(f"opencode-session: {error}", file=sys.stderr)
+            return EX_UNAVAILABLE
+        if args.raw:
+            _write_raw(response.body)
+            return 0
+        directory = str(Path(args.directory).resolve()) if args.directory else None
+        children = _filter_sessions(_collection_sessions(response.data), directory=directory)
+        if args.json:
+            print(json.dumps(children, sort_keys=True))
+        elif children:
+            print("\n".join(_format_session_compact(session) for session in children))
+        return 0
 
     if args.command == "watch":
         return _watch_session(args, client)
@@ -633,7 +708,9 @@ def _is_session_not_found_error(error):
     path = str(getattr(error, "path", "") or "").split("?", 1)[0]
     parts = path.split("/")
     if method == "POST" and len(parts) == 4 and parts[1] == "session":
-        return bool(parts[2]) and parts[3] in {"run", "reply"}
+        return bool(parts[2]) and parts[3] in {"run", "reply", "abort", "fork"}
+    if method == "GET" and len(parts) == 4 and parts[1] == "session":
+        return bool(parts[2]) and parts[3] == "children"
     return method in {"GET", "DELETE"} and len(parts) == 4 and parts[1:3] == ["api", "session"] and bool(parts[3])
 
 
@@ -682,6 +759,60 @@ def _format_admission_compact(admission):
         ("promoted", admission["promoted_sequence"]),
     ]
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+
+
+def _format_abort_compact(abort):
+    fields = [
+        ("session", abort["session_id"]),
+        ("accepted", _compact_bool(abort["accepted"])),
+        ("status", abort["status"]),
+    ]
+    return "abort " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+
+
+def _format_fork_compact(fork):
+    fields = [
+        ("parent", fork["parent_session_id"]),
+        ("child", fork["session_id"]),
+        ("message", fork["message_id"]),
+    ]
+    return "forked " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
+
+
+def _abort_record(session_id, data):
+    if not isinstance(data, dict):
+        data = {}
+    status = _first_present(data, "status", "state")
+    accepted = _bool_value(_first_present(data, "accepted", "aborted", "ok", "success"))
+    if accepted is None and str(status or "").lower() in {"accepted", "aborting", "abort", "aborted", "cancelled", "canceled"}:
+        accepted = True
+    return {
+        "session_id": _first_present(data, "sessionID", "sessionId", "session_id", "id") or session_id,
+        "accepted": accepted if accepted is not None else True,
+        "status": status,
+        "response": data,
+    }
+
+
+def _fork_record(parent_session_id, message_id, data):
+    if not isinstance(data, dict):
+        data = {}
+    session = data.get("session") if isinstance(data.get("session"), dict) else {}
+    return {
+        "parent_session_id": _first_present(
+            data,
+            "parentID",
+            "parentId",
+            "parentSessionID",
+            "parentSessionId",
+            "parent_session_id",
+        )
+        or parent_session_id,
+        "session_id": _first_present(data, "id", "sessionID", "sessionId", "childSessionID", "childSessionId")
+        or _first_present(session, "id", "sessionID", "sessionId"),
+        "message_id": _first_present(data, "messageID", "messageId", "message_id") or message_id,
+        "response": data,
+    }
 
 
 def _admission_record(session_id, delivery, message_id, data):
@@ -740,7 +871,7 @@ def _collection_sessions(collection):
     if isinstance(collection, list):
         return collection
     if isinstance(collection, dict):
-        for name in ("sessions", "data"):
+        for name in ("sessions", "children", "data"):
             sessions = collection.get(name)
             if isinstance(sessions, list):
                 return sessions
@@ -792,3 +923,23 @@ def _compact_value(value):
     if any(character.isspace() for character in text):
         return json.dumps(text)
     return text
+
+
+def _compact_bool(value):
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return value
+
+
+def _bool_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered in {"true", "yes", "1", "accepted", "aborted", "ok", "success"}:
+            return True
+        if lowered in {"false", "no", "0", "rejected", "failed", "error"}:
+            return False
+    return None
