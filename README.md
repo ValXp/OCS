@@ -106,52 +106,68 @@ Smoke sessions use the recognizable `ocs-smoke-` prefix and are deleted before t
 bin/ocs cleanup --directory /path/to/target --prefix ocs-smoke-
 ```
 
-Run the default deterministic unit suite without live server or model access:
+## Test commands
+
+Run the default deterministic unit suite without live server or model access. This command does not discover `tests/e2e/`:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
-Optional E2E tests live under `tests/e2e/` and are not discovered by the default unit command. They run `bin/ocs` as a subprocess. Negative E2E tests use intentionally unreachable loopback addresses and do not require a real OpenCode server. Server-backed E2E tests run against an existing OpenCode server and are no-live-model by default; the current tracers probe `capabilities --json`, session lifecycle, durable steer/watch/abort behavior, `smoke --json`, and stale disposable session cleanup without waiting for assistant execution. The smoke/cleanup tracer verifies no-live smoke metadata plus prefixed target-directory cleanup of stale disposable sessions. Manual live-provider E2E tests additionally cover direct `run_blocking --json` execution and local `run --store ... start --cleanup` orchestration, followed by persisted `status --json` and `collect --json` checks in later subprocesses.
+## Manual E2E runbook
+
+Optional E2E tests live under `tests/e2e/` and are skipped by default because they are not discovered by the default unit command. They run `bin/ocs` as a subprocess. Server-backed E2E tests target an existing OpenCode server selected with `OCS_E2E_SERVER_URL`; the harness does not start or manage a server. Negative E2E tests use intentionally unreachable loopback addresses and do not require a real OpenCode server.
+
+GitHub Actions/CI setup for these E2E suites is intentionally deferred. Run them manually from a local checkout when you have an OpenCode server and, for live tests, explicit approval to spend provider tokens.
+
+Run deterministic skip-safe E2E checks with all server/live configuration unset. Server-backed tests skip cleanly; no-server negative tests still run:
+
+```bash
+env -u OCS_E2E_SERVER_URL -u OCS_E2E_LIVE -u OCS_LIVE_VALIDATE PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
+```
+
+Run no-live server-backed E2E against an existing OpenCode server. The command unsets live-provider gates so it stays no-live even if your shell has live variables set. These tests probe `capabilities --json`, session lifecycle, durable steer/watch/abort behavior, `smoke --json`, and stale disposable session cleanup without waiting for assistant execution:
+
+```bash
+env -u OCS_E2E_LIVE -u OCS_LIVE_VALIDATE PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
+```
+
+Run live-provider E2E only by explicit manual opt-in. These tests call the configured provider and may consume provider tokens. Both `OCS_E2E_LIVE=1` and `OCS_LIVE_VALIDATE=1` are required:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 OCS_E2E_LIVE=1 OCS_LIVE_VALIDATE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
+```
+
+Manual live-provider E2E tests cover direct `run_blocking --json` execution and local `run --store ... start --cleanup` orchestration, followed by persisted `status --json` and `collect --json` checks in later subprocesses.
 
 E2E environment variables:
 
 - `OCS_E2E_SERVER_URL`: existing OpenCode server URL. When unset, server-backed E2E tests are skipped cleanly; no-server negative tests still run.
 - `OCS_E2E_LIVE`: set to `1` to include manual live-provider E2E tests that may consume provider tokens.
 - `OCS_LIVE_VALIDATE`: set to `1` with `OCS_E2E_LIVE=1` to allow `live_validate` provider calls from E2E.
-- `OCS_E2E_AGENT`: optional agent passed to live E2E commands that support `--agent`.
-- `OCS_E2E_MODEL`: optional model passed to live E2E commands that support `--model`.
+- `OCS_E2E_AGENT`: optional OpenCode agent passed to live E2E commands that support `--agent`.
+- `OCS_E2E_MODEL`: optional provider model passed to live E2E commands that support `--model`.
 - `OCS_E2E_TIMEOUT_SECONDS`: optional subprocess timeout in seconds. Default: `20`.
 
-Run the E2E harness explicitly:
+Cleanup expectations:
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
-```
+- Normal smoke and live-validation commands delete disposable sessions before exit.
+- Interrupted E2E runs can leave `ocs-e2e-`, `ocs-smoke-`, or `ocs-live-` sessions on the existing OpenCode server.
+- Clean only sessions from the target directory used by the run. Check `directory`, `cwd`, title, ID, or metadata before deleting.
 
-Run only deterministic no-server/skip-safe E2E checks with all live configuration unset:
-
-```bash
-env -u OCS_E2E_SERVER_URL -u OCS_E2E_LIVE -u OCS_LIVE_VALIDATE PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
-```
-
-If an interrupted E2E run leaves disposable `ocs-e2e-` sessions behind, clean prefixed sessions that OCS can identify by title, ID, or metadata:
+Clean leftover prefixed sessions with the matching target directory and prefix:
 
 ```bash
 bin/ocs cleanup --directory /path/to/e2e/target --prefix ocs-e2e- --server http://127.0.0.1:4096
+bin/ocs cleanup --directory /path/to/e2e/target --prefix ocs-smoke- --server http://127.0.0.1:4096
+bin/ocs cleanup --directory /path/to/e2e/target --prefix ocs-live- --server http://127.0.0.1:4096
 ```
 
-For leftovers from a plain `create` tracer, list sessions and delete entries whose `directory` or `cwd` contains an `ocs-e2e-` temporary directory:
+For leftovers from a plain `create` tracer, or when the exact target directory is gone or unknown, list sessions and delete only entries you can identify as disposable E2E sessions:
 
 ```bash
 bin/ocs list --json --server http://127.0.0.1:4096
 bin/ocs delete SESSION_ID --server http://127.0.0.1:4096
-```
-
-Run live E2E only by explicit manual opt-in. These tests call the configured provider and may consume provider tokens. Set `OCS_E2E_AGENT` and `OCS_E2E_MODEL` when the server requires non-default live execution selection:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 OCS_E2E_SERVER_URL=http://127.0.0.1:4096 OCS_E2E_LIVE=1 OCS_LIVE_VALIDATE=1 python3 -m unittest discover -s tests/e2e -p 'e2e_*.py'
 ```
 
 Server selection:
