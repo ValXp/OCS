@@ -2543,16 +2543,17 @@ def _provider_failure(message):
 
 
 def _format_session_compact(session, blocker_counts=None):
+    session = _session_record(session)
     fields = [
-        ("id", _session_value(session, "id", "sessionID", "sessionId")),
-        ("title", _session_value(session, "title")),
-        ("dir", _session_value(session, "directory", "cwd")),
-        ("agent", _session_value(session, "agent")),
-        ("model", _session_value(session, "model")),
-        ("cost", _session_value(session, "cost")),
+        ("id", session.get("id")),
+        ("title", session.get("title")),
+        ("dir", session.get("directory")),
+        ("agent", session.get("agent")),
+        ("model", session.get("model")),
+        ("cost", session.get("cost")),
         ("tokens", _session_tokens(session)),
-        ("created", _session_value(session, "createdAt", "created_at")),
-        ("updated", _session_value(session, "updatedAt", "updated_at")),
+        ("created", session.get("createdAt")),
+        ("updated", session.get("updatedAt")),
     ]
     if blocker_counts is not None:
         fields.extend(
@@ -2571,15 +2572,16 @@ def _format_session_table(sessions, blocker_counts=None):
         headers.extend(["permissions", "questions", "blockers"])
     rows = []
     for session in sessions:
+        session = _session_record(session)
         row = [
-            _session_value(session, "id", "sessionID", "sessionId"),
-            _session_value(session, "title"),
-            _session_value(session, "directory", "cwd"),
-            _session_value(session, "agent"),
-            _session_value(session, "model"),
-            _session_value(session, "cost"),
+            session.get("id"),
+            session.get("title"),
+            session.get("directory"),
+            session.get("agent"),
+            session.get("model"),
+            session.get("cost"),
             _session_tokens(session),
-            _session_value(session, "updatedAt", "updated_at"),
+            session.get("updatedAt"),
         ]
         if blocker_counts is not None:
             counts = _counts_for_session(blocker_counts, session)
@@ -2882,11 +2884,12 @@ def _tool_ref(tool):
 def _filter_sessions(sessions, *, directory=None, agent=None, model=None):
     filtered = []
     for session in sessions:
-        if directory is not None and _session_value(session, "directory", "cwd") != directory:
+        session_record = _session_record(session)
+        if directory is not None and session_record.get("directory") != directory:
             continue
-        if agent is not None and _session_value(session, "agent") != agent:
+        if agent is not None and session_record.get("agent") != agent:
             continue
-        if model is not None and _session_value(session, "model") != model:
+        if model is not None and session_record.get("model") != model:
             continue
         filtered.append(session)
     return filtered
@@ -2913,7 +2916,7 @@ def _increment_blocker_count(counts, session_id, name):
 def _counts_for_session(counts, session):
     if counts is None:
         return None
-    session_id = _session_value(session, "id", "sessionID", "sessionId")
+    session_id = _session_record(session).get("id")
     session_counts = counts.get(session_id, {})
     permissions = session_counts.get("permissions", 0)
     questions = session_counts.get("questions", 0)

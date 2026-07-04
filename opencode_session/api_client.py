@@ -158,19 +158,19 @@ class OpenCodeApiClient:
             payload["title"] = title
         if metadata is not None:
             payload["metadata"] = metadata
-        return self.post_response("api/session", payload)
+        return _with_session_payload(self.post_response("api/session", payload))
 
     def list_sessions(self):
         return self.list_sessions_response().data
 
     def list_sessions_response(self):
-        return self.get_response("api/session")
+        return _with_session_payload(self.get_response("api/session"))
 
     def get_session(self, session_id):
         return self.get_session_response(session_id).data
 
     def get_session_response(self, session_id):
-        return self.get_response(f"api/session/{quote(session_id, safe='')}")
+        return _with_session_payload(self.get_response(f"api/session/{quote(session_id, safe='')}"))
 
     def delete_session(self, session_id):
         return self.delete_session_response(session_id).data
@@ -194,7 +194,7 @@ class OpenCodeApiClient:
         return self.post_response(f"session/{quote(session_id, safe='')}/fork", payload)
 
     def list_child_sessions_response(self, session_id):
-        return self.get_response(f"session/{quote(session_id, safe='')}/children")
+        return _with_session_payload(self.get_response(f"session/{quote(session_id, safe='')}/children"))
 
     def run_session_response(self, session_id, message):
         return self.post_response(f"session/{quote(session_id, safe='')}/run", {"message": message})
@@ -239,6 +239,109 @@ def _session_prompt_path(prompt_path, session_id):
     for placeholder in ("{sessionID}", ":sessionID", "{id}", ":id"):
         path = path.replace(placeholder, quoted_session_id)
     return path
+
+
+def _with_session_payload(response):
+    return OpenCodeApiResponse(_normalize_session_payload(response.data), response.body)
+
+
+def _normalize_session_payload(payload):
+    if isinstance(payload, list):
+        return [_normalize_session_record(item) for item in payload]
+    if not isinstance(payload, dict):
+        return payload
+
+    normalized = dict(payload)
+    data = normalized.get("data")
+    if isinstance(data, list):
+        normalized["data"] = [_normalize_session_record(item) for item in data]
+        return normalized
+    if isinstance(data, dict):
+        normalized["data"] = _normalize_session_record(data)
+        return normalized
+
+    for name in ("sessions", "children"):
+        records = normalized.get(name)
+        if isinstance(records, list):
+            normalized[name] = [_normalize_session_record(item) for item in records]
+            return normalized
+
+    return _normalize_session_record(normalized)
+
+
+def _normalize_session_record(record):
+    if not isinstance(record, dict):
+        return record
+    if isinstance(record.get("data"), dict):
+        normalized = dict(record)
+        normalized["data"] = _normalize_session_record(record["data"])
+        return normalized
+
+    normalized = dict(record)
+    _set_missing(normalized, "id", _first_present(record, "id", "sessionID", "sessionId", "session_id"))
+    _set_missing(normalized, "directory", _session_directory(record))
+    _set_missing(normalized, "title", _first_present(record, "title", "name"))
+    _set_missing(normalized, "agent", _first_present(record, "agent", "agentID", "agentId", "agent_id"))
+    _set_missing(normalized, "model", _first_present(record, "model", "modelID", "modelId", "model_id"))
+    _set_missing(normalized, "tokens", _session_tokens(record))
+    _set_missing(normalized, "createdAt", _session_created_at(record))
+    _set_missing(normalized, "updatedAt", _session_updated_at(record))
+    return normalized
+
+
+def _set_missing(record, name, value):
+    if value is not None and record.get(name) is None:
+        record[name] = value
+
+
+def _first_present(mapping, *names):
+    for name in names:
+        value = mapping.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _session_directory(record):
+    value = _first_present(record, "directory", "cwd")
+    if value is not None:
+        return value
+    location = record.get("location")
+    if isinstance(location, dict):
+        return location.get("directory")
+    return None
+
+
+def _session_tokens(record):
+    tokens = _first_present(record, "tokens", "token", "tokenUsage", "token_usage", "usage")
+    if isinstance(tokens, dict):
+        normalized = dict(tokens)
+        if normalized.get("total") is None:
+            values = [value for value in normalized.values() if isinstance(value, int)]
+            if values:
+                normalized["total"] = sum(values)
+        return normalized
+    return tokens
+
+
+def _session_created_at(record):
+    value = _first_present(record, "createdAt", "created_at", "created")
+    if value is not None:
+        return value
+    time = record.get("time")
+    if isinstance(time, dict):
+        return time.get("created")
+    return None
+
+
+def _session_updated_at(record):
+    value = _first_present(record, "updatedAt", "updated_at", "updated")
+    if value is not None:
+        return value
+    time = record.get("time")
+    if isinstance(time, dict):
+        return time.get("updated")
+    return None
 
 
 def _validate_base_url(base_url):

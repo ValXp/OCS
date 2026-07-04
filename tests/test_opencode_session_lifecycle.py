@@ -164,6 +164,47 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), children)
         self.assertEqual(server.requests, [("GET", "/session/ses_parent/children", None)])
 
+    def test_children_normalizes_session_aliases_for_compact_and_json_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            child = {
+                "sessionID": "ses_child_1",
+                "name": "Child one",
+                "location": {"directory": directory},
+                "agentID": "build",
+                "modelID": "openai/gpt-5.5",
+                "tokenUsage": {"input": 10, "output": 5},
+                "time": {"created": "2026-07-02T00:00:00Z", "updated": "2026-07-02T00:00:03Z"},
+            }
+            with LifecycleOpenCodeServer(children=[child]) as server:
+                compact_result = self.run_cli("children", "ses_parent", "--directory", directory, "--server", server.url)
+                json_result = self.run_cli("children", "ses_parent", "--json", "--server", server.url)
+
+        self.assertEqual(compact_result.returncode, 0, compact_result.stderr)
+        self.assertEqual(compact_result.stderr, "")
+        self.assertEqual(
+            compact_result.stdout,
+            f'id=ses_child_1 title="Child one" dir={directory} agent=build model=openai/gpt-5.5 '
+            "cost=- tokens=15 created=2026-07-02T00:00:00Z updated=2026-07-02T00:00:03Z\n",
+        )
+
+        self.assertEqual(json_result.returncode, 0, json_result.stderr)
+        self.assertEqual(json_result.stderr, "")
+        payload = json.loads(json_result.stdout)
+        self.assertEqual(len(payload), 1, payload)
+        self.assertEqual(payload[0]["id"], "ses_child_1")
+        self.assertEqual(payload[0]["directory"], directory)
+        self.assertEqual(payload[0]["title"], "Child one")
+        self.assertEqual(payload[0]["agent"], "build")
+        self.assertEqual(payload[0]["model"], "openai/gpt-5.5")
+        self.assertEqual(payload[0]["tokens"], {"input": 10, "output": 5, "total": 15})
+        self.assertEqual(payload[0]["createdAt"], "2026-07-02T00:00:00Z")
+        self.assertEqual(payload[0]["updatedAt"], "2026-07-02T00:00:03Z")
+        self.assertEqual(payload[0]["sessionID"], "ses_child_1")
+        self.assertEqual(
+            server.requests,
+            [("GET", "/session/ses_parent/children", None), ("GET", "/session/ses_parent/children", None)],
+        )
+
     def test_lifecycle_commands_report_missing_sessions_consistently(self):
         cases = [
             ("abort", ("abort", "ses_missing"), ("POST", "/session/ses_missing/abort", {})),
