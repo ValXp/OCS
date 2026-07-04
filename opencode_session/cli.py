@@ -13,13 +13,21 @@ from pathlib import Path
 from urllib.parse import quote
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.blocking_execution import (
+    BlockingProviderFailure as _BlockingProviderFailure,
+    blocking_execution_capabilities as _blocking_execution_capabilities,
+    blocking_execution_strategy as _blocking_execution_strategy,
+    execute_blocking_prompt as _execute_blocking_prompt,
+    format_blocking_execution_compact as _format_run_compact,
+    message_text as _message_text,
+    message_tokens as _message_tokens,
+    message_value as _message_value,
+    skipped_blocking_execution_result as _no_live_run_reply_result,
+    tokens_total as _tokens_total,
+    unsupported_blocking_execution_message as _unsupported_blocking_execution_message,
+)
 from opencode_session.capabilities import (
-    LEGACY_REPLY_PATH,
-    LEGACY_RUN_PATH,
-    SESSION_MESSAGE_PATH,
-    blocking_message_supported,
     detect_capabilities,
-    legacy_run_reply_supported,
     unsupported_reasons,
 )
 from opencode_session.commands.capabilities import add_capabilities_parser, handle_capabilities
@@ -37,7 +45,6 @@ DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 CLI_NAME = "ocs"
 SMOKE_SESSION_PREFIX = "ocs-smoke-"
 SMOKE_EVENT_TIMEOUT_SECONDS = 10.0
-BLOCKING_EXECUTION_TIMEOUT_SECONDS = 120
 LIVE_VALIDATE_ENV = "OCS_LIVE_VALIDATE"
 LIVE_SESSION_PREFIX = "ocs-live-"
 LIVE_VALIDATE_PROMPT = "Reply exactly PONG."
@@ -811,15 +818,10 @@ def _run_smoke(args, client):
         if args.no_live_model:
             result["checks"]["run_blocking"] = _no_live_run_reply_result(session_id, capabilities)
         else:
-            run_response = client.run_session_response(session_id, "ocs smoke")
-            provider_error = _provider_failure(run_response.data)
-            if provider_error:
-                raise _SmokeFailure(f"provider failure: {provider_error}")
-            reply_response = client.reply_session_response(session_id)
-            provider_error = _provider_failure(reply_response.data)
-            if provider_error:
-                raise _SmokeFailure(f"provider failure: {provider_error}")
-            result["checks"]["run_blocking"] = _run_result(session_id, run_response.data, reply_response.data)
+            try:
+                result["checks"]["run_blocking"] = _execute_blocking_prompt(client, session_id, "ocs smoke", capabilities)
+            except _BlockingProviderFailure as error:
+                raise _SmokeFailure(f"provider failure: {error}") from error
 
         result["checks"]["blockers"] = _smoke_blocker_summary(client, session_id)
         result["status"] = "done"
@@ -2257,222 +2259,6 @@ def _read_prompt(prompt_words):
     return prompt
 
 
-class _BlockingProviderFailure(Exception):
-    def __init__(self, message, *, prompt_id=None):
-        super().__init__(message)
-        self.prompt_id = prompt_id
-
-
-def _blocking_execution_capabilities(doc):
-    blocking_message_available = blocking_message_supported(doc)
-    legacy_fallback_available = legacy_run_reply_supported(doc)
-    return {
-        "route_availability": {
-            "blocking_message": _execution_route(SESSION_MESSAGE_PATH, "POST", blocking_message_available),
-            "legacy_run": _execution_route(LEGACY_RUN_PATH, "POST", legacy_fallback_available),
-            "legacy_reply": _execution_route(LEGACY_REPLY_PATH, "POST", legacy_fallback_available),
-        },
-        "blocking_message_available": blocking_message_available,
-        "blocking_execution_available": blocking_message_available or legacy_fallback_available,
-        "legacy_fallback_available": legacy_fallback_available,
-    }
-
-
-def _execution_route(path, method, available):
-    return {"path": path, "method": method, "available": available}
-
-
-def _blocking_execution_strategy(capabilities):
-    routes = capabilities.get("route_availability") or {}
-    blocking_message = routes.get("blocking_message") or {}
-    if capabilities.get("blocking_message_available") or blocking_message.get("available"):
-        return "session_message"
-    if capabilities.get("legacy_fallback_available"):
-        return "legacy_run_reply"
-    return None
-
-
-def _unsupported_blocking_execution_message():
-    return (
-        "unsupported route behavior: missing blocking execution: POST /session/{sessionID}/message or legacy "
-        "POST /session/{sessionID}/run + POST /session/{sessionID}/reply; v2 prompt admission is not execution"
-    )
-
-
-def _execute_blocking_prompt(client, session_id, prompt, capabilities):
-    strategy = _blocking_execution_strategy(capabilities)
-    if strategy == "session_message":
-        return _execute_session_message_prompt(client, session_id, prompt, capabilities)
-    if strategy == "legacy_run_reply":
-        return _execute_legacy_run_reply_prompt(client, session_id, prompt)
-    raise OpenCodeApiError(_unsupported_blocking_execution_message())
-
-
-def _execute_session_message_prompt(client, session_id, prompt, capabilities):
-    message_id = f"msg_{uuid.uuid4().hex}"
-    response = _call_with_client_timeout(
-        client,
-        BLOCKING_EXECUTION_TIMEOUT_SECONDS,
-        lambda: client.message_session_response(session_id, prompt, message_id=message_id),
-    )
-    provider_error = _provider_failure(response.data)
-    if provider_error:
-        raise _BlockingProviderFailure(provider_error, prompt_id=message_id)
-    return _session_message_result(session_id, message_id, response.data, capabilities)
-
-
-def _execute_legacy_run_reply_prompt(client, session_id, prompt):
-    run_response = _call_with_client_timeout(
-        client,
-        BLOCKING_EXECUTION_TIMEOUT_SECONDS,
-        lambda: client.run_session_response(session_id, prompt),
-    )
-    provider_error = _provider_failure(run_response.data)
-    if provider_error:
-        raise _BlockingProviderFailure(
-            provider_error,
-            prompt_id=_message_value(run_response.data, "id", "messageID", "messageId"),
-        )
-    reply_response = _call_with_client_timeout(
-        client,
-        BLOCKING_EXECUTION_TIMEOUT_SECONDS,
-        lambda: client.reply_session_response(session_id),
-    )
-    provider_error = _provider_failure(reply_response.data)
-    if provider_error:
-        raise _BlockingProviderFailure(
-            provider_error,
-            prompt_id=_message_value(run_response.data, "id", "messageID", "messageId"),
-        )
-    return _run_result(session_id, run_response.data, reply_response.data)
-
-
-def _call_with_client_timeout(client, timeout, callback):
-    previous_timeout = client.timeout
-    client.timeout = max(previous_timeout or 0, timeout)
-    try:
-        return callback()
-    finally:
-        client.timeout = previous_timeout
-
-
-def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities):
-    raw_status = _message_value(assistant_message, "status") or "completed"
-    status = short_status(raw_status)
-    return {
-        "session_id": session_id,
-        "message_ids": {
-            "user": prompt_message_id,
-            "assistant": _message_value(assistant_message, "id", "messageID", "messageId"),
-        },
-        "status": status,
-        "raw_status": raw_status,
-        "terminal_state": status,
-        "api_path": {"message": SESSION_MESSAGE_PATH},
-        "execution_strategy": "session_message",
-        "fallback": {
-            "available": capabilities.get("legacy_fallback_available", False),
-            "strategy": "legacy_run_reply",
-            "used": False,
-        },
-        "cost": _message_value(assistant_message, "cost"),
-        "tokens": _message_tokens(assistant_message),
-        "text": _message_text(assistant_message),
-    }
-
-
-def _run_result(session_id, run_message, reply_message):
-    raw_status = _message_value(reply_message, "status") or "completed"
-    status = short_status(raw_status)
-    return {
-        "session_id": session_id,
-        "message_ids": {
-            "user": _message_value(run_message, "id", "messageID", "messageId"),
-            "assistant": _message_value(reply_message, "id", "messageID", "messageId"),
-        },
-        "status": status,
-        "raw_status": raw_status,
-        "terminal_state": status,
-        "api_path": {"run": LEGACY_RUN_PATH, "reply": LEGACY_REPLY_PATH},
-        "execution_strategy": "legacy_run_reply",
-        "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
-        "cost": _message_value(reply_message, "cost"),
-        "tokens": _message_tokens(reply_message),
-        "text": _message_text(reply_message),
-    }
-
-
-def _no_live_run_reply_result(session_id, capabilities):
-    routes = capabilities["route_availability"]
-    return {
-        "session_id": session_id,
-        "status": "skipped",
-        "reason": "no-live-model",
-        "raw_status": "skipped",
-        "terminal_state": "skipped",
-        "api_path": {"run": routes["legacy_run"]["path"], "reply": routes["legacy_reply"]["path"]},
-        "fallback": {
-            "available": capabilities["legacy_fallback_available"],
-            "strategy": "legacy_run_reply",
-            "used": False,
-        },
-    }
-
-
-def _format_run_compact(result):
-    fields = [
-        ("session", result["session_id"]),
-        ("status", result["status"]),
-        ("user", result["message_ids"]["user"]),
-        ("assistant", result["message_ids"]["assistant"]),
-        ("cost", result["cost"]),
-        ("tokens", _tokens_total(result["tokens"])),
-        ("text", result["text"]),
-    ]
-    return "run_blocking " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
-
-
-def _message_value(message, *names):
-    for name in names:
-        value = message.get(name)
-        if value is not None:
-            return value
-    info = message.get("info")
-    if isinstance(info, dict):
-        for name in names:
-            value = info.get(name)
-            if value is not None:
-                return value
-    return None
-
-
-def _message_tokens(message):
-    tokens = _message_value(message, "tokens", "usage")
-    return tokens
-
-
-def _tokens_total(tokens):
-    if isinstance(tokens, dict):
-        if tokens.get("total") is not None:
-            return tokens["total"]
-        return sum(value for value in tokens.values() if isinstance(value, int))
-    return tokens
-
-
-def _message_text(message):
-    text = _message_value(message, "text", "content")
-    if text is not None:
-        return text
-    parts = message.get("parts")
-    if isinstance(parts, list):
-        return "".join(
-            part.get("text", "")
-            for part in parts
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
-    return ""
-
-
 def _print_cleanup_error(error):
     _print_error(f"api failure: disposable session cleanup failed: {error}")
 
@@ -2515,20 +2301,6 @@ def _delete_disposable_session(client, session_id):
     except OpenCodeApiError as error:
         return error
     return None
-
-
-def _provider_failure(message):
-    status = str(_message_value(message, "status") or "").lower()
-    error = _message_value(message, "error", "reason", "message")
-    if status not in {"failed", "error", "errored"}:
-        if not status and error:
-            if isinstance(error, dict):
-                return error.get("message") or json.dumps(error, sort_keys=True)
-            return str(error)
-        return None
-    if isinstance(error, dict):
-        return error.get("message") or json.dumps(error, sort_keys=True)
-    return error or status
 
 
 def _format_session_compact(session, blocker_counts=None):
