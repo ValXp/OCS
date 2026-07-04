@@ -1,5 +1,9 @@
+from contextlib import contextmanager
+from copy import deepcopy
+import fcntl
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +13,9 @@ from opencode_session.status import short_status
 SCHEMA_VERSION = 1
 DEFAULT_RUN_STATUS = "queued"
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
+_MISSING = object()
+_THREAD_LOCKS = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 class RunStoreError(Exception):
@@ -17,27 +24,33 @@ class RunStoreError(Exception):
         self.kind = kind
 
 
+class _StoredRun(dict):
+    pass
+
+
 class RunStore:
     def __init__(self, root):
         self.root = Path(root)
 
     def create_run(self, name, *, directory, server_url):
         now = _utc_now()
-        run = {
-            "schema_version": SCHEMA_VERSION,
-            "name": name,
-            "run_id": name,
-            "directory": str(Path(directory).resolve()),
-            "server_url": server_url,
-            "status": DEFAULT_RUN_STATUS,
-            "retry_count": 0,
-            "timeout_seconds": None,
-            "blockers": [],
-            "output_refs": [],
-            "workers": {},
-            "created_at": now,
-            "updated_at": now,
-        }
+        run = _StoredRun(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "name": name,
+                "run_id": name,
+                "directory": str(Path(directory).resolve()),
+                "server_url": server_url,
+                "status": DEFAULT_RUN_STATUS,
+                "retry_count": 0,
+                "timeout_seconds": None,
+                "blockers": [],
+                "output_refs": [],
+                "workers": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
         self.save_run(run)
         return run
 
@@ -76,6 +89,27 @@ class RunStore:
         return run
 
     def load_run(self, name):
+        return _track_run(self._read_run_unlocked(name))
+
+    def save_run(self, run):
+        name = run["name"]
+        incoming = _normalize_run(dict(run), fallback_name=name)
+        baseline = _run_snapshot(run)
+        with self._locked_run(name):
+            merged = incoming
+            if baseline is not None:
+                try:
+                    current = self._read_run_unlocked(name)
+                except RunStoreError as error:
+                    if error.kind != "missing":
+                        raise
+                else:
+                    merged = _merge_run_changes(baseline, incoming, current)
+            self._write_run_unlocked(merged)
+        _replace_mapping_in_place(run, merged)
+        _remember_run_snapshot(run, merged)
+
+    def _read_run_unlocked(self, name):
         path = self._run_path(name)
         try:
             with path.open("r", encoding="utf-8") as file:
@@ -88,7 +122,7 @@ class RunStore:
             raise RunStoreError(f"run record for '{name}' is corrupted: expected JSON object in {path}")
         return _normalize_run(data, fallback_name=name)
 
-    def save_run(self, run):
+    def _write_run_unlocked(self, run):
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._run_path(run["name"])
         temporary_path = path.with_suffix(path.suffix + ".tmp")
@@ -97,14 +131,132 @@ class RunStore:
             file.write("\n")
         os.replace(temporary_path, path)
 
+    @contextmanager
+    def _locked_run(self, name):
+        self.root.mkdir(parents=True, exist_ok=True)
+        lock_path = self._lock_path(name)
+        thread_lock = _thread_lock_for(lock_path)
+        with thread_lock:
+            with lock_path.open("a", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def _run_path(self, name):
         if not name or name in {".", ".."} or "/" in name or "\\" in name:
             raise RunStoreError(f"invalid run name '{name}'")
         return self.root / f"{name}.json"
 
+    def _lock_path(self, name):
+        return self._run_path(name).with_suffix(".json.lock")
+
 
 def default_store_root():
     return os.environ.get("OCS_RUN_STORE") or str(Path.cwd() / ".ocs" / "runs")
+
+
+def _thread_lock_for(path):
+    key = str(path)
+    with _THREAD_LOCKS_GUARD:
+        lock = _THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _THREAD_LOCKS[key] = lock
+        return lock
+
+
+def _track_run(run):
+    stored = _StoredRun(run)
+    _remember_run_snapshot(stored, run)
+    return stored
+
+
+def _run_snapshot(run):
+    snapshot = getattr(run, "_run_store_snapshot", None)
+    return deepcopy(snapshot) if snapshot is not None else None
+
+
+def _remember_run_snapshot(run, snapshot):
+    if isinstance(run, _StoredRun):
+        run._run_store_snapshot = deepcopy(snapshot)
+
+
+def _replace_mapping_in_place(target, source):
+    for key in list(target):
+        if key not in source:
+            del target[key]
+    for key, value in source.items():
+        existing = target.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            _replace_mapping_in_place(existing, value)
+        elif isinstance(existing, list) and isinstance(value, list):
+            existing[:] = deepcopy(value)
+        else:
+            target[key] = deepcopy(value)
+
+
+def _merge_run_changes(baseline, incoming, current):
+    return _merge_value(baseline, incoming, current, ())
+
+
+def _merge_value(baseline, incoming, current, path):
+    if incoming is _MISSING:
+        if current is _MISSING:
+            return _MISSING
+        if baseline is not _MISSING and current == baseline:
+            return _MISSING
+        return deepcopy(current)
+    if current is _MISSING:
+        if baseline is not _MISSING and incoming == baseline:
+            return _MISSING
+        return deepcopy(incoming)
+    if isinstance(incoming, dict) and isinstance(current, dict):
+        base_dict = baseline if isinstance(baseline, dict) else {}
+        return _merge_dict(base_dict, incoming, current, path)
+    if incoming == baseline:
+        return deepcopy(current)
+    if current == baseline or incoming == current:
+        return deepcopy(incoming)
+    return _merge_conflicting_values(incoming, current, path)
+
+
+def _merge_dict(baseline, incoming, current, path):
+    merged = {}
+    for key in set(baseline) | set(incoming) | set(current):
+        value = _merge_value(
+            baseline.get(key, _MISSING),
+            incoming.get(key, _MISSING),
+            current.get(key, _MISSING),
+            path + (key,),
+        )
+        if value is not _MISSING:
+            merged[key] = value
+    return merged
+
+
+def _merge_conflicting_values(incoming, current, path):
+    if isinstance(incoming, list) and isinstance(current, list):
+        return _merge_lists(current, incoming)
+    if path and path[-1] == "status":
+        return _merge_status(incoming, current)
+    return deepcopy(incoming)
+
+
+def _merge_lists(current, incoming):
+    merged = []
+    for value in [*current, *incoming]:
+        if value not in merged:
+            merged.append(deepcopy(value))
+    return merged
+
+
+def _merge_status(incoming, current):
+    priority = {"queued": 0, "active": 1, "blocked": 2, "done": 3, "timeout": 4, "failed": 4, "aborted": 5}
+    if not isinstance(incoming, str) or not isinstance(current, str):
+        return deepcopy(incoming)
+    return current if priority.get(current, 0) > priority.get(incoming, 0) else incoming
 
 
 def format_run_compact(run):

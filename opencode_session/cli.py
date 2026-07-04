@@ -635,6 +635,7 @@ def _start_orchestration_run(args, store):
             directory=args.directory,
             server_url=args.server,
             session_id=args.session_id,
+            cleanup=args.cleanup,
         )
     )
     if outcome.error is not None:

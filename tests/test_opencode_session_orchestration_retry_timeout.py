@@ -264,6 +264,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
             with FakeOpenCodeServer() as server:
                 configure_retry_server(
                     server,
+                    session_ids=["ses_retry", "ses_retry_isolated"],
                     run_payloads=[
                         ("sleep", 2, {"id": "msg_user_late", "status": "submitted"}),
                         {"id": "msg_user_retry", "status": "submitted"},
@@ -308,11 +309,17 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(status.returncode, 0, format_completed_process(status))
         self.assertEqual(
             payloads_for(requests, "POST", "/session/ses_retry/run"),
-            [{"message": "Finish the worker task"}, {"message": "Finish the worker task"}],
+            [{"message": "Finish the worker task"}],
         )
-        self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/reply"), [{}])
+        self.assertEqual(
+            payloads_for(requests, "POST", "/session/ses_retry_isolated/run"),
+            [{"message": "Finish the worker task"}],
+        )
+        self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/reply"), [])
+        self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry_isolated/reply"), [{}])
         retry_worker = load_json(self, status, "status")["workers"]["worker"]
         self.assertEqual(retry_worker["status"], "done")
+        self.assertEqual(retry_worker["session_id"], "ses_retry_isolated")
         self.assertEqual(retry_worker["retry_count"], 1)
         self.assertEqual(retry_worker["retry_limit"], 1)
         self.assertEqual(retry_worker["retryable_failures"], ["timeout"])
@@ -320,6 +327,13 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(retry_worker["last_failure_reason"], "worker timed out after 1s")
         self.assertEqual(retry_worker["next_eligible_action"], "collect")
         self.assertEqual(retry_worker["result"]["message_ids"], {"user": "msg_user_retry", "assistant": "msg_assistant_1"})
+        self.assertEqual(retry_worker["result"]["session_id"], "ses_retry_isolated")
+        timeout_retry_sessions = retry_worker["timeout_retry_sessions"]
+        self.assertEqual(len(timeout_retry_sessions), 1)
+        self.assertEqual(timeout_retry_sessions[0]["timed_out_session_id"], "ses_retry")
+        self.assertEqual(timeout_retry_sessions[0]["retry_session_id"], "ses_retry_isolated")
+        self.assertEqual(timeout_retry_sessions[0]["reason"], "worker timed out after 1s")
+        self.assertIsNotNone(timeout_retry_sessions[0]["created_at"])
 
     def test_start_times_out_stuck_worker_and_records_timeout_metadata(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:

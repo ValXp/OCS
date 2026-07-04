@@ -107,6 +107,8 @@ def configure_multi_worker_server(
         server.json("POST", f"/session/{session_id}/run", run_payload)
     for session_id, reply_payload in reply_payloads.items():
         server.json("POST", f"/session/{session_id}/reply", reply_payload)
+    for session_id in sorted(set(session_ids) | set(run_payloads) | set(reply_payloads)):
+        server.json("DELETE", f"/api/session/{session_id}", {"id": session_id, "deleted": True})
     return server
 
 
@@ -116,7 +118,9 @@ def configure_retry_server(
     run_payloads,
     reply_payloads=None,
     session_id="ses_retry",
+    session_ids=None,
 ):
+    session_ids = list(session_ids or [session_id])
     reply_payloads = reply_payloads or [
         {
             "id": "msg_assistant_1",
@@ -134,13 +138,18 @@ def configure_retry_server(
             "/session/{sessionID}/reply": {"post": {}},
         },
     )
+    queued_session_ids = deque(session_ids)
     server.json(
         "POST",
         "/api/session",
-        lambda request: {"id": session_id, "directory": payload_directory(request.payload)},
+        lambda request: {"id": queued_session_ids.popleft(), "directory": payload_directory(request.payload)},
     )
-    _register_json_sequence(server, "POST", f"/session/{session_id}/run", run_payloads)
-    _register_json_sequence(server, "POST", f"/session/{session_id}/reply", reply_payloads)
+    for session_id, session_run_payloads in _retry_payloads_by_session(run_payloads, session_ids).items():
+        _register_json_sequence(server, "POST", f"/session/{session_id}/run", session_run_payloads)
+    for session_id, session_reply_payloads in _retry_payloads_by_session(reply_payloads, session_ids).items():
+        _register_json_sequence(server, "POST", f"/session/{session_id}/reply", session_reply_payloads)
+    for session_id in session_ids:
+        server.json("DELETE", f"/api/session/{session_id}", {"id": session_id, "deleted": True})
     return server
 
 
@@ -180,6 +189,16 @@ def payload_directory(payload):
     payload = payload or {}
     location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
     return location.get("directory") or payload.get("directory")
+
+
+def _retry_payloads_by_session(payloads, session_ids):
+    if isinstance(payloads, dict):
+        return payloads
+    if len(session_ids) == 1:
+        return {session_ids[0]: payloads}
+    if len(payloads) == len(session_ids):
+        return {session_id: [payload] for session_id, payload in zip(session_ids, payloads)}
+    return {session_id: payloads for session_id in session_ids}
 
 
 def _register_core_routes(server, paths):

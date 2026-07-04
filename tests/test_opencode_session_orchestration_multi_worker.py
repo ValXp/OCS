@@ -1,5 +1,11 @@
 import tempfile
+import threading
 import unittest
+from unittest import mock
+
+from opencode_session.multi_worker_orchestration import MultiWorkerRunOrchestrationService, MultiWorkerRunStartRequest
+from opencode_session.run_store import RunStore
+from opencode_session.timeout_boundary import TimeoutExpired
 
 try:
     from tests.mocked_cli_harness import FakeOpenCodeServer, format_completed_process, load_json, run_ocs
@@ -7,6 +13,36 @@ try:
 except ModuleNotFoundError:
     from mocked_cli_harness import FakeOpenCodeServer, format_completed_process, load_json, run_ocs
     from orchestration_cli_harness import configure_multi_worker_server, payloads_for, request_paths
+
+
+CAPABILITIES = {
+    "route_availability": {
+        "blocking_message": {"path": "/session/{sessionID}/message", "method": "POST", "available": False},
+        "legacy_run": {"path": "/session/{sessionID}/run", "method": "POST", "available": True},
+        "legacy_reply": {"path": "/session/{sessionID}/reply", "method": "POST", "available": True},
+    },
+    "blocking_message_available": False,
+    "blocking_execution_available": True,
+    "legacy_fallback_available": True,
+}
+
+
+class FakeResponse:
+    def __init__(self, data):
+        self.data = data
+
+
+class FakeClient:
+    def __init__(self, session_ids):
+        self.requests = []
+        self.session_ids = list(session_ids)
+
+    def create_session_response(self, directory, *, agent=None, model=None):
+        self.requests.append(("create", directory, agent, model))
+        return FakeResponse({"id": self.session_ids.pop(0), "directory": directory})
+
+    def delete_session(self, session_id):
+        self.requests.append(("delete", session_id))
 
 
 class MultiWorkerOrchestrationCliTest(unittest.TestCase):
@@ -98,6 +134,152 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["docs"]["prompt_ids"], ["msg_docs_user"])
         self.assertEqual(payload["workers"]["docs"]["output_refs"], ["assistant:msg_docs_assistant"])
         self.assertEqual(payload["workers"]["docs"]["result"]["text"], "Docs ready.")
+
+    def test_start_with_cleanup_deletes_created_worker_sessions_and_records_cleanup(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with FakeOpenCodeServer() as server:
+                configure_multi_worker_server(server)
+                init = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                planner = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "planner",
+                    "--role",
+                    "plan",
+                    "--prompt",
+                    "Create the implementation plan",
+                )
+                docs = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "docs",
+                    "--role",
+                    "write",
+                    "--prompt",
+                    "Draft the release notes",
+                )
+                start = run_ocs("run", "--store", store, "start", "demo", "--cleanup")
+                requests = list(server.requests)
+            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, format_completed_process(init))
+        self.assertEqual(planner.returncode, 0, format_completed_process(planner))
+        self.assertEqual(docs.returncode, 0, format_completed_process(docs))
+        self.assertEqual(start.returncode, 0, format_completed_process(start))
+        self.assertEqual(status.returncode, 0, format_completed_process(status))
+        payload = load_json(self, status, "status")
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(payload["workers"]["docs"]["status"], "done")
+        self.assertEqual(payload["workers"]["docs"]["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(payload["workers"]["planner"]["status"], "done")
+        self.assertEqual(payload["workers"]["planner"]["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(payloads_for(requests, "DELETE", "/api/session/ses_docs"), [None])
+        self.assertEqual(payloads_for(requests, "DELETE", "/api/session/ses_plan"), [None])
+
+    def test_start_with_cleanup_does_not_delete_preexisting_worker_sessions(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with FakeOpenCodeServer() as server:
+                configure_multi_worker_server(
+                    server,
+                    session_ids=["ses_unused"],
+                    run_payloads={
+                        "ses_metadata": {"id": "msg_metadata_user", "status": "submitted"},
+                        "ses_argument": {"id": "msg_argument_user", "status": "submitted"},
+                    },
+                    reply_payloads={
+                        "ses_metadata": {
+                            "id": "msg_metadata_assistant",
+                            "status": "completed",
+                            "text": "Metadata worker done.",
+                        },
+                        "ses_argument": {
+                            "id": "msg_argument_assistant",
+                            "status": "completed",
+                            "text": "Argument worker done.",
+                        },
+                    },
+                )
+                init = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                metadata = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "metadata",
+                    "--role",
+                    "build",
+                    "--prompt",
+                    "Use the stored session",
+                    "--session",
+                    "ses_metadata",
+                )
+                argument = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "argument",
+                    "--role",
+                    "review",
+                    "--prompt",
+                    "Use the session passed to start",
+                )
+                start = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "start",
+                    "demo",
+                    "--worker",
+                    "argument",
+                    "--session",
+                    "ses_argument",
+                    "--cleanup",
+                )
+                requests = list(server.requests)
+            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, format_completed_process(init))
+        self.assertEqual(metadata.returncode, 0, format_completed_process(metadata))
+        self.assertEqual(argument.returncode, 0, format_completed_process(argument))
+        self.assertEqual(start.returncode, 0, format_completed_process(start))
+        self.assertEqual(status.returncode, 0, format_completed_process(status))
+        payload = load_json(self, status, "status")
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(payload["workers"]["metadata"]["session_id"], "ses_metadata")
+        self.assertEqual(payload["workers"]["metadata"]["status"], "done")
+        self.assertEqual(payload["workers"]["argument"]["session_id"], "ses_argument")
+        self.assertEqual(payload["workers"]["argument"]["status"], "done")
+        self.assertEqual(payloads_for(requests, "POST", "/api/session"), [])
+        self.assertFalse(any(method == "DELETE" for method, _path, _payload in requests))
 
     def test_start_blocks_dependent_worker_when_prerequisite_fails(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
@@ -306,6 +488,163 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["planner"]["status"], "failed")
         self.assertEqual(payload["workers"]["planner"]["failure_category"], "provider")
         self.assertEqual(payload["workers"]["planner"]["failure_reason"], "planner failed")
+
+    def test_timeout_retry_abandoned_callback_keeps_original_session_after_worker_rebind(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "worker",
+                role="worker",
+                prompt="Finish the worker task",
+                timeout_seconds=0.01,
+                retry_limit=1,
+                retryable_failures=["timeout"],
+            )
+            client = FakeClient(["ses_initial", "ses_retry"])
+            release_abandoned_callback = threading.Event()
+            abandoned_threads = []
+            deadline_calls = []
+
+            class DelayedFirstTimeoutDeadline:
+                def __init__(self, timeout):
+                    self.timeout = timeout
+
+                def run(self, callback):
+                    deadline_calls.append(self.timeout)
+                    if len(deadline_calls) == 1:
+                        thread = threading.Thread(target=lambda: (release_abandoned_callback.wait(1), callback()))
+                        thread.start()
+                        abandoned_threads.append(thread)
+                        raise TimeoutExpired()
+                    return callback()
+
+            def result_for(session_id):
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": f"msg_user_{session_id}", "assistant": f"msg_assistant_{session_id}"},
+                    "status": "done",
+                    "raw_status": "completed",
+                    "terminal_state": "done",
+                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
+                    "execution_strategy": "legacy_run_reply",
+                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
+                    "cost": 0.015,
+                    "tokens": {"total": 20},
+                    "text": f"Worker finished in {session_id}.",
+                }
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                return result_for(session_id)
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            try:
+                with mock.patch(
+                    "opencode_session.multi_worker_orchestration.TimeoutDeadline",
+                    DelayedFirstTimeoutDeadline,
+                ):
+                    outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker"))
+                run = store.load_run("demo")
+            finally:
+                release_abandoned_callback.set()
+                for thread in abandoned_threads:
+                    thread.join(1)
+
+        self.assertFalse(any(thread.is_alive() for thread in abandoned_threads))
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("create", directory, None, None),
+                ("execute", "ses_retry", "Finish the worker task"),
+                ("execute", "ses_initial", "Finish the worker task"),
+            ],
+        )
+        retry_worker = run["workers"]["worker"]
+        self.assertEqual(retry_worker["session_id"], "ses_retry")
+        self.assertEqual(retry_worker["result"]["session_id"], "ses_retry")
+
+    def test_cleanup_deletes_initial_and_timeout_retry_sessions_for_created_worker(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "worker",
+                role="worker",
+                prompt="Finish the worker task",
+                timeout_seconds=0.01,
+                retry_limit=1,
+                retryable_failures=["timeout"],
+            )
+            client = FakeClient(["ses_initial", "ses_retry"])
+            deadline_calls = []
+
+            class FirstAttemptTimeoutDeadline:
+                def __init__(self, timeout):
+                    self.timeout = timeout
+
+                def run(self, callback):
+                    deadline_calls.append(self.timeout)
+                    if len(deadline_calls) == 1:
+                        raise TimeoutExpired()
+                    return callback()
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": "msg_user_retry", "assistant": "msg_assistant_1"},
+                    "status": "done",
+                    "raw_status": "completed",
+                    "terminal_state": "done",
+                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
+                    "execution_strategy": "legacy_run_reply",
+                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
+                    "cost": 0.015,
+                    "tokens": {"total": 20},
+                    "text": "Worker finished after isolated retry.",
+                }
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            with mock.patch("opencode_session.multi_worker_orchestration.TimeoutDeadline", FirstAttemptTimeoutDeadline):
+                outcome = service.start(
+                    MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker", cleanup=True)
+                )
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("create", directory, None, None),
+                ("execute", "ses_retry", "Finish the worker task"),
+                ("delete", "ses_initial"),
+                ("delete", "ses_retry"),
+            ],
+        )
+        self.assertEqual(
+            run["workers"]["worker"]["cleanup"],
+            {"requested": True, "deleted": True, "sessions": ["ses_initial", "ses_retry"]},
+        )
 
 
 if __name__ == "__main__":
