@@ -60,38 +60,38 @@ class RunStore:
         return run
 
     def upsert_worker(self, name, worker_id, **changes):
-        run = self.load_run(name)
-        workers = run.setdefault("workers", {})
-        existing = workers.get(worker_id)
-        if existing is None:
-            if not changes.get("role"):
-                raise RunStoreError(f"worker '{worker_id}' does not exist; --role is required to create it")
-            worker = _default_worker(worker_id)
-        else:
-            worker = _normalize_worker(existing, worker_id)
+        def mutate(run):
+            workers = run.setdefault("workers", {})
+            existing = workers.get(worker_id)
+            if existing is None:
+                if not changes.get("role"):
+                    raise RunStoreError(f"worker '{worker_id}' does not exist; --role is required to create it")
+                worker = _default_worker(worker_id)
+            else:
+                worker = _normalize_worker(existing, worker_id)
 
-        for key in (
-            "role",
-            "session_id",
-            "agent",
-            "model",
-            "prompt",
-            "status",
-            "retry_count",
-            "retry_limit",
-            "timeout_seconds",
-            "timeout_policy",
-        ):
-            if changes.get(key) is not None:
-                worker[key] = short_status(changes[key]) if key == "status" else changes[key]
-        for key in ("dependencies", "prompt_ids", "retryable_failures", "blockers", "output_refs"):
-            if changes.get(key) is not None:
-                worker[key] = changes[key]
+            for key in (
+                "role",
+                "session_id",
+                "agent",
+                "model",
+                "prompt",
+                "status",
+                "retry_count",
+                "retry_limit",
+                "timeout_seconds",
+                "timeout_policy",
+            ):
+                if changes.get(key) is not None:
+                    worker[key] = short_status(changes[key]) if key == "status" else changes[key]
+            for key in ("dependencies", "prompt_ids", "retryable_failures", "blockers", "output_refs"):
+                if changes.get(key) is not None:
+                    worker[key] = changes[key]
 
-        workers[worker_id] = worker
-        run["updated_at"] = _utc_now()
-        self.save_run(run)
-        return run
+            workers[worker_id] = worker
+            run["updated_at"] = _utc_now()
+
+        return self.update_run(name, mutate)
 
     def load_run(self, name):
         return _track_run(self._read_run_unlocked(name))
@@ -113,6 +113,16 @@ class RunStore:
             self._write_run_unlocked(merged)
         _replace_mapping_in_place(run, merged)
         _remember_run_snapshot(run, merged)
+
+    def update_run(self, name, mutator):
+        with self._locked_run(name):
+            run = self._read_run_unlocked(name)
+            replacement = mutator(run)
+            if replacement is not None:
+                run = replacement
+            run = _normalize_run(run, fallback_name=name)
+            self._write_run_unlocked(run)
+        return _track_run(run)
 
     def _read_run_unlocked(self, name):
         path = self._run_path(name)
@@ -203,10 +213,32 @@ def _replace_mapping_in_place(target, source):
 
 
 def _merge_run_changes(baseline, incoming, current):
-    return _merge_value(baseline, incoming, current, ())
+    baseline = baseline if isinstance(baseline, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    current = current if isinstance(current, dict) else {}
+    merged = {}
+    for key in set(baseline) | set(incoming) | set(current):
+        if key == "workers":
+            workers = _merge_workers(
+                baseline.get("workers", {}),
+                incoming.get("workers", {}),
+                current.get("workers", {}),
+            )
+            if workers is not _MISSING:
+                merged[key] = workers
+            continue
+        value = _merge_run_field(
+            key,
+            baseline.get(key, _MISSING),
+            incoming.get(key, _MISSING),
+            current.get(key, _MISSING),
+        )
+        if value is not _MISSING:
+            merged[key] = value
+    return _normalize_run(merged, fallback_name=incoming.get("name") or current.get("name") or baseline.get("name"))
 
 
-def _merge_value(baseline, incoming, current, path):
+def _merge_run_field(key, baseline, incoming, current):
     if incoming is _MISSING:
         if current is _MISSING:
             return _MISSING
@@ -217,36 +249,60 @@ def _merge_value(baseline, incoming, current, path):
         if baseline is not _MISSING and incoming == baseline:
             return _MISSING
         return deepcopy(incoming)
-    if isinstance(incoming, dict) and isinstance(current, dict):
-        base_dict = baseline if isinstance(baseline, dict) else {}
-        return _merge_dict(base_dict, incoming, current, path)
     if incoming == baseline:
         return deepcopy(current)
     if current == baseline or incoming == current:
         return deepcopy(incoming)
-    return _merge_conflicting_values(incoming, current, path)
+    if key == "status":
+        return _merge_status(incoming, current)
+    if key in {"blockers", "output_refs"} and isinstance(incoming, list) and isinstance(current, list):
+        return _merge_lists(current, incoming)
+    return deepcopy(incoming)
 
 
-def _merge_dict(baseline, incoming, current, path):
+def _merge_workers(baseline, incoming, current):
+    baseline = baseline if isinstance(baseline, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    current = current if isinstance(current, dict) else {}
     merged = {}
     for key in set(baseline) | set(incoming) | set(current):
-        value = _merge_value(
+        value = _merge_worker(
+            key,
             baseline.get(key, _MISSING),
             incoming.get(key, _MISSING),
             current.get(key, _MISSING),
-            path + (key,),
         )
         if value is not _MISSING:
             merged[key] = value
     return merged
 
 
-def _merge_conflicting_values(incoming, current, path):
-    if isinstance(incoming, list) and isinstance(current, list):
-        return _merge_lists(current, incoming)
-    if path and path[-1] == "status":
-        return _merge_status(incoming, current)
-    return deepcopy(incoming)
+def _merge_worker(worker_id, baseline, incoming, current):
+    if incoming is _MISSING:
+        if current is _MISSING:
+            return _MISSING
+        if baseline is not _MISSING and current == baseline:
+            return _MISSING
+        return deepcopy(current)
+    if current is _MISSING:
+        if baseline is not _MISSING and incoming == baseline:
+            return _MISSING
+        return _normalize_worker(incoming, worker_id)
+    if incoming == baseline:
+        return deepcopy(current)
+    if current == baseline or incoming == current:
+        return _normalize_worker(incoming, worker_id)
+    return _merge_conflicting_worker(worker_id, incoming, current)
+
+
+def _merge_conflicting_worker(worker_id, incoming, current):
+    incoming_worker = _normalize_worker(incoming, worker_id)
+    current_worker = _normalize_worker(current, worker_id)
+    incoming_status = incoming_worker.get("status")
+    current_status = current_worker.get("status")
+    if _status_priority(current_status) > _status_priority(incoming_status):
+        return deepcopy(current_worker)
+    return deepcopy(incoming_worker)
 
 
 def _merge_lists(current, incoming):
@@ -258,10 +314,14 @@ def _merge_lists(current, incoming):
 
 
 def _merge_status(incoming, current):
-    priority = {"queued": 0, "active": 1, "blocked": 2, "done": 3, "timeout": 4, "failed": 4, "aborted": 5}
     if not isinstance(incoming, str) or not isinstance(current, str):
         return deepcopy(incoming)
-    return current if priority.get(current, 0) > priority.get(incoming, 0) else incoming
+    return current if _status_priority(current) > _status_priority(incoming) else incoming
+
+
+def _status_priority(status):
+    priority = {"queued": 0, "active": 1, "blocked": 2, "done": 3, "timeout": 4, "failed": 4, "aborted": 5}
+    return priority.get(status, 0)
 
 
 def format_run_compact(run):

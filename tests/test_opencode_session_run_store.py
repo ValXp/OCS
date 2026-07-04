@@ -53,6 +53,34 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(set(run["workers"]), {"planner", "builder"})
 
+    def test_conflicting_same_worker_saves_do_not_merge_fields_into_invalid_state(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            first = RunStore(store)
+            first.create_run("demo", directory=directory, server_url="http://opencode.example")
+            first.upsert_worker("demo", "builder", role="build", status="active")
+            stale_run = first.load_run("demo")
+
+            second = RunStore(store)
+            current_run = second.load_run("demo")
+            current_worker = current_run["workers"]["builder"]
+            current_worker["status"] = "done"
+            current_worker["prompt_ids"] = ["prompt-done"]
+            current_worker["result"] = {
+                "session_id": "ses_builder",
+                "status": "done",
+                "message_ids": {"user": "prompt-done", "assistant": "msg_done"},
+            }
+            second.save_run(current_run)
+
+            stale_run["workers"]["builder"]["prompt_ids"] = ["prompt-stale"]
+            first.save_run(stale_run)
+
+            run = RunStore(store).load_run("demo")
+
+        self.assertEqual(run["workers"]["builder"]["status"], "done")
+        self.assertEqual(run["workers"]["builder"]["prompt_ids"], ["prompt-done"])
+        self.assertEqual(run["workers"]["builder"]["result"]["message_ids"]["user"], "prompt-done")
+
 
 class _InterleavedRunStore(RunStore):
     def __init__(self, root):
