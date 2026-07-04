@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
@@ -17,10 +18,10 @@ from opencode_session.capabilities import (
     SESSION_MESSAGE_PATH,
     blocking_message_supported,
     detect_capabilities,
-    format_compact,
     legacy_run_reply_supported,
     unsupported_reasons,
 )
+from opencode_session.commands.capabilities import add_capabilities_parser, handle_capabilities
 from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event, normalize_event
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 from opencode_session.status import short_status
@@ -57,9 +58,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog=CLI_NAME, description="Agent-friendly OpenCode session CLI.")
     subparsers = parser.add_subparsers(dest="command")
 
-    capabilities_parser = subparsers.add_parser("capabilities", help="probe OpenCode API capabilities")
-    _add_server_argument(capabilities_parser)
-    capabilities_parser.add_argument("--json", action="store_true", help="print full JSON capability data")
+    add_capabilities_parser(
+        subparsers,
+        add_server_argument=_add_server_argument,
+        handler=partial(
+            handle_capabilities,
+            print_error=_print_error,
+            unavailable_exit=EX_UNAVAILABLE,
+            unsupported_exit=EX_UNSUPPORTED,
+        ),
+    )
 
     create_parser = subparsers.add_parser("create", help="create a session")
     create_parser.add_argument("directory", help="target directory for the new session")
@@ -216,6 +224,9 @@ def main(argv=None):
     if args.command == "question" and not args.question_command:
         question_parser.print_help(sys.stderr)
         return 64
+    command_handler = getattr(args, "command_handler", None)
+    if command_handler is not None:
+        return command_handler(args)
     if args.command == "run":
         return _handle_run_store_command(args)
 
@@ -555,24 +566,6 @@ def main(argv=None):
 
     if args.command == "cleanup":
         return _cleanup_disposable_command(args, client)
-
-    try:
-        capabilities = detect_capabilities(client)
-    except OpenCodeApiError as error:
-        _print_error(str(error))
-        return EX_UNAVAILABLE
-
-    reasons = unsupported_reasons(capabilities)
-    if reasons:
-        _print_error(f"unsupported OpenCode server; {'; '.join(reasons)}")
-        return EX_UNSUPPORTED
-
-    if args.json:
-        print(json.dumps(capabilities, sort_keys=True))
-    else:
-        print(format_compact(capabilities))
-    return 0
-
 
 def _parse_run_store_args(argv):
     parser = argparse.ArgumentParser(prog=f"{CLI_NAME} run")

@@ -1,3 +1,4 @@
+import argparse
 import unittest
 
 try:
@@ -14,6 +15,28 @@ def capability_server(*, health=None, doc=None, health_path="/global/health"):
 
 
 class CapabilityProbeCliTest(unittest.TestCase):
+    def test_capabilities_parser_installs_command_handler(self):
+        from opencode_session.commands.capabilities import add_capabilities_parser
+
+        parser = argparse.ArgumentParser(prog="ocs")
+        subparsers = parser.add_subparsers(dest="command")
+
+        def handler(args):
+            return args
+
+        add_capabilities_parser(
+            subparsers,
+            add_server_argument=lambda command_parser: command_parser.add_argument("--server", default="default-server"),
+            handler=handler,
+        )
+
+        args = parser.parse_args(["capabilities", "--server", "http://example.test", "--json"])
+        self.assertEqual(args.command, "capabilities")
+        self.assertEqual(args.server, "http://example.test")
+        self.assertTrue(args.json)
+        self.assertTrue(callable(args.command_handler))
+        self.assertIs(args.command_handler, handler)
+
     def test_compact_summary_reports_detected_paths(self):
         doc = {
             "openapi": "3.1.0",
