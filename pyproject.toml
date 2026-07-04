@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocs"
+version = "0.1.0"
+description = "Lightweight OpenCode session orchestration CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+ocs = "opencode_session.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["opencode_session*"]
