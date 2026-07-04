@@ -10,6 +10,11 @@ LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 def detect_capabilities(client):
     health = client.get_health()
     doc = client.get_openapi_doc()
+    return capabilities_from_openapi_doc(doc, health=health)
+
+
+def capabilities_from_openapi_doc(doc, *, health=None):
+    health = health or {}
     paths = doc.get("paths") or {}
 
     session_path, session_available = _first_available_route(paths, SESSION_PATHS, "post")
@@ -85,16 +90,6 @@ def unsupported_reasons(capabilities):
             "POST /session/{sessionID}/run + POST /session/{sessionID}/reply"
         )
     return reasons
-
-
-def blocking_message_supported(doc):
-    paths = doc.get("paths") or {}
-    return _route_available(paths, SESSION_MESSAGE_PATH, "post")
-
-
-def legacy_run_reply_supported(doc):
-    paths = doc.get("paths") or {}
-    return _route_available(paths, LEGACY_RUN_PATH, "post") and _route_available(paths, LEGACY_REPLY_PATH, "post")
 
 
 def _route(path, method, available):

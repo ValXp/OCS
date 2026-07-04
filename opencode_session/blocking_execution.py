@@ -6,8 +6,6 @@ from opencode_session.capabilities import (
     LEGACY_REPLY_PATH,
     LEGACY_RUN_PATH,
     SESSION_MESSAGE_PATH,
-    blocking_message_supported,
-    legacy_run_reply_supported,
 )
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.records import message_text, message_tokens, message_value, tokens_total
@@ -21,21 +19,6 @@ class BlockingProviderFailure(Exception):
     def __init__(self, message, *, prompt_id=None):
         super().__init__(message)
         self.prompt_id = prompt_id
-
-
-def blocking_execution_capabilities(doc):
-    blocking_message_available = blocking_message_supported(doc)
-    legacy_fallback_available = legacy_run_reply_supported(doc)
-    return {
-        "route_availability": {
-            "blocking_message": _execution_route(SESSION_MESSAGE_PATH, "POST", blocking_message_available),
-            "legacy_run": _execution_route(LEGACY_RUN_PATH, "POST", legacy_fallback_available),
-            "legacy_reply": _execution_route(LEGACY_REPLY_PATH, "POST", legacy_fallback_available),
-        },
-        "blocking_message_available": blocking_message_available,
-        "blocking_execution_available": blocking_message_available or legacy_fallback_available,
-        "legacy_fallback_available": legacy_fallback_available,
-    }
 
 
 def blocking_execution_strategy(capabilities):
@@ -201,7 +184,3 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
         "tokens": message_tokens(assistant_message),
         "text": message_text(assistant_message),
     }
-
-
-def _execution_route(path, method, available):
-    return {"path": path, "method": method, "available": available}

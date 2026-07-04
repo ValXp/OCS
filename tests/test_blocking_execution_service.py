@@ -46,12 +46,12 @@ class _ExplicitTimeoutClient:
 class BlockingExecutionServiceTest(unittest.TestCase):
     def test_prefers_modern_session_message_and_returns_normalized_result(self):
         from opencode_session.blocking_execution import (
-            blocking_execution_capabilities,
             blocking_execution_strategy,
             execute_blocking_prompt,
         )
+        from opencode_session.capabilities import capabilities_from_openapi_doc
 
-        capabilities = blocking_execution_capabilities(
+        capabilities = capabilities_from_openapi_doc(
             {
                 "paths": {
                     "/session/{sessionID}/message": {"post": {}},
@@ -87,9 +87,10 @@ class BlockingExecutionServiceTest(unittest.TestCase):
         )
 
     def test_uses_explicit_request_timeout_without_mutating_client_default(self):
-        from opencode_session.blocking_execution import blocking_execution_capabilities, execute_blocking_prompt
+        from opencode_session.blocking_execution import execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
 
-        capabilities = blocking_execution_capabilities({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
         client = _ExplicitTimeoutClient()
 
         execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)

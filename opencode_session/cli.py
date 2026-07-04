@@ -9,14 +9,13 @@ from pathlib import Path
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import (
     BlockingProviderFailure as _BlockingProviderFailure,
-    blocking_execution_capabilities as _blocking_execution_capabilities,
     blocking_execution_strategy as _blocking_execution_strategy,
     execute_blocking_prompt as _execute_blocking_prompt,
     format_blocking_execution_compact as _format_run_compact,
     tokens_total as _tokens_total,
     unsupported_blocking_execution_message as _unsupported_blocking_execution_message,
 )
-from opencode_session.capabilities import detect_capabilities
+from opencode_session.capabilities import capabilities_from_openapi_doc, detect_capabilities
 from opencode_session.commands.blockers import (
     add_blocker_parsers,
     handle_permission_command,
@@ -194,7 +193,7 @@ def main(argv=None):
         session_id = args.session
         created_session_id = None
         try:
-            capabilities = _blocking_execution_capabilities(client.require_openapi_doc())
+            capabilities = capabilities_from_openapi_doc(client.require_openapi_doc())
             if _blocking_execution_strategy(capabilities) is None:
                 _print_error(_unsupported_blocking_execution_message())
                 return EX_UNSUPPORTED
