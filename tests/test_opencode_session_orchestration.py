@@ -335,8 +335,9 @@ class MultiWorkerOrchestrationServer:
 
 
 class WorkerControlOpenCodeServer:
-    def __init__(self, *, prompt_response=None, abort_response=None):
+    def __init__(self, *, prompt_response=None, prompt_status=200, abort_response=None):
         self.prompt_response = prompt_response or {}
+        self.prompt_status = prompt_status
         self.abort_response = abort_response or {}
         self.requests = []
         self.server = None
@@ -373,16 +374,16 @@ class WorkerControlOpenCodeServer:
                 payload = json.loads(body or "{}")
                 parent.requests.append(("POST", self.path, payload))
                 if self.path == "/api/session/ses_plan/prompt":
-                    self._write_json(parent.prompt_response)
+                    self._write_json(parent.prompt_response, status=parent.prompt_status)
                     return
                 if self.path == "/session/ses_plan/abort":
                     self._write_json(parent.abort_response)
                     return
                 self.send_error(404)
 
-            def _write_json(self, payload):
+            def _write_json(self, payload, *, status=200):
                 body = json.dumps(payload).encode("utf-8")
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -1348,6 +1349,69 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
         payload = json.loads(status.stdout)
         self.assertEqual(payload["workers"]["planner"]["status"], "active")
         self.assertEqual(payload["workers"]["planner"]["prompt_ids"], ["msg_steer_1"])
+
+    def test_run_steer_treats_matching_replay_as_admitted_prompt(self):
+        prompt_response = {
+            "sessionID": "ses_plan",
+            "messageID": "msg_repeat_1",
+            "delivery": "queue",
+            "state": "admitted",
+            "admittedSequence": 7,
+            "duplicate": True,
+        }
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with WorkerControlOpenCodeServer(prompt_response=prompt_response, prompt_status=409) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "planner",
+                    "--role",
+                    "plan",
+                    "--session",
+                    "ses_plan",
+                    "--status",
+                    "active",
+                )
+                steer = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "steer",
+                    "demo",
+                    "planner",
+                    "Queue this without duplicating it",
+                    "--delivery",
+                    "queue",
+                    "--message-id",
+                    "msg_repeat_1",
+                )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(steer.returncode, 0, steer.stderr)
+        self.assertEqual(steer.stderr, "")
+        self.assertEqual(
+            steer.stdout,
+            "run=demo worker=planner steer session=ses_plan message=msg_repeat_1 "
+            "delivery=queue status=queued admitted=7 promoted=-\n",
+        )
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["workers"]["planner"]["prompt_ids"], ["msg_repeat_1"])
 
     def test_run_abort_targets_individual_worker_session_and_marks_worker_aborted(self):
         abort_response = {"sessionID": "ses_plan", "accepted": True, "status": "aborted"}

@@ -23,6 +23,11 @@ from opencode_session.capabilities import (
 )
 from opencode_session.commands.capabilities import add_capabilities_parser, handle_capabilities
 from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event, normalize_event
+from opencode_session.prompt_admission import (
+    PromptAdmissionFailure,
+    PromptAdmissionUnsupported,
+    admit_prompt as admit_prompt_service,
+)
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 from opencode_session.status import short_status
 
@@ -877,7 +882,6 @@ def _run_smoke(args, client):
         result["session_id"] = session_id
         result["checks"]["create"] = {"status": "done", "session_id": session_id, "title": smoke_id}
 
-        prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
         event_collector = _SmokeEventCollector(
             client,
             session_id,
@@ -888,12 +892,16 @@ def _run_smoke(args, client):
         event_collector.wait_open(args.event_timeout)
 
         steer_message_id = f"msg_{smoke_id}-steer"
-        steer_response = client.admit_prompt_response(
+        steer_result = admit_prompt_service(
+            client,
+            capabilities,
             session_id,
-            _prompt_admission_payload(steer_message_id, "ocs smoke steer", "steer", prompt_path),
-            prompt_path,
+            "ocs smoke steer",
+            "steer",
+            message_id=steer_message_id,
+            map_unsupported=False,
         )
-        admission = _admission_record(session_id, "steer", steer_message_id, steer_response.data, capabilities=capabilities)
+        admission = steer_result.record
         result["checks"]["steer"] = admission
 
         event_types = event_collector.collect(args.event_timeout)
@@ -1025,19 +1033,16 @@ def _run_live_validate(args, client):
         steer_session_id = create_live_session("steer")
         result["session_ids"]["steer"] = steer_session_id
         steer_message_id = f"msg_{validation_id}-steer"
-        prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
-        steer_response = client.admit_prompt_response(
+        steer_result = admit_prompt_service(
+            client,
+            capabilities,
             steer_session_id,
-            _prompt_admission_payload(steer_message_id, LIVE_VALIDATE_PROMPT, "steer", prompt_path),
-            prompt_path,
-        )
-        steer = _admission_record(
-            steer_session_id,
+            LIVE_VALIDATE_PROMPT,
             "steer",
-            steer_message_id,
-            steer_response.data,
-            capabilities=capabilities,
+            message_id=steer_message_id,
+            map_unsupported=False,
         )
+        steer = steer_result.record
         steer.update(_live_steer_execution_observation(client, steer, capabilities))
         result["checks"]["v2_steer"] = steer
 
@@ -1630,27 +1635,23 @@ def _steer_run_worker(args, store):
     except OpenCodeApiError as error:
         _print_error(str(error))
         return EX_UNAVAILABLE
-    if not capabilities["v2_prompt_support"]:
-        _print_error(
-            "unsupported v2 prompt capability; durable prompt admission requires "
-            "POST /api/session/{sessionID}/prompt or POST /session/{sessionID}/prompt_async; "
-            "legacy run/reply fallback is not used for steer admission"
-        )
-        return EX_UNSUPPORTED
-
-    message_id = args.message_id or f"msg_{uuid.uuid4().hex}"
-    prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
-    payload = _prompt_admission_payload(message_id, args.text, args.delivery, prompt_path)
     try:
-        response = client.admit_prompt_response(worker["session_id"], payload, prompt_path)
-    except OpenCodeApiError as error:
-        if error.status in {400, 404, 405, 415, 422}:
-            _print_error(f"unsupported v2 prompt behavior; {_api_error_detail(error)}; legacy run/reply fallback is not used")
-            return EX_UNSUPPORTED
-        _print_error(f"prompt admission failed; {error}; legacy run/reply fallback is not used")
+        result = admit_prompt_service(
+            client,
+            capabilities,
+            worker["session_id"],
+            args.text,
+            args.delivery,
+            message_id=args.message_id,
+        )
+    except PromptAdmissionUnsupported as error:
+        _print_error(str(error))
+        return EX_UNSUPPORTED
+    except PromptAdmissionFailure as error:
+        _print_error(str(error))
         return EX_UNAVAILABLE
 
-    admission = _admission_record(worker["session_id"], args.delivery, message_id, response.data, capabilities=capabilities)
+    admission = result.record
     prompt_ids = worker.setdefault("prompt_ids", [])
     if admission["message_id"] not in prompt_ids:
         prompt_ids.append(admission["message_id"])
@@ -2067,60 +2068,27 @@ def _admit_prompt(args, client, delivery):
         _print_error(str(error))
         return EX_UNAVAILABLE
 
-    if not capabilities["v2_prompt_support"]:
-        print(
-            f"{CLI_NAME}: unsupported v2 prompt capability; durable prompt admission requires "
-            "POST /api/session/{sessionID}/prompt or POST /session/{sessionID}/prompt_async; "
-            "legacy run/reply fallback is not used for steer admission",
-            file=sys.stderr,
-        )
-        return EX_UNSUPPORTED
-
-    message_id = args.message_id or f"msg_{uuid.uuid4().hex}"
-    prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
-    payload = _prompt_admission_payload(message_id, args.text, delivery, prompt_path)
-
     try:
-        response = client.admit_prompt_response(
+        result = admit_prompt_service(
+            client,
+            capabilities,
             args.session_id,
-            payload,
-            prompt_path,
+            args.text,
+            delivery,
+            message_id=args.message_id,
         )
-    except OpenCodeApiError as error:
-        if _is_idempotent_admission_replay(error, message_id):
-            if args.raw:
-                _write_raw(error.body or "")
-                return 0
-            admission = _admission_record(
-                args.session_id,
-                delivery,
-                message_id,
-                error.data,
-                capabilities=capabilities,
-            )
-            if args.json:
-                print(json.dumps(admission, sort_keys=True))
-            else:
-                print(_format_admission_compact(admission))
-            return 0
-        if error.status in {400, 404, 405, 415, 422}:
-            print(
-                f"{CLI_NAME}: unsupported v2 prompt behavior; {_api_error_detail(error)}; "
-                "legacy run/reply fallback is not used",
-                file=sys.stderr,
-            )
-            return EX_UNSUPPORTED
-        print(
-            f"{CLI_NAME}: prompt admission failed; {error}; legacy run/reply fallback is not used",
-            file=sys.stderr,
-        )
+    except PromptAdmissionUnsupported as error:
+        _print_error(str(error))
+        return EX_UNSUPPORTED
+    except PromptAdmissionFailure as error:
+        _print_error(str(error))
         return EX_UNAVAILABLE
 
     if args.raw:
-        _write_raw(response.body)
+        _write_raw(result.body)
         return 0
 
-    admission = _admission_record(args.session_id, delivery, message_id, response.data, capabilities=capabilities)
+    admission = result.record
     if args.json:
         print(json.dumps(admission, sort_keys=True))
     else:
@@ -2727,80 +2695,6 @@ def _format_question_table(questions):
 def _format_question_resolution_compact(result):
     fields = [("id", result["id"]), ("action", result["action"]), ("ok", _compact_bool(result["ok"]))]
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
-
-
-def _admission_record(session_id, delivery, message_id, data, *, capabilities):
-    if isinstance(data, dict) and isinstance(data.get("data"), dict):
-        data = data["data"]
-    if not isinstance(data, dict):
-        data = {}
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
-    state = _first_present(data, "state", "status", "phase") or "admitted"
-    return {
-        "session_id": _first_present(data, "sessionID", "sessionId", "session_id")
-        or _first_present(info, "sessionID", "sessionId", "session_id")
-        or session_id,
-        "message_id": _first_present(data, "messageID", "messageId", "promptID", "promptId", "id")
-        or _first_present(info, "messageID", "messageId", "promptID", "promptId", "id")
-        or message_id,
-        "delivery": _first_present(data, "delivery", "deliveryMode", "mode") or delivery,
-        "state": state,
-        "raw_state": state,
-        "status": short_status(state),
-        "terminal_state": None,
-        "api_path": capabilities["route_availability"]["v2_prompt"]["path"],
-        "fallback": {
-            "available": capabilities["legacy_fallback_available"],
-            "strategy": "legacy_run_reply",
-            "used": False,
-        },
-        "admitted_sequence": _first_present(data, "admittedSeq", "admittedSequence", "admitted_sequence", "sequence"),
-        "promoted_sequence": _first_present(data, "promotedSeq", "promotedSequence", "promoted_sequence"),
-    }
-
-
-def _prompt_admission_payload(message_id, text, delivery, prompt_path):
-    if prompt_path.split("?", 1)[0].rstrip("/") == "/api/session/{sessionID}/prompt":
-        return {"id": message_id, "prompt": {"text": text}, "delivery": delivery}
-    return {
-        "messageID": message_id,
-        "parts": [{"type": "text", "text": text}],
-        "delivery": delivery,
-    }
-
-
-def _is_idempotent_admission_replay(error, message_id):
-    if error.status != 409 or not isinstance(error.data, dict):
-        return False
-    data = error.data
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
-    response_message_id = (
-        _first_present(data, "messageID", "messageId", "promptID", "promptId", "id")
-        or _first_present(info, "messageID", "messageId", "promptID", "promptId", "id")
-    )
-    if response_message_id != message_id:
-        return False
-    state = _first_present(data, "state", "status", "phase")
-    idempotency = _first_present(data, "idempotency", "idempotencyStatus")
-    return (
-        data.get("duplicate") is True
-        or data.get("idempotent") is True
-        or idempotency in {"duplicate", "replayed", "existing"}
-        or state in {"admitted", "promoted", "running", "completed", "failed"}
-    )
-
-
-def _api_error_detail(error):
-    if isinstance(error.data, dict):
-        for name in ("error", "message", "detail"):
-            value = error.data.get(name)
-            if isinstance(value, str):
-                return value
-            if isinstance(value, dict):
-                nested = _first_present(value, "message", "detail", "error")
-                if isinstance(nested, str):
-                    return nested
-    return str(error)
 
 
 def _collection_sessions(collection):
