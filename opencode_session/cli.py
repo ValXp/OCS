@@ -38,6 +38,7 @@ from opencode_session.prompt_admission import (
     admit_prompt as admit_prompt_service,
 )
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
+from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
 from opencode_session.status import short_status
 
 
@@ -1387,103 +1388,26 @@ def _format_cleanup_command_compact(result):
 
 
 def _start_single_worker_run(args, store):
-    run = _load_or_create_orchestration_run(store, args)
-    worker = _ensure_orchestration_worker(run, args.worker, role=args.role)
-    worker["prompt"] = args.prompt
-    run["status"] = "active"
-    worker["status"] = "active"
-    _save_orchestration_run(store, run)
-
-    created_session_id = None
-    try:
-        client = OpenCodeApiClient(run["server_url"])
-        capabilities = detect_capabilities(client)
-        if _blocking_execution_strategy(capabilities) is None:
-            message = _unsupported_blocking_execution_message()
-            _mark_orchestration_failed(store, run, worker, message)
-            _print_error(message)
-            return EX_UNSUPPORTED
-
-        session_id = args.session_id or worker.get("session_id")
-        if session_id is None:
-            create_response = client.create_session_response(run["directory"], agent=args.agent, model=args.model)
-            session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
-            created_session_id = session_id
-        worker["session_id"] = session_id
-        _save_orchestration_run(store, run)
-
-        if args.agent is not None:
-            worker["agent"] = args.agent
-        if args.model is not None:
-            worker["model"] = args.model
-
-        while True:
-            worker["status"] = "active"
-            worker["next_eligible_action"] = "wait"
-            worker["timeout_started_at"] = _utc_now() if worker.get("timeout_seconds") else None
-            try:
-                result = _call_worker_with_timeout(
-                    worker,
-                    lambda: _execute_blocking_prompt(client, session_id, args.prompt, capabilities),
-                )
-            except _WatchTimeout:
-                reason = _worker_timeout_reason(worker)
-                if _schedule_worker_retry(worker, "timeout", reason):
-                    worker["timed_out_at"] = _utc_now()
-                    _save_orchestration_run(store, run)
-                    continue
-                _mark_worker_timeout(worker, reason)
-                _refresh_orchestration_run_summary(run)
-                _save_orchestration_run(store, run)
-                _print_error(reason)
-                return _exit_code_for_orchestration_run(run)
-            except OpenCodeApiError as error:
-                if _schedule_worker_retry(worker, "api", str(error)):
-                    _save_orchestration_run(store, run)
-                    continue
-                _mark_worker_failed(worker, "api", str(error))
-                _refresh_orchestration_run_summary(run)
-                _save_orchestration_run(store, run)
-                _print_error(f"api failure: {error}")
-                return _exit_code_for_orchestration_run(run)
-            except _BlockingProviderFailure as error:
-                if error.prompt_id is not None:
-                    worker["prompt_ids"] = [error.prompt_id]
-                if _schedule_worker_retry(worker, "provider", str(error)):
-                    _save_orchestration_run(store, run)
-                    continue
-                _mark_worker_failed(worker, "provider", str(error))
-                _refresh_orchestration_run_summary(run)
-                _save_orchestration_run(store, run)
-                _print_error(f"provider failure: {error}")
-                return _exit_code_for_orchestration_run(run)
-
-            prompt_id = result["message_ids"].get("user")
-            if prompt_id is not None:
-                worker["prompt_ids"] = [prompt_id]
-                _save_orchestration_run(store, run)
-            break
-    except OpenCodeApiError as error:
-        _mark_orchestration_failed(store, run, worker, str(error))
-        _print_error(f"api failure: {error}")
-        return EX_UNAVAILABLE
-
-    _apply_worker_result(worker, result)
-    _refresh_orchestration_run_summary(run)
-    if args.cleanup:
-        worker["cleanup"] = {"requested": True, "deleted": False}
-        if created_session_id is not None:
-            try:
-                client.delete_session(created_session_id)
-            except OpenCodeApiError as error:
-                worker["cleanup"]["error"] = str(error)
-                _mark_orchestration_failed(store, run, worker, str(error))
-                _print_cleanup_error(error)
-                return EX_UNAVAILABLE
-            worker["cleanup"]["deleted"] = True
-    _save_orchestration_run(store, run)
-    print(format_run_compact(run))
-    return _exit_code_for_orchestration_run(run)
+    outcome = SingleWorkerRunStateService(store).start(
+        SingleWorkerRunStartRequest(
+            name=args.name,
+            worker_id=args.worker,
+            role=args.role,
+            prompt=args.prompt,
+            directory=args.directory,
+            server_url=args.server,
+            session_id=args.session_id,
+            agent=args.agent,
+            model=args.model,
+            cleanup=args.cleanup,
+            default_server_url=_server_default(),
+        )
+    )
+    if outcome.error is not None:
+        _print_error(outcome.error)
+        return outcome.exit_code
+    print(format_run_compact(outcome.run))
+    return outcome.exit_code
 
 
 def _collect_run_results(args, store):
