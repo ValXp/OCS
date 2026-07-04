@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from urllib.parse import quote
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import (
@@ -236,111 +237,10 @@ def main(argv=None):
         _print_error(str(error))
         return EX_UNAVAILABLE
     if args.command == "permission":
-        if args.permission_command == "list":
-            try:
-                response = client.list_permissions_response()
-            except OpenCodeApiError as error:
-                _print_error(str(error))
-                return EX_UNAVAILABLE
-            if args.raw:
-                _write_raw(response.body)
-                return 0
-            permissions = _filter_blockers_by_session(_collection_blockers(response.data, "permissions"), args.session_id)
-            if args.json:
-                print(json.dumps(permissions, sort_keys=True))
-                return 0
-            if permissions:
-                if len(permissions) > 1:
-                    print(_format_permission_table(permissions))
-                else:
-                    print(_format_permission_compact(permissions[0]))
-            return 0
-        if args.permission_command == "reply":
-            try:
-                response = client.reply_permission_response(args.request_id, args.reply, message=args.message)
-            except OpenCodeApiError as error:
-                if _is_permission_request_not_found_error(error, args.request_id):
-                    _print_error(f"permission request not found: {args.request_id}")
-                    return EX_NOINPUT
-                _print_error(str(error))
-                return EX_UNAVAILABLE
-            if args.raw:
-                _write_raw(response.body)
-                return 0
-            result = {"id": args.request_id, "reply": args.reply, "ok": bool(response.data), "response": response.data}
-            if args.json:
-                print(json.dumps(result, sort_keys=True))
-                return 0
-            print(_format_permission_reply_compact(result))
-            return 0
+        return _handle_permission_command(args, client)
 
     if args.command == "question":
-        if args.question_command == "list":
-            try:
-                response = client.list_questions_response()
-            except OpenCodeApiError as error:
-                _print_error(str(error))
-                return EX_UNAVAILABLE
-            if args.raw:
-                _write_raw(response.body)
-                return 0
-            questions = _filter_blockers_by_session(_collection_blockers(response.data, "questions"), args.session_id)
-            if args.json:
-                print(json.dumps(questions, sort_keys=True))
-                return 0
-            if questions:
-                if len(questions) > 1:
-                    print(_format_question_table(questions))
-                else:
-                    print(_format_question_compact(questions[0]))
-            return 0
-        if args.question_command == "answer":
-            try:
-                answers = _question_answers_from_args(args)
-            except ValueError as error:
-                _print_error(str(error))
-                return EX_DATAERR
-            try:
-                response = client.answer_question_response(args.request_id, answers)
-            except OpenCodeApiError as error:
-                if _is_question_request_not_found_error(error, args.request_id):
-                    _print_error(f"question request not found: {args.request_id}")
-                    return EX_NOINPUT
-                _print_error(str(error))
-                return EX_UNAVAILABLE
-            if args.raw:
-                _write_raw(response.body)
-                return 0
-            result = {
-                "id": args.request_id,
-                "action": "answer",
-                "ok": bool(response.data),
-                "response": response.data,
-                "answers": answers,
-            }
-            if args.json:
-                print(json.dumps(result, sort_keys=True))
-                return 0
-            print(_format_question_resolution_compact(result))
-            return 0
-        if args.question_command == "reject":
-            try:
-                response = client.reject_question_response(args.request_id)
-            except OpenCodeApiError as error:
-                if _is_question_request_not_found_error(error, args.request_id):
-                    _print_error(f"question request not found: {args.request_id}")
-                    return EX_NOINPUT
-                _print_error(str(error))
-                return EX_UNAVAILABLE
-            if args.raw:
-                _write_raw(response.body)
-                return 0
-            result = {"id": args.request_id, "action": "reject", "ok": bool(response.data), "response": response.data}
-            if args.json:
-                print(json.dumps(result, sort_keys=True))
-                return 0
-            print(_format_question_resolution_compact(result))
-            return 0
+        return _handle_question_command(args, client)
 
     if args.command == "run_blocking":
         prompt = _read_prompt(args.prompt)
@@ -2046,6 +1946,126 @@ def _add_output_arguments(parser):
     output.add_argument("--raw", action="store_true", help="print raw API response body")
 
 
+def _handle_permission_command(args, client):
+    if args.permission_command == "list":
+        return _handle_blocker_list(
+            args,
+            client.list_permissions_response,
+            "permissions",
+            _format_permission_compact,
+            _format_permission_table,
+        )
+    if args.permission_command == "reply":
+        return _handle_blocker_resolution(
+            args,
+            lambda: client.reply_permission_response(args.request_id, args.reply, message=args.message),
+            lambda error: _is_permission_request_not_found_error(error, args.request_id),
+            f"permission request not found: {args.request_id}",
+            lambda response: {
+                "id": args.request_id,
+                "reply": args.reply,
+                "ok": bool(response.data),
+                "response": response.data,
+            },
+            _format_permission_reply_compact,
+        )
+    return 64
+
+
+def _handle_question_command(args, client):
+    if args.question_command == "list":
+        return _handle_blocker_list(
+            args,
+            client.list_questions_response,
+            "questions",
+            _format_question_compact,
+            _format_question_table,
+        )
+    if args.question_command == "answer":
+        try:
+            answers = _question_answers_from_args(args)
+        except ValueError as error:
+            _print_error(str(error))
+            return EX_DATAERR
+        return _handle_blocker_resolution(
+            args,
+            lambda: client.answer_question_response(args.request_id, answers),
+            lambda error: _is_question_request_not_found_error(error, args.request_id),
+            f"question request not found: {args.request_id}",
+            lambda response: {
+                "id": args.request_id,
+                "action": "answer",
+                "ok": bool(response.data),
+                "response": response.data,
+                "answers": answers,
+            },
+            _format_question_resolution_compact,
+        )
+    if args.question_command == "reject":
+        return _handle_blocker_resolution(
+            args,
+            lambda: client.reject_question_response(args.request_id),
+            lambda error: _is_question_request_not_found_error(error, args.request_id),
+            f"question request not found: {args.request_id}",
+            lambda response: {
+                "id": args.request_id,
+                "action": "reject",
+                "ok": bool(response.data),
+                "response": response.data,
+            },
+            _format_question_resolution_compact,
+        )
+    return 64
+
+
+def _handle_blocker_list(args, request_response, plural_name, compact_formatter, table_formatter):
+    try:
+        response = request_response()
+    except OpenCodeApiError as error:
+        _print_error(str(error))
+        return EX_UNAVAILABLE
+    if args.raw:
+        _write_raw(response.body)
+        return 0
+    blockers = _filter_blockers_by_session(_collection_blockers(response.data, plural_name), args.session_id)
+    if args.json:
+        print(json.dumps(blockers, sort_keys=True))
+        return 0
+    if blockers:
+        if len(blockers) > 1:
+            print(table_formatter(blockers))
+        else:
+            print(compact_formatter(blockers[0]))
+    return 0
+
+
+def _handle_blocker_resolution(
+    args,
+    request_response,
+    is_not_found_error,
+    not_found_message,
+    result_factory,
+    compact_formatter,
+):
+    try:
+        response = request_response()
+    except OpenCodeApiError as error:
+        if is_not_found_error(error):
+            _print_error(not_found_message)
+            return EX_NOINPUT
+        _print_error(str(error))
+        return EX_UNAVAILABLE
+    if args.raw:
+        _write_raw(response.body)
+        return 0
+    result = result_factory(response)
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    print(compact_formatter(result))
+    return 0
+
+
 def _add_admission_arguments(parser):
     parser.add_argument("session_id", help="session ID to admit input to")
     parser.add_argument("text", help="input text to admit")
@@ -2503,19 +2523,20 @@ def _is_session_not_found_error(error):
 
 
 def _is_permission_request_not_found_error(error, request_id):
-    if error.status != 404:
-        return False
-    method = str(getattr(error, "method", "") or "").upper()
-    path = str(getattr(error, "path", "") or "").split("?", 1)[0]
-    return method == "POST" and path == f"/permission/{request_id}/reply"
+    return _is_blocker_resolution_not_found_error(error, "permission", request_id, ("reply",))
 
 
 def _is_question_request_not_found_error(error, request_id):
+    return _is_blocker_resolution_not_found_error(error, "question", request_id, ("reply", "reject"))
+
+
+def _is_blocker_resolution_not_found_error(error, blocker_name, request_id, actions):
     if error.status != 404:
         return False
     method = str(getattr(error, "method", "") or "").upper()
     path = str(getattr(error, "path", "") or "").split("?", 1)[0]
-    return method == "POST" and path in {f"/question/{request_id}/reply", f"/question/{request_id}/reject"}
+    quoted_id = quote(request_id, safe="")
+    return method == "POST" and path in {f"/{blocker_name}/{quoted_id}/{action}" for action in actions}
 
 
 def _delete_disposable_session(client, session_id):

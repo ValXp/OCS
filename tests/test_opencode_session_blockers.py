@@ -221,6 +221,38 @@ class BlockerCliTest(unittest.TestCase):
             [("POST", "/permission/per_missing/reply", {"reply": "once"})],
         )
 
+    def test_missing_blocker_resolution_with_escaped_id_reports_request_not_found(self):
+        cases = [
+            (
+                ("permission", "reply", "per/missing", "once"),
+                "/permission/per%2Fmissing/reply",
+                {"reply": "once"},
+                "permission request not found: per/missing",
+            ),
+            (
+                ("question", "answer", "que/missing", "Ship"),
+                "/question/que%2Fmissing/reply",
+                {"answers": [["Ship"]]},
+                "question request not found: que/missing",
+            ),
+            (
+                ("question", "reject", "que/missing"),
+                "/question/que%2Fmissing/reject",
+                {},
+                "question request not found: que/missing",
+            ),
+        ]
+
+        for args, missing_path, payload, message in cases:
+            with self.subTest(args=args):
+                with BlockerOpenCodeServer(missing_paths={missing_path}) as server:
+                    result = self.run_cli(*args, "--server", server.url)
+
+                self.assertEqual(result.returncode, 66)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(message, result.stderr)
+                self.assertEqual(server.requests, [("POST", missing_path, payload)])
+
     def test_question_list_prints_pending_questions_compact(self):
         questions = [
             {
