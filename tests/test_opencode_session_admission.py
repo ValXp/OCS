@@ -48,7 +48,7 @@ class AdmissionOpenCodeServer:
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
                 payload = json.loads(body or "{}")
                 parent.requests.append(("POST", self.path, payload))
-                if self.path == "/api/session/ses_1/prompt":
+                if self.path in {"/api/session/ses_1/prompt", "/session/ses_1/prompt_async"}:
                     self._write_json(parent.prompt_response, status=parent.prompt_status)
                     return
                 self.send_error(404)
@@ -185,6 +185,57 @@ class AdmissionCliTest(unittest.TestCase):
                 {
                     "id": "msg_queue_1",
                     "prompt": {"text": "After this, run the benchmark."},
+                    "delivery": "queue",
+                },
+            ),
+        )
+
+    def test_steer_uses_prompt_async_payload_when_api_prompt_route_is_unavailable(self):
+        doc = {
+            "openapi": "3.1.0",
+            "paths": {
+                "/api/session": {"get": {}, "post": {}},
+                "/session/{sessionID}/prompt_async": {"post": {}},
+            },
+        }
+        response = {
+            "info": {
+                "sessionID": "ses_1",
+                "messageID": "msg_async_1",
+            },
+            "deliveryMode": "queue",
+            "status": "promoted",
+            "promotedSeq": 3,
+        }
+
+        with AdmissionOpenCodeServer(doc=doc, prompt_response=response) as server:
+            result = self.run_cli(
+                "steer",
+                "ses_1",
+                "Use the async route variant.",
+                "--delivery",
+                "queue",
+                "--message-id",
+                "msg_async_1",
+                "--json",
+                "--server",
+                server.url,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["api_path"], "/session/{sessionID}/prompt_async")
+        self.assertEqual(payload["message_id"], "msg_async_1")
+        self.assertEqual(payload["delivery"], "queue")
+        self.assertEqual(payload["status"], "active")
+        self.assertEqual(
+            server.requests[-1],
+            (
+                "POST",
+                "/session/ses_1/prompt_async",
+                {
+                    "messageID": "msg_async_1",
+                    "parts": [{"type": "text", "text": "Use the async route variant."}],
                     "delivery": "queue",
                 },
             ),
