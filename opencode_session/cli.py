@@ -40,6 +40,10 @@ from opencode_session.prompt_admission import (
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
 from opencode_session.status import short_status
+from opencode_session.validation_harness import (
+    DisposableValidationHarness,
+    delete_and_verify_session as _delete_and_verify_session,
+)
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
@@ -742,8 +746,6 @@ class _SmokeFailure(Exception):
 def _run_smoke(args, client):
     directory = str(Path(args.directory).resolve())
     smoke_id = f"{args.prefix}{uuid.uuid4().hex[:10]}"
-    session_id = None
-    created_session_ids = []
     result = {
         "status": "active",
         "ok": False,
@@ -758,19 +760,9 @@ def _run_smoke(args, client):
         "event_types": [],
         "cleanup": {"status": "queued", "deleted": [], "verified": []},
     }
-    failure = None
-    exit_code = EX_UNAVAILABLE
 
-    try:
-        capabilities = detect_capabilities(client)
-        result["capabilities"] = capabilities
-        result["health"] = capabilities["health"]
-        result["version"] = capabilities["version"]
-        result["checks"]["capabilities"] = {
-            "status": "done",
-            "health": capabilities["health"],
-            "version": capabilities["version"],
-        }
+    def validate(harness):
+        capabilities = harness.detect_capabilities()
         _require_smoke_capabilities(capabilities)
 
         create_response = client.create_session_response(
@@ -786,7 +778,7 @@ def _run_smoke(args, client):
         session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
         if not session_id:
             raise _SmokeFailure("session creation response did not include a session id")
-        created_session_ids.append(session_id)
+        harness.track_session(session_id)
         result["session_id"] = session_id
         result["checks"]["create"] = {"status": "done", "session_id": session_id, "title": smoke_id}
 
@@ -825,38 +817,21 @@ def _run_smoke(args, client):
                 raise _SmokeFailure(f"provider failure: {error}") from error
 
         result["checks"]["blockers"] = _smoke_blocker_summary(client, session_id)
-        result["status"] = "done"
-        result["ok"] = True
-        exit_code = 0
-    except _SmokeFailure as error:
-        failure = error
-        exit_code = error.exit_code
-        result["status"] = "failed"
-        result["error"] = str(error)
-    except OpenCodeApiError as error:
-        failure = error
-        result["status"] = "failed"
-        result["error"] = str(error)
 
-    cleanup = _cleanup_created_sessions(client, created_session_ids)
-    result["cleanup"] = cleanup
-    result["checks"]["cleanup"] = cleanup
-    if cleanup["status"] != "done" and failure is None:
-        failure = _SmokeFailure("disposable session cleanup failed")
-        result["status"] = "failed"
-        result["ok"] = False
-        result["error"] = str(failure)
-        exit_code = failure.exit_code
-
-    if failure is not None:
-        _print_error(f"smoke failed: {failure}; {_format_cleanup_summary(result['cleanup'])}")
-        return exit_code
-
-    if args.json:
-        print(json.dumps(result, sort_keys=True))
-    else:
-        print(_format_smoke_compact(result))
-    return 0
+    return DisposableValidationHarness(
+        client,
+        result,
+        default_exit_code=EX_UNAVAILABLE,
+        cleanup_failure_message="disposable session cleanup failed",
+    ).run(
+        validate,
+        failure_types=(_SmokeFailure,),
+        json_output=args.json,
+        compact_formatter=_format_smoke_compact,
+        failure_prefix="smoke failed",
+        print_error=_print_error,
+        cleanup_summary_formatter=_format_cleanup_summary,
+    )
 
 
 def _require_smoke_capabilities(capabilities):
@@ -881,7 +856,6 @@ def _run_live_validate(args, client):
 
     directory = str(Path(args.directory).resolve())
     validation_id = f"{args.prefix}{uuid.uuid4().hex[:10]}"
-    created_session_ids = []
     result = {
         "status": "active",
         "ok": False,
@@ -896,40 +870,30 @@ def _run_live_validate(args, client):
         "checks": {},
         "cleanup": {"status": "queued", "deleted": [], "verified": []},
     }
-    failure = None
-    exit_code = EX_UNAVAILABLE
 
-    def create_live_session(role):
-        create_response = client.create_session_response(
-            directory,
-            agent=args.agent,
-            model=args.model,
-            title=f"{validation_id}-{role}",
-            metadata={
-                "disposable": True,
-                "kind": "live-provider-validation",
-                "live_provider": True,
-                "prefix": args.prefix,
-                "validation_id": validation_id,
-                "role": role,
-            },
-        )
-        session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
-        if not session_id:
-            raise _LiveValidationFailure("session creation response did not include a session id")
-        created_session_ids.append(session_id)
-        return session_id
+    def validate(harness):
+        def create_live_session(role):
+            create_response = client.create_session_response(
+                directory,
+                agent=args.agent,
+                model=args.model,
+                title=f"{validation_id}-{role}",
+                metadata={
+                    "disposable": True,
+                    "kind": "live-provider-validation",
+                    "live_provider": True,
+                    "prefix": args.prefix,
+                    "validation_id": validation_id,
+                    "role": role,
+                },
+            )
+            session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
+            if not session_id:
+                raise _LiveValidationFailure("session creation response did not include a session id")
+            harness.track_session(session_id)
+            return session_id
 
-    try:
-        capabilities = detect_capabilities(client)
-        result["capabilities"] = capabilities
-        result["health"] = capabilities["health"]
-        result["version"] = capabilities["version"]
-        result["checks"]["capabilities"] = {
-            "status": "done",
-            "health": capabilities["health"],
-            "version": capabilities["version"],
-        }
+        capabilities = harness.detect_capabilities()
         _require_live_validate_capabilities(capabilities)
         result["checks"]["wait"] = _live_wait_record(capabilities)
 
@@ -960,40 +924,21 @@ def _run_live_validate(args, client):
         if not run_blocking["pong"]:
             raise _LiveValidationFailure("live provider did not reply exactly PONG")
         result["checks"]["run_blocking"] = run_blocking
-        result["status"] = "done"
-        result["ok"] = True
-        exit_code = 0
-    except _LiveValidationFailure as error:
-        failure = error
-        exit_code = error.exit_code
-        result["status"] = "failed"
-        result["error"] = str(error)
-    except OpenCodeApiError as error:
-        failure = error
-        result["status"] = "failed"
-        result["error"] = str(error)
 
-    cleanup = _cleanup_created_sessions(client, created_session_ids)
-    result["cleanup"] = cleanup
-    result["checks"]["cleanup"] = cleanup
-    if cleanup["status"] != "done" and failure is None:
-        failure = _LiveValidationFailure("disposable live validation session cleanup failed")
-        result["status"] = "failed"
-        result["ok"] = False
-        result["error"] = str(failure)
-        exit_code = failure.exit_code
-
-    if failure is not None:
-        _print_error(
-            f"live-provider validation failed: {failure}; {_format_cleanup_summary(result['cleanup'])}"
-        )
-        return exit_code
-
-    if args.json:
-        print(json.dumps(result, sort_keys=True))
-    else:
-        print(_format_live_validate_compact(result))
-    return 0
+    return DisposableValidationHarness(
+        client,
+        result,
+        default_exit_code=EX_UNAVAILABLE,
+        cleanup_failure_message="disposable live validation session cleanup failed",
+    ).run(
+        validate,
+        failure_types=(_LiveValidationFailure,),
+        json_output=args.json,
+        compact_formatter=_format_live_validate_compact,
+        failure_prefix="live-provider validation failed",
+        print_error=_print_error,
+        cleanup_summary_formatter=_format_cleanup_summary,
+    )
 
 
 class _LiveValidationFailure(Exception):
@@ -1255,36 +1200,6 @@ def _smoke_blocker_summary(client, session_id):
     except OpenCodeApiError as error:
         return {"status": "skipped", "error": str(error), "permissions": None, "questions": None, "total": None}
     return {"status": "done", "permissions": len(permissions), "questions": len(questions), "total": len(permissions) + len(questions)}
-
-
-def _cleanup_created_sessions(client, session_ids):
-    cleanup = {"status": "done", "deleted": [], "verified": [], "errors": []}
-    if not session_ids:
-        return cleanup
-    for session_id in session_ids:
-        error = _delete_and_verify_session(client, session_id)
-        if error is not None:
-            cleanup["errors"].append({"session_id": session_id, "error": str(error)})
-            cleanup["status"] = "failed"
-            continue
-        cleanup["deleted"].append(session_id)
-        cleanup["verified"].append(session_id)
-    return cleanup
-
-
-def _delete_and_verify_session(client, session_id):
-    try:
-        client.delete_session_response(session_id)
-    except OpenCodeApiError as error:
-        if error.status != 404:
-            return error
-    try:
-        client.get_session(session_id)
-    except OpenCodeApiError as error:
-        if error.status == 404:
-            return None
-        return error
-    return OpenCodeApiError(f"delete verification failed; session {session_id} is still readable")
 
 
 def _format_smoke_compact(result):
