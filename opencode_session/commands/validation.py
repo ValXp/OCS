@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
 from opencode_session.blocking_execution import (
     BlockingProviderFailure as _BlockingProviderFailure,
     execute_blocking_prompt as _execute_blocking_prompt,
@@ -17,11 +18,6 @@ from opencode_session.blocking_execution import (
     skipped_blocking_execution_result as _no_live_run_reply_result,
 )
 from opencode_session.capabilities import unsupported_reasons
-from opencode_session.commands.blockers import blocker_counts_for_session, load_blocker_counts
-from opencode_session.commands.sessions import (
-    collection_sessions as _collection_sessions,
-    session_value as _session_value,
-)
 from opencode_session.events import is_terminal_event, normalize_event
 from opencode_session.formatting import (
     compact_bool as _compact_bool,
@@ -29,7 +25,9 @@ from opencode_session.formatting import (
     compact_value as _compact_value,
 )
 from opencode_session.prompt_admission import admit_prompt as admit_prompt_service
+from opencode_session.records import collection_sessions as _collection_sessions
 from opencode_session.records import first_present as _first_present
+from opencode_session.records import session_value as _session_value
 from opencode_session.status import short_status
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired as _WatchTimeout
 from opencode_session.validation_harness import (

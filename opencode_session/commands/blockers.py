@@ -2,6 +2,9 @@ import json
 from urllib.parse import quote
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.blocker_inventory import collection_blockers as _collection_blockers
+from opencode_session.blocker_inventory import blocker_counts_for_session, blocker_session_id as _blocker_session_id
+from opencode_session.blocker_inventory import load_blocker_counts
 from opencode_session.formatting import (
     compact_bool as _compact_bool,
     compact_list as _compact_list,
@@ -129,24 +132,6 @@ def handle_question_command(args, client, *, print_error, unavailable_exit, noin
             noinput_exit=noinput_exit,
         )
     return 64
-
-
-def load_blocker_counts(client):
-    permission_response = client.list_permissions_response()
-    question_response = client.list_questions_response()
-    counts = {}
-    for permission in _collection_blockers(permission_response.data, "permissions"):
-        _increment_blocker_count(counts, _blocker_session_id(permission), "permissions")
-    for question in _collection_blockers(question_response.data, "questions"):
-        _increment_blocker_count(counts, _blocker_session_id(question), "questions")
-    return counts
-
-
-def blocker_counts_for_session(counts, session_id):
-    session_counts = counts.get(session_id, {})
-    permissions = session_counts.get("permissions", 0)
-    questions = session_counts.get("questions", 0)
-    return {"permissions": permissions, "questions": questions, "total": permissions + questions}
 
 
 def _handle_blocker_list(args, request_response, plural_name, compact_formatter, table_formatter, *, print_error, unavailable_exit):
@@ -286,25 +271,10 @@ def _format_question_resolution_compact(result):
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
-def _collection_blockers(collection, plural_name):
-    if isinstance(collection, list):
-        return collection
-    if isinstance(collection, dict):
-        for name in (plural_name, "requests", "data"):
-            blockers = collection.get(name)
-            if isinstance(blockers, list):
-                return blockers
-    return []
-
-
 def _filter_blockers_by_session(blockers, session_id):
     if session_id is None:
         return blockers
     return [blocker for blocker in blockers if _blocker_session_id(blocker) == session_id]
-
-
-def _blocker_session_id(blocker):
-    return _first_present(blocker, "sessionID", "sessionId", "session_id")
 
 
 def _question_items(question):
@@ -350,9 +320,3 @@ def _tool_ref(tool):
         return f"{message_id}/{call_id}"
     return call_id or message_id
 
-
-def _increment_blocker_count(counts, session_id, name):
-    if not session_id:
-        return
-    session_counts = counts.setdefault(session_id, {"permissions": 0, "questions": 0})
-    session_counts[name] += 1

@@ -1,6 +1,7 @@
 import json
 
 from opencode_session.formatting import compact_value as _compact_value
+from opencode_session.records import first_present_in as _first_present
 from opencode_session.status import short_status
 
 
@@ -314,17 +315,6 @@ def _error_text(error):
 def _mapping_value(mapping, name):
     if isinstance(mapping, dict) and isinstance(mapping.get(name), dict):
         return mapping[name]
-    return None
-
-
-def _first_present(sources, *names):
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        for name in names:
-            value = source.get(name)
-            if value is not None:
-                return value
     return None
 
 

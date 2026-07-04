@@ -1,4 +1,5 @@
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.records import session_value
 
 
 EX_UNAVAILABLE = 69
@@ -233,17 +234,3 @@ def worker_prompt(worker):
         return None
     return str(prompt)
 
-
-def session_value(session, *names):
-    session = session if isinstance(session, dict) else {}
-    for name in names:
-        value = session.get(name)
-        if value is not None:
-            return value
-    info = session.get("info")
-    if isinstance(info, dict):
-        for name in names:
-            value = info.get(name)
-            if value is not None:
-                return value
-    return None

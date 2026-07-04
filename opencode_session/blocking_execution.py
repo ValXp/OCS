@@ -10,6 +10,7 @@ from opencode_session.capabilities import (
     legacy_run_reply_supported,
 )
 from opencode_session.formatting import compact_value as _compact_value
+from opencode_session.records import message_text, message_tokens, message_value, tokens_total
 from opencode_session.status import short_status
 
 
@@ -119,48 +120,6 @@ def format_blocking_execution_compact(result):
         ("text", result["text"]),
     ]
     return "run_blocking " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
-
-
-def message_value(message, *names):
-    message = message if isinstance(message, dict) else {}
-    for name in names:
-        value = message.get(name)
-        if value is not None:
-            return value
-    info = message.get("info")
-    if isinstance(info, dict):
-        for name in names:
-            value = info.get(name)
-            if value is not None:
-                return value
-    return None
-
-
-def message_tokens(message):
-    return message_value(message, "tokens", "usage")
-
-
-def tokens_total(tokens):
-    if isinstance(tokens, dict):
-        if tokens.get("total") is not None:
-            return tokens["total"]
-        return sum(value for value in tokens.values() if isinstance(value, int))
-    return tokens
-
-
-def message_text(message):
-    message = message if isinstance(message, dict) else {}
-    text = message_value(message, "text", "content")
-    if text is not None:
-        return text
-    parts = message.get("parts")
-    if isinstance(parts, list):
-        return "".join(
-            part.get("text", "")
-            for part in parts
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
-    return ""
 
 
 def provider_failure(message):

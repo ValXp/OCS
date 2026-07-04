@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
-from opencode_session.commands.blockers import blocker_counts_for_session, load_blocker_counts
+from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
 from opencode_session.formatting import (
     compact_bool as _compact_bool,
     compact_value as _compact_value,
@@ -10,9 +10,12 @@ from opencode_session.formatting import (
     write_raw as _write_raw,
 )
 from opencode_session.records import (
+    bool_value as _bool_value,
+    collection_sessions,
     first_present as _first_present,
     session_record as _session_record,
     session_value,
+    tokens_total as _tokens_total,
 )
 from opencode_session.status import short_status
 
@@ -123,7 +126,7 @@ def _handle_list(args, client, *, print_error, unavailable_exit):
         return 0
     collection = response.data
     directory = str(Path(args.directory).resolve()) if args.directory else None
-    sessions = _filter_sessions(_collection_sessions(collection), directory=directory, agent=args.agent, model=args.model)
+    sessions = _filter_sessions(collection_sessions(collection), directory=directory, agent=args.agent, model=args.model)
     blocker_counts = None
     if args.blockers:
         try:
@@ -256,7 +259,7 @@ def _handle_children(args, client, *, print_error, unavailable_exit):
         _write_raw(response.body)
         return 0
     directory = str(Path(args.directory).resolve()) if args.directory else None
-    children = _filter_sessions(_collection_sessions(response.data), directory=directory)
+    children = _filter_sessions(collection_sessions(response.data), directory=directory)
     if args.json:
         print(json.dumps(children, sort_keys=True))
     elif children:
@@ -303,10 +306,6 @@ def abort_record(session_id, data):
         "raw_status": raw_status,
         "response": data,
     }
-
-
-def collection_sessions(collection):
-    return _collection_sessions(collection)
 
 
 def _format_session_compact(session, blocker_counts=None):
@@ -387,17 +386,6 @@ def _fork_record(parent_session_id, message_id, data):
     }
 
 
-def _collection_sessions(collection):
-    if isinstance(collection, list):
-        return collection
-    if isinstance(collection, dict):
-        for name in ("sessions", "children", "data"):
-            sessions = collection.get(name)
-            if isinstance(sessions, list):
-                return sessions
-    return []
-
-
 def _filter_sessions(sessions, *, directory=None, agent=None, model=None):
     filtered = []
     for session in sessions:
@@ -426,21 +414,4 @@ def _session_with_blocker_counts(session, counts):
 
 def _session_tokens(session):
     session = _session_record(session)
-    tokens = session.get("tokens")
-    if isinstance(tokens, dict):
-        if tokens.get("total") is not None:
-            return tokens["total"]
-        return sum(value for value in tokens.values() if isinstance(value, int))
-    return tokens
-
-
-def _bool_value(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.lower()
-        if lowered in {"true", "yes", "1", "accepted", "aborted", "ok", "success"}:
-            return True
-        if lowered in {"false", "no", "0", "rejected", "failed", "error"}:
-            return False
-    return None
+    return _tokens_total(session.get("tokens"))

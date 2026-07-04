@@ -20,9 +20,12 @@ def compact_bool(value):
 
 
 def compact_list(values):
-    if not values:
+    if values is None:
         return None
-    return ",".join(str(value) for value in values)
+    materialized = list(values)
+    if not materialized:
+        return None
+    return ",".join(str(value) for value in materialized)
 
 
 def format_table(headers, rows):

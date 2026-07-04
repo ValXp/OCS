@@ -4,7 +4,8 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from opencode_session.events import EventStreamError, iter_event_stream
-from opencode_session.records import first_present as _first_present
+from opencode_session.records import normalized_tokens as _normalized_tokens
+from opencode_session.records import session_value as _session_value
 from opencode_session.timeout_boundary import TimeoutExpired
 
 
@@ -294,62 +295,20 @@ def _normalize_session_record(record):
         return normalized
 
     normalized = dict(record)
-    _set_missing(normalized, "id", _first_present(record, "id", "sessionID", "sessionId", "session_id"))
-    _set_missing(normalized, "directory", _session_directory(record))
-    _set_missing(normalized, "title", _first_present(record, "title", "name"))
-    _set_missing(normalized, "agent", _first_present(record, "agent", "agentID", "agentId", "agent_id"))
-    _set_missing(normalized, "model", _first_present(record, "model", "modelID", "modelId", "model_id"))
-    _set_missing(normalized, "tokens", _session_tokens(record))
-    _set_missing(normalized, "createdAt", _session_created_at(record))
-    _set_missing(normalized, "updatedAt", _session_updated_at(record))
+    _set_missing(normalized, "id", _session_value(record, "id", "sessionID", "sessionId", "session_id"))
+    _set_missing(normalized, "directory", _session_value(record, "directory", "cwd"))
+    _set_missing(normalized, "title", _session_value(record, "title", "name"))
+    _set_missing(normalized, "agent", _session_value(record, "agent", "agentID", "agentId", "agent_id"))
+    _set_missing(normalized, "model", _session_value(record, "model", "modelID", "modelId", "model_id"))
+    _set_missing(normalized, "tokens", _normalized_tokens(_session_value(record, "tokens", "token", "tokenUsage", "token_usage", "usage")))
+    _set_missing(normalized, "createdAt", _session_value(record, "createdAt", "created_at", "created"))
+    _set_missing(normalized, "updatedAt", _session_value(record, "updatedAt", "updated_at", "updated"))
     return normalized
 
 
 def _set_missing(record, name, value):
     if value is not None and record.get(name) is None:
         record[name] = value
-
-
-def _session_directory(record):
-    value = _first_present(record, "directory", "cwd")
-    if value is not None:
-        return value
-    location = record.get("location")
-    if isinstance(location, dict):
-        return location.get("directory")
-    return None
-
-
-def _session_tokens(record):
-    tokens = _first_present(record, "tokens", "token", "tokenUsage", "token_usage", "usage")
-    if isinstance(tokens, dict):
-        normalized = dict(tokens)
-        if normalized.get("total") is None:
-            values = [value for value in normalized.values() if isinstance(value, int)]
-            if values:
-                normalized["total"] = sum(values)
-        return normalized
-    return tokens
-
-
-def _session_created_at(record):
-    value = _first_present(record, "createdAt", "created_at", "created")
-    if value is not None:
-        return value
-    time = record.get("time")
-    if isinstance(time, dict):
-        return time.get("created")
-    return None
-
-
-def _session_updated_at(record):
-    value = _first_present(record, "updatedAt", "updated_at", "updated")
-    if value is not None:
-        return value
-    time = record.get("time")
-    if isinstance(time, dict):
-        return time.get("updated")
-    return None
 
 
 def _validate_base_url(base_url):
