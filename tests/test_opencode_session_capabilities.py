@@ -1,76 +1,19 @@
-import json
-import os
-import subprocess
-import sys
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+
+try:
+    from tests.mocked_cli_harness import FakeOpenCodeServer, load_json, run_ocs
+except ModuleNotFoundError:
+    from mocked_cli_harness import FakeOpenCodeServer, load_json, run_ocs
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "ocs"
-
-
-class MockOpenCodeServer:
-    def __init__(self, *, health=None, doc=None, health_path="/global/health"):
-        self.health = health or {"status": "ok", "version": "1.2.3"}
-        self.doc = doc or {"openapi": "3.1.0", "paths": {}}
-        self.health_path = health_path
-        self.server = None
-        self.thread = None
-
-    def __enter__(self):
-        parent = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, format, *args):
-                return
-
-            def do_GET(self):
-                if self.path == parent.health_path:
-                    self._write_json(parent.health)
-                    return
-                if self.path == "/doc":
-                    self._write_json(parent.doc)
-                    return
-                self.send_error(404)
-
-            def _write_json(self, payload):
-                body = json.dumps(payload).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever)
-        self.thread.daemon = True
-        self.thread.start()
-        return f"http://127.0.0.1:{self.server.server_port}"
-
-    def __exit__(self, exc_type, exc, tb):
-        self.server.shutdown()
-        self.thread.join(timeout=2)
-        self.server.server_close()
+def capability_server(*, health=None, doc=None, health_path="/global/health"):
+    server = FakeOpenCodeServer()
+    server.json("GET", health_path, health or {"status": "ok", "version": "1.2.3"})
+    server.json("GET", "/doc", doc or {"openapi": "3.1.0", "paths": {}})
+    return server
 
 
 class CapabilityProbeCliTest(unittest.TestCase):
-    def run_cli(self, *args, env=None):
-        command_env = os.environ.copy()
-        if env:
-            command_env.update(env)
-        return subprocess.run(
-            [sys.executable, str(CLI), *args],
-            cwd=REPO_ROOT,
-            env=command_env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-
     def test_compact_summary_reports_detected_paths(self):
         doc = {
             "openapi": "3.1.0",
@@ -83,8 +26,8 @@ class CapabilityProbeCliTest(unittest.TestCase):
             },
         }
 
-        with MockOpenCodeServer(doc=doc) as server_url:
-            result = self.run_cli("capabilities", "--server", server_url)
+        with capability_server(doc=doc) as server:
+            result = run_ocs("capabilities", "--server", server.url)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
@@ -110,12 +53,12 @@ class CapabilityProbeCliTest(unittest.TestCase):
         }
         health = {"status": "ok", "version": "2.0.0"}
 
-        with MockOpenCodeServer(health=health, doc=doc) as server_url:
-            result = self.run_cli("capabilities", "--server", server_url, "--json")
+        with capability_server(health=health, doc=doc) as server:
+            result = run_ocs("capabilities", "--server", server.url, "--json")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        payload = json.loads(result.stdout)
+        payload = load_json(self, result)
         self.assertEqual(payload["health"], "ok")
         self.assertEqual(payload["version"], "2.0.0")
         self.assertTrue(payload["v2_prompt_support"])
@@ -160,8 +103,8 @@ class CapabilityProbeCliTest(unittest.TestCase):
     def test_unsupported_server_has_stable_exit_and_clear_error(self):
         doc = {"openapi": "3.1.0", "paths": {"/unrelated": {"get": {}}}}
 
-        with MockOpenCodeServer(doc=doc) as server_url:
-            result = self.run_cli("capabilities", "--server", server_url)
+        with capability_server(doc=doc) as server:
+            result = run_ocs("capabilities", "--server", server.url)
 
         self.assertEqual(result.returncode, 70)
         self.assertEqual(result.stdout, "")
