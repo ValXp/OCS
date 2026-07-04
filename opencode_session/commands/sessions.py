@@ -4,20 +4,17 @@ from pathlib import Path
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
 from opencode_session.formatting import (
-    compact_bool as _compact_bool,
     compact_value as _compact_value,
     format_table as _format_table,
     write_raw as _write_raw,
 )
 from opencode_session.records import (
-    bool_value as _bool_value,
     collection_sessions,
     first_present as _first_present,
     session_record as _session_record,
-    session_value,
     tokens_total as _tokens_total,
 )
-from opencode_session.status import short_status
+from opencode_session.session_lifecycle import abort_record, format_abort_compact, is_session_not_found_error
 
 
 def add_session_parsers(subparsers, *, add_server_argument, add_output_arguments, handler):
@@ -268,44 +265,6 @@ def _handle_children(args, client, *, print_error, unavailable_exit):
         else:
             print(_format_session_compact(children[0]))
     return 0
-
-
-def is_session_not_found_error(error):
-    if error.status != 404:
-        return False
-    method = str(getattr(error, "method", "") or "").upper()
-    path = str(getattr(error, "path", "") or "").split("?", 1)[0]
-    parts = path.split("/")
-    if method == "POST" and len(parts) == 4 and parts[1] == "session":
-        return bool(parts[2]) and parts[3] in {"run", "reply", "message", "abort", "fork"}
-    if method == "GET" and len(parts) == 4 and parts[1] == "session":
-        return bool(parts[2]) and parts[3] == "children"
-    return method in {"GET", "DELETE"} and len(parts) == 4 and parts[1:3] == ["api", "session"] and bool(parts[3])
-
-
-def format_abort_compact(abort):
-    fields = [
-        ("session", abort["session_id"]),
-        ("accepted", _compact_bool(abort["accepted"])),
-        ("status", abort["status"]),
-    ]
-    return "abort " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
-
-
-def abort_record(session_id, data):
-    if not isinstance(data, dict):
-        data = {}
-    raw_status = _first_present(data, "status", "state")
-    accepted = _bool_value(_first_present(data, "accepted", "aborted", "ok", "success"))
-    if accepted is None and str(raw_status or "").lower() in {"accepted", "aborting", "abort", "aborted", "cancelled", "canceled"}:
-        accepted = True
-    return {
-        "session_id": _first_present(data, "sessionID", "sessionId", "session_id", "id") or session_id,
-        "accepted": accepted if accepted is not None else True,
-        "status": short_status(raw_status),
-        "raw_status": raw_status,
-        "response": data,
-    }
 
 
 def _format_session_compact(session, blocker_counts=None):

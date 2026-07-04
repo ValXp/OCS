@@ -1,7 +1,7 @@
 import json
 from urllib.parse import quote
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocker_inventory import collection_blockers as _collection_blockers
 from opencode_session.blocker_inventory import blocker_counts_for_session, blocker_session_id as _blocker_session_id
 from opencode_session.blocker_inventory import load_blocker_counts
@@ -15,38 +15,79 @@ from opencode_session.formatting import (
 from opencode_session.records import first_present as _first_present
 
 
-def add_blocker_parsers(subparsers, *, add_server_argument, add_output_arguments):
+def add_blocker_parsers(subparsers, *, add_server_argument, add_output_arguments, handler):
     permission_parser = subparsers.add_parser("permission")
     permission_subparsers = permission_parser.add_subparsers(dest="permission_command")
+    permission_subparsers.required = True
     permission_list_parser = permission_subparsers.add_parser("list")
     permission_list_parser.add_argument("--session", dest="session_id", help="only show requests for this session")
     add_server_argument(permission_list_parser)
     add_output_arguments(permission_list_parser)
+    permission_list_parser.set_defaults(command_handler=handler)
     permission_reply_parser = permission_subparsers.add_parser("reply")
     permission_reply_parser.add_argument("request_id", help="permission request ID to resolve")
     permission_reply_parser.add_argument("reply", choices=("once", "always", "reject"), help="permission response")
     permission_reply_parser.add_argument("--message", help="feedback to send with a rejected permission")
     add_server_argument(permission_reply_parser)
     add_output_arguments(permission_reply_parser)
+    permission_reply_parser.set_defaults(command_handler=handler)
 
     question_parser = subparsers.add_parser("question")
     question_subparsers = question_parser.add_subparsers(dest="question_command")
+    question_subparsers.required = True
     question_list_parser = question_subparsers.add_parser("list")
     question_list_parser.add_argument("--session", dest="session_id", help="only show requests for this session")
     add_server_argument(question_list_parser)
     add_output_arguments(question_list_parser)
+    question_list_parser.set_defaults(command_handler=handler)
     question_answer_parser = question_subparsers.add_parser("answer")
     question_answer_parser.add_argument("request_id", help="question request ID to answer")
     question_answer_parser.add_argument("answers", nargs="*", help="answer label/text; repeat for multiple questions")
     question_answer_parser.add_argument("--answers-json", help="JSON array of answer arrays for multi-select questions")
     add_server_argument(question_answer_parser)
     add_output_arguments(question_answer_parser)
+    question_answer_parser.set_defaults(command_handler=handler)
     question_reject_parser = question_subparsers.add_parser("reject")
     question_reject_parser.add_argument("request_id", help="question request ID to reject")
     add_server_argument(question_reject_parser)
     add_output_arguments(question_reject_parser)
+    question_reject_parser.set_defaults(command_handler=handler)
 
     return {"permission": permission_parser, "question": question_parser}
+
+
+def handle_blocker_command(
+    args,
+    *,
+    print_error,
+    unavailable_exit,
+    noinput_exit,
+    dataerr_exit,
+    client_factory=OpenCodeApiClient,
+):
+    try:
+        client = client_factory(args.server)
+    except OpenCodeApiError as error:
+        print_error(str(error))
+        return unavailable_exit
+    if args.command == "permission":
+        return handle_permission_command(
+            args,
+            client,
+            print_error=print_error,
+            unavailable_exit=unavailable_exit,
+            noinput_exit=noinput_exit,
+        )
+    if args.command == "question":
+        return handle_question_command(
+            args,
+            client,
+            print_error=print_error,
+            unavailable_exit=unavailable_exit,
+            noinput_exit=noinput_exit,
+            dataerr_exit=dataerr_exit,
+        )
+    return 64
 
 
 def handle_permission_command(args, client, *, print_error, unavailable_exit, noinput_exit):
@@ -319,4 +360,3 @@ def _tool_ref(tool):
     if message_id and call_id:
         return f"{message_id}/{call_id}"
     return call_id or message_id
-

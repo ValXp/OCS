@@ -1,6 +1,7 @@
 import uuid
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.formatting import compact_value
 from opencode_session.records import first_present as _first_present
 from opencode_session.status import short_status
 
@@ -99,6 +100,18 @@ def prompt_admission_payload(message_id, text, delivery, prompt_path):
         "parts": [{"type": "text", "text": text}],
         "delivery": delivery,
     }
+
+
+def format_admission_compact(admission):
+    fields = [
+        ("session", admission["session_id"]),
+        ("message", admission["message_id"]),
+        ("delivery", admission["delivery"]),
+        ("status", admission["status"]),
+        ("admitted", admission["admitted_sequence"]),
+        ("promoted", admission["promoted_sequence"]),
+    ]
+    return "steer " + " ".join(f"{key}={compact_value(value)}" for key, value in fields)
 
 
 def is_idempotent_admission_replay(error, message_id):
