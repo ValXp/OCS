@@ -4,6 +4,7 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from opencode_session.events import EventStreamError, iter_event_stream
+from opencode_session.records import first_present as _first_present
 from opencode_session.timeout_boundary import TimeoutExpired
 
 
@@ -307,14 +308,6 @@ def _normalize_session_record(record):
 def _set_missing(record, name, value):
     if value is not None and record.get(name) is None:
         record[name] = value
-
-
-def _first_present(mapping, *names):
-    for name in names:
-        value = mapping.get(name)
-        if value is not None:
-            return value
-    return None
 
 
 def _session_directory(record):

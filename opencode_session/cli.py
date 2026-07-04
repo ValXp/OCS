@@ -43,9 +43,14 @@ from opencode_session.commands.sessions import (
     format_abort_compact as _format_abort_compact,
     handle_session_command,
     is_session_not_found_error as _is_session_not_found_error,
-    session_value as _session_value,
 )
 from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event, normalize_event
+from opencode_session.formatting import (
+    compact_bool as _compact_bool,
+    compact_list as _compact_list,
+    compact_value as _compact_value,
+    write_raw as _write_raw,
+)
 from opencode_session.prompt_admission import (
     PromptAdmissionFailure,
     PromptAdmissionUnsupported,
@@ -60,6 +65,10 @@ from opencode_session.multi_worker_orchestration import (
 )
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
+from opencode_session.records import (
+    first_present as _first_present,
+    session_value as _session_value,
+)
 from opencode_session.status import short_status
 from opencode_session.validation_harness import (
     DisposableValidationHarness,
@@ -1342,10 +1351,6 @@ def _format_timeout(timeout):
     return str(timeout)
 
 
-def _write_raw(body):
-    sys.stdout.write(body)
-
-
 def _read_prompt(prompt_words):
     if prompt_words:
         return " ".join(prompt_words)
@@ -1381,34 +1386,3 @@ def _format_admission_compact(admission):
         ("promoted", admission["promoted_sequence"]),
     ]
     return "steer " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
-
-
-def _first_present(mapping, *names):
-    for name in names:
-        value = mapping.get(name)
-        if value is not None:
-            return value
-    return None
-
-
-def _compact_list(values):
-    if not values:
-        return None
-    return ",".join(str(value) for value in values)
-
-
-def _compact_value(value):
-    if value is None or value == "":
-        return "-"
-    text = str(value)
-    if any(character.isspace() for character in text):
-        return json.dumps(text)
-    return text
-
-
-def _compact_bool(value):
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    return value

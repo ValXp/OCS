@@ -1,6 +1,7 @@
 import uuid
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.records import first_present as _first_present
 from opencode_session.status import short_status
 
 
@@ -140,11 +141,3 @@ def _api_error_detail(error):
                 if isinstance(nested, str):
                     return nested
     return str(error)
-
-
-def _first_present(mapping, *names):
-    for name in names:
-        value = mapping.get(name)
-        if value is not None:
-            return value
-    return None

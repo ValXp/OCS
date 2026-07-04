@@ -1,9 +1,19 @@
 import json
-import sys
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.commands.blockers import blocker_counts_for_session, load_blocker_counts
+from opencode_session.formatting import (
+    compact_bool as _compact_bool,
+    compact_value as _compact_value,
+    format_table as _format_table,
+    write_raw as _write_raw,
+)
+from opencode_session.records import (
+    first_present as _first_present,
+    session_record as _session_record,
+    session_value,
+)
 from opencode_session.status import short_status
 
 
@@ -299,27 +309,6 @@ def collection_sessions(collection):
     return _collection_sessions(collection)
 
 
-def session_value(session, *names):
-    session = _session_record(session)
-    for name in names:
-        value = session.get(name)
-        if value is not None:
-            return value
-    location = session.get("location")
-    if isinstance(location, dict):
-        for name in names:
-            if name in {"directory", "cwd"} and location.get("directory") is not None:
-                return location.get("directory")
-    time = session.get("time")
-    if isinstance(time, dict):
-        for name in names:
-            if name in {"createdAt", "created_at"} and time.get("created") is not None:
-                return time.get("created")
-            if name in {"updatedAt", "updated_at"} and time.get("updated") is not None:
-                return time.get("updated")
-    return None
-
-
 def _format_session_compact(session, blocker_counts=None):
     session = _session_record(session)
     fields = [
@@ -435,20 +424,6 @@ def _session_with_blocker_counts(session, counts):
     return augmented
 
 
-def _session_record(session):
-    if isinstance(session, dict) and isinstance(session.get("data"), dict):
-        return session["data"]
-    return session if isinstance(session, dict) else {}
-
-
-def _first_present(mapping, *names):
-    for name in names:
-        value = mapping.get(name)
-        if value is not None:
-            return value
-    return None
-
-
 def _session_tokens(session):
     session = _session_record(session)
     tokens = session.get("tokens")
@@ -457,29 +432,6 @@ def _session_tokens(session):
             return tokens["total"]
         return sum(value for value in tokens.values() if isinstance(value, int))
     return tokens
-
-
-def _format_table(headers, rows):
-    lines = ["\t".join(headers)]
-    lines.extend("\t".join(_compact_value(value) for value in row) for row in rows)
-    return "\n".join(lines)
-
-
-def _compact_value(value):
-    if value is None or value == "":
-        return "-"
-    text = str(value)
-    if any(character.isspace() for character in text):
-        return json.dumps(text)
-    return text
-
-
-def _compact_bool(value):
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    return value
 
 
 def _bool_value(value):
@@ -492,7 +444,3 @@ def _bool_value(value):
         if lowered in {"false", "no", "0", "rejected", "failed", "error"}:
             return False
     return None
-
-
-def _write_raw(body):
-    sys.stdout.write(body)

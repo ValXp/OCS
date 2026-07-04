@@ -1,5 +1,6 @@
 import json
 
+from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.status import short_status
 
 
@@ -336,12 +337,3 @@ def _string_value(value):
     if value is None or isinstance(value, (dict, list)):
         return None
     return str(value)
-
-
-def _compact_value(value):
-    if value is None or value == "":
-        return "-"
-    text = str(value)
-    if any(character.isspace() for character in text):
-        return json.dumps(text)
-    return text

@@ -9,6 +9,7 @@ from opencode_session.capabilities import (
     blocking_message_supported,
     legacy_run_reply_supported,
 )
+from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.status import short_status
 
 
@@ -245,12 +246,3 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
 
 def _execution_route(path, method, available):
     return {"path": path, "method": method, "available": available}
-
-
-def _compact_value(value):
-    if value is None or value == "":
-        return "-"
-    text = str(value)
-    if any(character.isspace() for character in text):
-        return json.dumps(text)
-    return text

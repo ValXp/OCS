@@ -7,6 +7,11 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from opencode_session.formatting import (
+    compact_list as _compact_list,
+    compact_value as _compact_value,
+    format_table as _format_table,
+)
 from opencode_session.status import short_status
 
 
@@ -445,27 +450,6 @@ def _worker_status_counts(workers):
         if status in counts:
             counts[status] += 1
     return counts
-
-
-def _compact_list(values):
-    if not values:
-        return None
-    return ",".join(str(value) for value in values)
-
-
-def _compact_value(value):
-    if value is None or value == "":
-        return "-"
-    text = str(value)
-    if any(character.isspace() for character in text):
-        return json.dumps(text)
-    return text
-
-
-def _format_table(headers, rows):
-    lines = ["\t".join(headers)]
-    lines.extend("\t".join(_compact_value(value) for value in row) for row in rows)
-    return "\n".join(lines)
 
 
 def _utc_now():

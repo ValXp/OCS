@@ -1,8 +1,15 @@
 import json
-import sys
 from urllib.parse import quote
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.formatting import (
+    compact_bool as _compact_bool,
+    compact_list as _compact_list,
+    compact_value as _compact_value,
+    format_table as _format_table,
+    write_raw as _write_raw,
+)
+from opencode_session.records import first_present as _first_present
 
 
 def add_blocker_parsers(subparsers, *, add_server_argument, add_output_arguments):
@@ -349,44 +356,3 @@ def _increment_blocker_count(counts, session_id, name):
         return
     session_counts = counts.setdefault(session_id, {"permissions": 0, "questions": 0})
     session_counts[name] += 1
-
-
-def _format_table(headers, rows):
-    lines = ["\t".join(headers)]
-    lines.extend("\t".join(_compact_value(value) for value in row) for row in rows)
-    return "\n".join(lines)
-
-
-def _first_present(mapping, *names):
-    for name in names:
-        value = mapping.get(name)
-        if value is not None:
-            return value
-    return None
-
-
-def _compact_list(values):
-    if not values:
-        return None
-    return ",".join(str(value) for value in values)
-
-
-def _compact_value(value):
-    if value is None or value == "":
-        return "-"
-    text = str(value)
-    if any(character.isspace() for character in text):
-        return json.dumps(text)
-    return text
-
-
-def _compact_bool(value):
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    return value
-
-
-def _write_raw(body):
-    sys.stdout.write(body)
