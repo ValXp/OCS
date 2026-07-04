@@ -694,6 +694,66 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["session_id"], None)
         self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency:build"])
 
+    def test_start_persists_dependency_blocking_when_prerequisite_is_already_failed(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with MultiWorkerOrchestrationServer() as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                build = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "build",
+                    "--role",
+                    "build",
+                    "--prompt",
+                    "Run the implementation",
+                    "--status",
+                    "failed",
+                )
+                review = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "review",
+                    "--role",
+                    "review",
+                    "--prompt",
+                    "Review the implementation",
+                    "--depends-on",
+                    "build",
+                )
+                start = self.run_cli("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(build.returncode, 0, build.stderr)
+        self.assertEqual(review.returncode, 0, review.stderr)
+        self.assertEqual(start.returncode, 69)
+        self.assertIn("run=demo status=failed", start.stdout)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertFalse(any(method == "POST" for method, _path, _payload in requests))
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["workers"]["build"]["status"], "failed")
+        self.assertEqual(payload["workers"]["review"]["status"], "blocked")
+        self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency:build"])
+        self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+
     def test_start_returns_partial_failure_exit_code_when_some_workers_complete_before_failure(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with MultiWorkerOrchestrationServer(
