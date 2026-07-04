@@ -1,5 +1,4 @@
 import os
-import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -13,6 +12,7 @@ from opencode_session.blocking_execution import (
 )
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.run_store import DEFAULT_SERVER_URL, RunStoreError
+from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 
 
 EX_UNAVAILABLE = 69
@@ -45,7 +45,7 @@ class SingleWorkerRunStartOutcome:
     error: Optional[str] = None
 
 
-class WorkerExecutionTimeout(Exception):
+class WorkerExecutionTimeout(TimeoutExpired):
     pass
 
 
@@ -268,10 +268,10 @@ def _worker_retry_available(worker, category):
 
 def _call_worker_with_timeout(worker, callback):
     timeout = worker.get("timeout_seconds")
-    if timeout is None:
-        return callback()
-    with _worker_deadline(timeout):
-        return callback()
+    try:
+        return TimeoutDeadline(timeout).run(callback)
+    except TimeoutExpired as error:
+        raise WorkerExecutionTimeout() from error
 
 
 def _worker_timeout_reason(worker):
@@ -293,30 +293,6 @@ def _mark_worker_timeout(worker, reason, now):
         worker["next_eligible_action"] = "resolve_blocker"
     else:
         worker["next_eligible_action"] = "none"
-
-
-class _worker_deadline:
-    def __init__(self, timeout):
-        self.timeout = timeout
-        self.previous_handler = None
-
-    def __enter__(self):
-        if self.timeout is None:
-            return self
-        self.previous_handler = signal.getsignal(signal.SIGALRM)
-        signal.signal(signal.SIGALRM, _raise_worker_execution_timeout)
-        signal.setitimer(signal.ITIMER_REAL, self.timeout)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self.timeout is not None:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, self.previous_handler)
-        return False
-
-
-def _raise_worker_execution_timeout(signum, frame):
-    raise WorkerExecutionTimeout()
 
 
 def _format_timeout(timeout):

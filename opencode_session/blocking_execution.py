@@ -178,10 +178,11 @@ def provider_failure(message):
 
 def _execute_session_message_prompt(client, session_id, prompt, capabilities, timeout):
     message_id = f"msg_{uuid.uuid4().hex}"
-    response = _call_with_client_timeout(
-        client,
-        timeout,
-        lambda: client.message_session_response(session_id, prompt, message_id=message_id),
+    response = client.message_session_response(
+        session_id,
+        prompt,
+        message_id=message_id,
+        timeout=_request_timeout(client, timeout),
     )
     error = provider_failure(response.data)
     if error:
@@ -190,22 +191,15 @@ def _execute_session_message_prompt(client, session_id, prompt, capabilities, ti
 
 
 def _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout):
-    run_response = _call_with_client_timeout(
-        client,
-        timeout,
-        lambda: client.run_session_response(session_id, prompt),
-    )
+    request_timeout = _request_timeout(client, timeout)
+    run_response = client.run_session_response(session_id, prompt, timeout=request_timeout)
     error = provider_failure(run_response.data)
     if error:
         raise BlockingProviderFailure(
             error,
             prompt_id=message_value(run_response.data, "id", "messageID", "messageId"),
         )
-    reply_response = _call_with_client_timeout(
-        client,
-        timeout,
-        lambda: client.reply_session_response(session_id),
-    )
+    reply_response = client.reply_session_response(session_id, timeout=request_timeout)
     error = provider_failure(reply_response.data)
     if error:
         raise BlockingProviderFailure(
@@ -215,13 +209,13 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout):
     return legacy_run_reply_result(session_id, run_response.data, reply_response.data)
 
 
-def _call_with_client_timeout(client, timeout, callback):
-    previous_timeout = client.timeout
-    client.timeout = max(previous_timeout or 0, timeout)
-    try:
-        return callback()
-    finally:
-        client.timeout = previous_timeout
+def _request_timeout(client, timeout):
+    default_timeout = getattr(client, "timeout", None)
+    if timeout is None:
+        return default_timeout
+    if default_timeout is None:
+        return timeout
+    return max(default_timeout, timeout)
 
 
 def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities):

@@ -1030,6 +1030,72 @@ class SingleRunOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(retry_worker["last_failure_category"], "provider")
         self.assertEqual(retry_worker["next_eligible_action"], "collect")
 
+    def test_start_retries_retryable_timeout_and_persists_success_metadata(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with RetryPolicyOpenCodeServer(
+                run_payloads=[
+                    ("sleep", 2, {"id": "msg_user_late", "status": "submitted"}),
+                    {"id": "msg_user_retry", "status": "submitted"},
+                ]
+            ) as server:
+                init = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = self.run_cli(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "worker",
+                    "--role",
+                    "worker",
+                    "--prompt",
+                    "Finish the worker task",
+                    "--timeout-seconds",
+                    "1",
+                    "--retry-limit",
+                    "1",
+                    "--retryable",
+                    "timeout",
+                )
+                start = self.run_cli("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(start.returncode, 0, start.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/global/health", None),
+                ("GET", "/doc", None),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/run", {"message": "Finish the worker task"}),
+                ("POST", "/session/ses_retry/reply", {}),
+            ],
+        )
+        retry_worker = json.loads(status.stdout)["workers"]["worker"]
+        self.assertEqual(retry_worker["status"], "done")
+        self.assertEqual(retry_worker["retry_count"], 1)
+        self.assertEqual(retry_worker["retry_limit"], 1)
+        self.assertEqual(retry_worker["retryable_failures"], ["timeout"])
+        self.assertEqual(retry_worker["last_failure_category"], "timeout")
+        self.assertEqual(retry_worker["last_failure_reason"], "worker timed out after 1s")
+        self.assertEqual(retry_worker["next_eligible_action"], "collect")
+        self.assertEqual(retry_worker["result"]["message_ids"], {"user": "msg_user_retry", "assistant": "msg_assistant_1"})
+
     def test_start_times_out_stuck_worker_and_records_timeout_metadata(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with RetryPolicyOpenCodeServer(

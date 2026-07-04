@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -296,6 +298,33 @@ class WatchCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 124)
         self.assertEqual(result.stdout, "")
         self.assertIn("watch timed out after 0.1s", result.stderr)
+
+    def test_watch_timeout_boundary_does_not_require_main_thread_signal_handling(self):
+        from opencode_session.cli import main
+
+        result = {}
+
+        def run_watch():
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    result["code"] = main(["watch", "ses_target", "--timeout", "0.1", "--server", server.url])
+            except BaseException as error:
+                result["error"] = error
+            result["stdout"] = stdout.getvalue()
+            result["stderr"] = stderr.getvalue()
+
+        with WatchOpenCodeServer(keep_open_seconds=2) as server:
+            thread = threading.Thread(target=run_watch)
+            thread.start()
+            thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", result)
+        self.assertEqual(result["code"], 124)
+        self.assertEqual(result["stdout"], "")
+        self.assertIn("watch timed out after 0.1s", result["stderr"])
 
     def test_watch_idle_stream_can_emit_terminal_event_after_api_client_default_timeout(self):
         events = [{"type": "session.status", "properties": {"sessionID": "ses_target", "status": "completed"}}]

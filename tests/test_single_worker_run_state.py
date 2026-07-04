@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 
 from opencode_session.api_client import OpenCodeApiError
@@ -218,6 +219,72 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
         self.assertEqual(timeout_worker["failure_reason"], "worker timed out after 1s")
         self.assertEqual(timeout_worker["next_eligible_action"], "none")
         self.assertNotIn("result", timeout_worker)
+
+    def test_timeout_boundary_does_not_require_main_thread_signal_handling(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "worker",
+                role="worker",
+                timeout_seconds=0.05,
+            )
+            client = FakeClient()
+            release = threading.Event()
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                release.wait(1)
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": "msg_user_late", "assistant": "msg_assistant_late"},
+                    "status": "done",
+                    "raw_status": "completed",
+                    "terminal_state": "done",
+                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
+                    "execution_strategy": "legacy_run_reply",
+                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
+                    "cost": 0.015,
+                    "tokens": {"total": 20},
+                    "text": "Worker finished too late.",
+                }
+
+            service = SingleWorkerRunStateService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+            result = {}
+
+            def start_service():
+                try:
+                    result["outcome"] = service.start(
+                        SingleWorkerRunStartRequest(
+                            name="demo",
+                            worker_id="worker",
+                            role="worker",
+                            prompt="Finish the worker task",
+                        )
+                    )
+                except BaseException as error:
+                    result["error"] = error
+
+            thread = threading.Thread(target=start_service)
+            thread.start()
+            thread.join(timeout=1)
+            release.set()
+            thread.join(timeout=1)
+            run = store.load_run("demo")
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", result)
+        self.assertEqual(result["outcome"].exit_code, 124)
+        self.assertEqual(result["outcome"].error, "worker timed out after 0.05s")
+        self.assertEqual(run["status"], "timeout")
+        self.assertEqual(run["workers"]["worker"]["failure_category"], "timeout")
 
     def test_start_records_terminal_provider_failure_without_result(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
