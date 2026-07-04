@@ -11,8 +11,8 @@ class _BlockingExecutionClient:
         self.timeout = 3
         self.requests = []
 
-    def message_session_response(self, session_id, message, *, message_id=None):
-        self.requests.append(("message", session_id, message, message_id, self.timeout))
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None):
+        self.requests.append(("message", session_id, message, message_id, timeout))
         return _Response(
             {
                 "info": {
@@ -24,13 +24,23 @@ class _BlockingExecutionClient:
             }
         )
 
-    def run_session_response(self, session_id, message):
-        self.requests.append(("run", session_id, message, None, self.timeout))
+    def run_session_response(self, session_id, message, *, timeout=None):
+        self.requests.append(("run", session_id, message, None, timeout))
         return _Response({"id": "msg_user_legacy", "status": "submitted"})
 
-    def reply_session_response(self, session_id):
-        self.requests.append(("reply", session_id, None, None, self.timeout))
+    def reply_session_response(self, session_id, *, timeout=None):
+        self.requests.append(("reply", session_id, None, None, timeout))
         return _Response({"id": "msg_assistant_legacy", "status": "completed", "text": "legacy"})
+
+
+class _ExplicitTimeoutClient:
+    def __init__(self):
+        self.timeout = 3
+        self.requests = []
+
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None):
+        self.requests.append(("message", timeout, self.timeout))
+        return _Response({"id": "msg_assistant_explicit", "status": "completed", "text": "ok"})
 
 
 class BlockingExecutionServiceTest(unittest.TestCase):
@@ -75,6 +85,17 @@ class BlockingExecutionServiceTest(unittest.TestCase):
                 "text": "PONG",
             },
         )
+
+    def test_uses_explicit_request_timeout_without_mutating_client_default(self):
+        from opencode_session.blocking_execution import blocking_execution_capabilities, execute_blocking_prompt
+
+        capabilities = blocking_execution_capabilities({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ExplicitTimeoutClient()
+
+        execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertEqual(client.requests, [("message", 120, 3)])
+        self.assertEqual(client.timeout, 3)
 
 
 if __name__ == "__main__":

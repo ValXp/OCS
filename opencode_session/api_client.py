@@ -4,6 +4,7 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from opencode_session.events import EventStreamError, iter_event_stream
+from opencode_session.timeout_boundary import TimeoutExpired
 
 
 class OpenCodeApiError(Exception):
@@ -46,35 +47,37 @@ class OpenCodeApiClient:
     def require_openapi_doc(self):
         return self.get_json("doc")
 
-    def get_json(self, path):
-        return self.get_response(path).data
+    def get_json(self, path, *, timeout=None):
+        return self.get_response(path, timeout=timeout).data
 
-    def get_response(self, path):
-        return self._request_json("GET", path)
+    def get_response(self, path, *, timeout=None):
+        return self._request_json("GET", path, timeout=timeout)
 
-    def post_json(self, path, payload):
-        return self.post_response(path, payload).data
+    def post_json(self, path, payload, *, timeout=None):
+        return self.post_response(path, payload, timeout=timeout).data
 
-    def post_response(self, path, payload):
-        return self._request_json("POST", path, payload)
+    def post_response(self, path, payload, *, timeout=None):
+        return self._request_json("POST", path, payload, timeout=timeout)
 
-    def delete_json(self, path):
-        return self.delete_response(path).data
+    def delete_json(self, path, *, timeout=None):
+        return self.delete_response(path, timeout=timeout).data
 
-    def delete_response(self, path):
-        return self._request_json("DELETE", path)
+    def delete_response(self, path, *, timeout=None):
+        return self._request_json("DELETE", path, timeout=timeout)
 
-    def stream_events(self, path, *, on_open=None):
+    def stream_events(self, path, *, on_open=None, deadline=None):
         url = urljoin(self.base_url, path.lstrip("/"))
         headers = {"Accept": "text/event-stream, application/json"}
         request = Request(url, headers=headers, method="GET")
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                # SSE reads are long-lived; watch --timeout is the user-facing deadline.
-                response.fp.raw._sock.settimeout(None)
+            with urlopen(request, timeout=self._stream_open_timeout(deadline)) as response:
+                _set_response_socket_timeout(response, None if deadline is None else deadline.require_time())
                 if on_open is not None:
                     on_open()
-                yield from iter_event_stream(response)
+                lines = response if deadline is None else _iter_response_lines_until_deadline(response, deadline)
+                yield from iter_event_stream(lines)
+        except TimeoutExpired:
+            raise
         except EventStreamError as error:
             raise OpenCodeApiError(
                 f"GET /{path.lstrip('/')} returned invalid event stream: {error}",
@@ -100,10 +103,12 @@ class OpenCodeApiClient:
         except URLError as error:
             raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
         except TimeoutError as error:
+            if deadline is not None and deadline.expired():
+                raise TimeoutExpired() from error
             raise OpenCodeApiError(f"OpenCode event stream timed out at {self.base_url.rstrip('/')}") from error
 
-    def _request_json(self, method, path, payload=None):
-        response_body = self._request_body(method, path, payload)
+    def _request_json(self, method, path, payload=None, *, timeout=None):
+        response_body = self._request_body(method, path, payload, timeout=timeout)
         try:
             data = json.loads(response_body or "{}")
         except json.JSONDecodeError as error:
@@ -114,7 +119,7 @@ class OpenCodeApiClient:
             ) from error
         return OpenCodeApiResponse(data, response_body)
 
-    def _request_body(self, method, path, payload=None):
+    def _request_body(self, method, path, payload=None, *, timeout=None):
         url = urljoin(self.base_url, path.lstrip("/"))
         headers = {"Accept": "application/json"}
         body = None
@@ -123,7 +128,7 @@ class OpenCodeApiClient:
             headers["Content-Type"] = "application/json"
         request = Request(url, data=body, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(request, timeout=self._request_timeout(timeout)) as response:
                 return response.read().decode("utf-8")
         except HTTPError as error:
             error_body = error.read().decode("utf-8")
@@ -196,17 +201,17 @@ class OpenCodeApiClient:
     def list_child_sessions_response(self, session_id):
         return _with_session_payload(self.get_response(f"session/{quote(session_id, safe='')}/children"))
 
-    def run_session_response(self, session_id, message):
-        return self.post_response(f"session/{quote(session_id, safe='')}/run", {"message": message})
+    def run_session_response(self, session_id, message, *, timeout=None):
+        return self.post_response(f"session/{quote(session_id, safe='')}/run", {"message": message}, timeout=timeout)
 
-    def reply_session_response(self, session_id):
-        return self.post_response(f"session/{quote(session_id, safe='')}/reply", {})
+    def reply_session_response(self, session_id, *, timeout=None):
+        return self.post_response(f"session/{quote(session_id, safe='')}/reply", {}, timeout=timeout)
 
-    def message_session_response(self, session_id, message, *, message_id=None):
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None):
         payload = {"parts": [{"type": "text", "text": message}]}
         if message_id is not None:
             payload["messageID"] = message_id
-        return self.post_response(f"session/{quote(session_id, safe='')}/message", payload)
+        return self.post_response(f"session/{quote(session_id, safe='')}/message", payload, timeout=timeout)
 
     def admit_prompt_response(self, session_id, payload, prompt_path):
         return self.post_response(_session_prompt_path(prompt_path, session_id), payload)
@@ -231,6 +236,16 @@ class OpenCodeApiClient:
 
     def reject_question_response(self, request_id):
         return self.post_response(f"question/{quote(request_id, safe='')}/reject", {})
+
+    def _request_timeout(self, timeout):
+        if timeout is None:
+            return self.timeout
+        return timeout
+
+    def _stream_open_timeout(self, deadline):
+        if deadline is None:
+            return self.timeout
+        return deadline.require_time()
 
 
 def _session_prompt_path(prompt_path, session_id):
@@ -348,3 +363,19 @@ def _validate_base_url(base_url):
     parsed = urlparse(base_url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise OpenCodeApiError(f"invalid OpenCode server URL {base_url!r}: expected http(s) URL")
+
+
+def _iter_response_lines_until_deadline(response, deadline):
+    while True:
+        _set_response_socket_timeout(response, deadline.require_time())
+        try:
+            line = response.readline()
+        except TimeoutError as error:
+            raise TimeoutExpired() from error
+        if line == b"":
+            return
+        yield line
+
+
+def _set_response_socket_timeout(response, timeout):
+    response.fp.raw._sock.settimeout(timeout)

@@ -2,7 +2,6 @@ import argparse
 import json
 import os
 import queue
-import signal
 import sys
 import threading
 import time
@@ -39,6 +38,7 @@ from opencode_session.prompt_admission import (
 )
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 from opencode_session.status import short_status
+from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired as _WatchTimeout
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
@@ -1087,17 +1087,17 @@ def _assistant_message_status(session):
 
 
 def _live_event_execution_observation(client, steer, event_path):
+    deadline = TimeoutDeadline(LIVE_EVENT_OBSERVATION_TIMEOUT)
     try:
-        with _watch_deadline(LIVE_EVENT_OBSERVATION_TIMEOUT):
-            for raw_event in client.stream_events(event_path):
-                event = normalize_event(raw_event, steer["session_id"])
-                if event is None:
-                    continue
-                observation = _event_execution_observation(event)
-                if observation["executed"] != "unknown":
-                    return observation
-                if is_terminal_event(event):
-                    break
+        for raw_event in client.stream_events(event_path, deadline=deadline):
+            event = normalize_event(raw_event, steer["session_id"])
+            if event is None:
+                continue
+            observation = _event_execution_observation(event)
+            if observation["executed"] != "unknown":
+                return observation
+            if is_terminal_event(event):
+                break
     except _WatchTimeout:
         return _execution_observation(
             "unknown",
@@ -1710,10 +1710,7 @@ def _worker_retry_available(worker, category):
 
 def _call_worker_with_timeout(worker, callback):
     timeout = worker.get("timeout_seconds")
-    if timeout is None:
-        return callback()
-    with _watch_deadline(timeout):
-        return callback()
+    return TimeoutDeadline(timeout).run(callback)
 
 
 def _worker_timeout_reason(worker):
@@ -2120,6 +2117,8 @@ def _admit_prompt(args, client, delivery):
 
 def _watch_session(args, client):
     pending_text = None
+    deadline = TimeoutDeadline(args.timeout)
+    event_deadline = deadline if args.timeout is not None else None
 
     def flush_pending_text():
         nonlocal pending_text
@@ -2144,40 +2143,39 @@ def _watch_session(args, client):
         print(format_watch_event(event), flush=True)
 
     try:
-        with _watch_deadline(args.timeout):
-            try:
-                capabilities = detect_capabilities(client)
-            except OpenCodeApiError as error:
-                _print_error(str(error))
-                return EX_UNAVAILABLE
+        try:
+            capabilities = deadline.run(lambda: detect_capabilities(client))
+        except OpenCodeApiError as error:
+            _print_error(str(error))
+            return EX_UNAVAILABLE
 
-            event_route = capabilities["route_availability"]["events"]
-            if not event_route["available"]:
-                print(
-                    f"{CLI_NAME}: unsupported OpenCode server; missing event stream: GET /api/event or GET /event or GET /global/event",
-                    file=sys.stderr,
-                )
-                return EX_UNSUPPORTED
+        event_route = capabilities["route_availability"]["events"]
+        if not event_route["available"]:
+            print(
+                f"{CLI_NAME}: unsupported OpenCode server; missing event stream: GET /api/event or GET /event or GET /global/event",
+                file=sys.stderr,
+            )
+            return EX_UNSUPPORTED
 
-            try:
-                for raw_event in client.stream_events(event_route["path"]):
-                    event = normalize_event(raw_event, args.session_id)
-                    if event is None:
-                        continue
-                    emit_event(event)
-                    if is_terminal_event(event):
-                        flush_pending_text()
-                        if is_abort_event(event):
-                            return 130
-                        return 0
-            except OpenCodeApiError as error:
-                flush_pending_text()
-                _print_error(f"event stream failure: {error}")
-                if _is_invalid_event_stream(error):
-                    return EX_DATAERR
-                return EX_UNAVAILABLE
+        try:
+            for raw_event in client.stream_events(event_route["path"], deadline=event_deadline):
+                event = normalize_event(raw_event, args.session_id)
+                if event is None:
+                    continue
+                emit_event(event)
+                if is_terminal_event(event):
+                    flush_pending_text()
+                    if is_abort_event(event):
+                        return 130
+                    return 0
+        except OpenCodeApiError as error:
             flush_pending_text()
-            return 0
+            _print_error(f"event stream failure: {error}")
+            if _is_invalid_event_stream(error):
+                return EX_DATAERR
+            return EX_UNAVAILABLE
+        flush_pending_text()
+        return 0
     except _WatchTimeout:
         flush_pending_text()
         _print_error(f"watch timed out after {_format_timeout(args.timeout)}s")
@@ -2190,34 +2188,6 @@ def _same_watch_text_group(left, right):
 
 def _is_invalid_event_stream(error):
     return isinstance(error.data, dict) and error.data.get("kind") == "invalid_event_stream"
-
-
-class _WatchTimeout(Exception):
-    pass
-
-
-class _watch_deadline:
-    def __init__(self, timeout):
-        self.timeout = timeout
-        self.previous_handler = None
-
-    def __enter__(self):
-        if self.timeout is None:
-            return self
-        self.previous_handler = signal.getsignal(signal.SIGALRM)
-        signal.signal(signal.SIGALRM, _raise_watch_timeout)
-        signal.setitimer(signal.ITIMER_REAL, self.timeout)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self.timeout is not None:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, self.previous_handler)
-        return False
-
-
-def _raise_watch_timeout(signum, frame):
-    raise _WatchTimeout()
 
 
 def _positive_float(value):
