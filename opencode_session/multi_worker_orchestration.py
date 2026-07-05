@@ -117,8 +117,6 @@ class MultiWorkerRunOrchestrationService:
                 while attempt_workers:
                     retry_workers = []
                     for worker in attempt_workers:
-                        if not worker.get("session_id"):
-                            worker["session_id"] = None
                         outcome = self.core.execute_worker(
                             client,
                             run,

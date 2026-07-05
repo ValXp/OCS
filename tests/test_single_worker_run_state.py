@@ -191,6 +191,61 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
         self.assertEqual(worker["next_eligible_action"], "collect")
         self.assertEqual(worker["result"]["text"], "Worker finished.")
 
+    def test_start_treats_empty_stored_session_id_as_missing(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker("demo", "worker", role="worker", session_id="")
+            client = FakeClient(session_ids=["ses_created"])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt, capabilities["legacy_fallback_available"]))
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": "msg_user_1", "assistant": "msg_assistant_1"},
+                    "status": "done",
+                    "raw_status": "completed",
+                    "terminal_state": "done",
+                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
+                    "execution_strategy": "legacy_run_reply",
+                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
+                    "cost": 0.015,
+                    "tokens": {"total": 20},
+                    "text": "Worker finished.",
+                }
+
+            service = SingleWorkerRunStateService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(
+                SingleWorkerRunStartRequest(
+                    name="demo",
+                    worker_id="worker",
+                    role="worker",
+                    prompt="Finish the worker task",
+                )
+            )
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertIsNone(outcome.error)
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("execute", "ses_created", "Finish the worker task", True),
+            ],
+        )
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker["status"], "done")
+        self.assertEqual(worker["session_id"], "ses_created")
+        self.assertEqual(worker["result"]["session_id"], "ses_created")
+
     def test_start_rejects_create_response_without_session_id_before_execution(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)

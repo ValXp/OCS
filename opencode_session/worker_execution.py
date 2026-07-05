@@ -110,7 +110,15 @@ def execute_worker_attempts(
 ):
     created_session_ids = []
     if create_session:
-        session_outcome = ensure_worker_session(client, run, worker, session_id=session_id, agent=agent, model=model)
+        session_outcome = ensure_worker_session(
+            client,
+            run,
+            worker,
+            session_id=session_id,
+            agent=agent,
+            model=model,
+            treat_falsey_session_as_missing=True,
+        )
         if session_outcome.created_session_id is not None:
             created_session_ids.append(session_outcome.created_session_id)
         _notify_worker_update(on_worker_update)
