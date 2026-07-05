@@ -2,7 +2,12 @@ from copy import deepcopy
 from pathlib import Path
 
 from opencode_session.status import short_status
-from opencode_session.worker_state import default_worker, normalize_worker, worker_output_refs_in_dependency_order
+from opencode_session.worker_state import (
+    default_worker,
+    normalize_worker,
+    run_status_from_workers,
+    worker_output_refs_in_dependency_order,
+)
 
 
 SCHEMA_VERSION = 1
@@ -132,7 +137,11 @@ def merge_run_changes(baseline, incoming, current):
         if value is not _MISSING:
             merged[key] = value
     merged = normalize_run(merged, fallback_name=incoming.get("name") or current.get("name") or baseline.get("name"))
-    merged["output_refs"] = worker_output_refs_in_dependency_order(merged.get("workers", {}))
+    workers = merged.get("workers", {})
+    merged["output_refs"] = worker_output_refs_in_dependency_order(workers)
+    status = run_status_from_workers(workers)
+    if status is not None:
+        merged["status"] = status
     return merged
 
 

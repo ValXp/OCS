@@ -195,28 +195,36 @@ def apply_worker_result(worker, result):
 
 def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):
     workers = run.get("workers", {})
+    run["output_refs"] = worker_output_refs_in_dependency_order(workers)
+    status = run_status_from_workers(
+        workers,
+        include_unprompted_when_no_prompts=include_unprompted_when_no_prompts,
+    )
+    if status is not None:
+        run["status"] = status
+
+
+def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False):
     prompted_workers = [worker for worker in workers.values() if isinstance(worker, dict) and worker_prompt(worker)]
     status_workers = prompted_workers
     if include_unprompted_when_no_prompts:
         status_workers = prompted_workers or [worker for worker in workers.values() if isinstance(worker, dict)]
-    run["output_refs"] = worker_output_refs_in_dependency_order(workers)
     if not status_workers:
-        return
+        return None
     statuses = {worker.get("status") for worker in status_workers}
     if statuses == {"done"}:
-        run["status"] = "done"
-    elif any(status == "failed" for status in statuses):
-        run["status"] = "failed"
-    elif any(status == "aborted" for status in statuses):
-        run["status"] = "aborted"
-    elif any(status == "timeout" for status in statuses):
-        run["status"] = "timeout"
-    elif any(status == "blocked" for status in statuses):
-        run["status"] = "blocked"
-    elif any(status == "active" for status in statuses):
-        run["status"] = "active"
-    else:
-        run["status"] = "queued"
+        return "done"
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if any(status == "aborted" for status in statuses):
+        return "aborted"
+    if any(status == "timeout" for status in statuses):
+        return "timeout"
+    if any(status == "blocked" for status in statuses):
+        return "blocked"
+    if any(status == "active" for status in statuses):
+        return "active"
+    return "queued"
 
 
 def worker_output_refs_in_dependency_order(workers):

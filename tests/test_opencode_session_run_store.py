@@ -146,6 +146,29 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(run["workers"]["build"]["output_refs"], ["assistant:msg_build"])
         self.assertEqual(run["output_refs"], ["docs:msg_docs", "build:msg_build"])
 
+    def test_stale_worker_done_saves_derive_run_status_from_merged_workers(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            first = RunStore(store)
+            first.create_run("demo", directory=directory, server_url="http://opencode.example")
+            first.upsert_worker("demo", "docs", role="write", prompt="Draft docs", status="active")
+            first.upsert_worker("demo", "build", role="build", prompt="Build implementation", status="active")
+            docs_run = first.load_run("demo")
+            build_run = first.load_run("demo")
+
+            build_run["workers"]["build"]["status"] = "done"
+            refresh_run_summary(build_run)
+            first.save_run(build_run)
+
+            docs_run["workers"]["docs"]["status"] = "done"
+            refresh_run_summary(docs_run)
+            first.save_run(docs_run)
+
+            run = RunStore(store).load_run("demo")
+
+        self.assertEqual(run["workers"]["docs"]["status"], "done")
+        self.assertEqual(run["workers"]["build"]["status"], "done")
+        self.assertEqual(run["status"], "done")
+
 
 class _InterleavedRunStore(RunStore):
     def __init__(self, root):
