@@ -35,6 +35,8 @@ class RunStore:
             fallback_name=name,
         )
         with self._locked_run(name):
+            if self._run_path(name).exists():
+                raise RunStoreError(f"run '{name}' already exists in {self.root}", kind="exists")
             self._write_run_unlocked(run)
         return run
 

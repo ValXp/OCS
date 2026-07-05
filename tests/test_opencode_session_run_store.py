@@ -3,11 +3,26 @@ import threading
 import unittest
 
 from opencode_session.run_persistence import persist_worker_update
-from opencode_session.run_store import RunStore
+from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_state import mark_worker_aborted, refresh_run_summary
 
 
 class RunStoreConcurrencyTest(unittest.TestCase):
+    def test_create_run_fails_when_run_already_exists(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build")
+
+            with self.assertRaisesRegex(RunStoreError, "run 'demo' already exists"):
+                run_store.create_run("demo", directory="/tmp/other", server_url="http://other.example")
+
+            persisted = RunStore(store).load_run("demo")
+
+        self.assertEqual(persisted["directory"], directory)
+        self.assertEqual(persisted["server_url"], "http://opencode.example")
+        self.assertEqual(set(persisted["workers"]), {"build"})
+
     def test_loaded_run_mutation_is_not_persisted_without_update_run(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             first = RunStore(store)
