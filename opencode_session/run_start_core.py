@@ -75,19 +75,23 @@ class RunStartCore:
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):
         workers = run.get("workers", {})
+        first_error = None
         for worker_id, session_ids in created_session_ids_by_worker.items():
             worker = workers.get(worker_id)
             if not isinstance(worker, dict):
                 continue
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
             if cleanup_outcome.error is not None:
+                if first_error is None:
+                    first_error = cleanup_outcome.error
                 mark_orchestration_cleanup_failed(run, worker, str(cleanup_outcome.error))
-                self.refresh_run_summary(run)
-                self.save_run(run)
-                return CleanupFailureOutcome(
-                    EX_UNAVAILABLE,
-                    f"api failure: disposable session cleanup failed: {cleanup_outcome.error}",
-                )
+        if first_error is not None:
+            self.refresh_run_summary(run)
+            self.save_run(run)
+            return CleanupFailureOutcome(
+                EX_UNAVAILABLE,
+                f"api failure: disposable session cleanup failed: {first_error}",
+            )
         self.save_run(run)
         return None
 

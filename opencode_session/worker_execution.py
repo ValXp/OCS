@@ -196,19 +196,25 @@ def execute_worker_attempts(
 def cleanup_created_worker_sessions(client, worker, session_ids):
     cleanup = worker.setdefault("cleanup", {"requested": True, "deleted": False})
     deleted_session_ids = []
+    errors = []
     for session_id in session_ids:
         try:
             client.delete_session(session_id)
         except OpenCodeApiError as error:
-            cleanup["error"] = str(error)
-            if len(deleted_session_ids) > 1:
-                cleanup["sessions"] = deleted_session_ids
-            return WorkerCleanupOutcome(deleted_session_ids, error)
+            errors.append(error)
+            continue
         deleted_session_ids.append(session_id)
+
+    cleanup["deleted"] = bool(deleted_session_ids) and not errors
+    if errors:
+        cleanup["error"] = str(errors[0])
+    else:
+        cleanup.pop("error", None)
     if deleted_session_ids:
-        cleanup["deleted"] = True
-        if len(deleted_session_ids) > 1:
+        if len(deleted_session_ids) > 1 or errors:
             cleanup["sessions"] = deleted_session_ids
+    if errors:
+        return WorkerCleanupOutcome(deleted_session_ids, errors[0])
     return WorkerCleanupOutcome(deleted_session_ids)
 
 

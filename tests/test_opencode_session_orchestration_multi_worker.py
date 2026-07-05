@@ -6,6 +6,7 @@ from unittest import mock
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import MultiWorkerRunOrchestrationService, MultiWorkerRunStartRequest
+from opencode_session.run_start_core import RunStartCore
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
 
@@ -46,9 +47,10 @@ class FakeResponse:
 
 
 class FakeClient:
-    def __init__(self, session_ids):
+    def __init__(self, session_ids, *, delete_failures=None):
         self.requests = []
         self.session_ids = list(session_ids)
+        self.delete_failures = dict(delete_failures or {})
 
     def create_session_response(self, directory, *, agent=None, model=None):
         self.requests.append(("create", directory, agent, model))
@@ -56,6 +58,8 @@ class FakeClient:
 
     def delete_session(self, session_id):
         self.requests.append(("delete", session_id))
+        if session_id in self.delete_failures:
+            raise OpenCodeApiError(self.delete_failures[session_id])
 
 
 class MultiWorkerOrchestrationCliTest(unittest.TestCase):
@@ -422,6 +426,41 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(run["workers"]["beta"]["status"], "queued")
         self.assertIsNone(run["workers"]["beta"]["session_id"])
         self.assertNotIn("cleanup", run["workers"]["beta"])
+
+    def test_cleanup_attempts_later_worker_after_earlier_worker_delete_fails(self):
+        first_error = "DELETE /api/session/ses_alpha failed: HTTP 500"
+        client = FakeClient([], delete_failures={"ses_alpha": first_error})
+        run = {
+            "status": "done",
+            "workers": {
+                "alpha": {"id": "alpha", "status": "done"},
+                "beta": {"id": "beta", "status": "done"},
+            },
+        }
+        saves = []
+        core = RunStartCore(
+            save_run=lambda run: saves.append(run),
+            refresh_run_summary=lambda run: None,
+            now=lambda: "2026-07-03T00:00:00Z",
+        )
+
+        outcome = core.cleanup_created_workers(
+            client,
+            run,
+            {"alpha": ["ses_alpha"], "beta": ["ses_beta"]},
+        )
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(outcome.error, f"api failure: disposable session cleanup failed: {first_error}")
+        self.assertEqual(client.requests, [("delete", "ses_alpha"), ("delete", "ses_beta")])
+        self.assertEqual(
+            run["workers"]["alpha"]["cleanup"],
+            {"requested": True, "deleted": False, "error": first_error},
+        )
+        self.assertEqual(run["workers"]["alpha"]["status"], "failed")
+        self.assertEqual(run["workers"]["alpha"]["failure_reason"], first_error)
+        self.assertEqual(run["workers"]["beta"]["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(saves, [run])
 
     def test_start_with_cleanup_does_not_delete_preexisting_worker_sessions(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
@@ -1102,6 +1141,83 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(
             run["workers"]["worker"]["cleanup"],
             {"requested": True, "deleted": True, "sessions": ["ses_initial", "ses_retry"]},
+        )
+
+    def test_cleanup_attempts_timeout_retry_session_after_initial_delete_fails(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "worker",
+                role="worker",
+                prompt="Finish the worker task",
+                timeout_seconds=0.01,
+                retry_limit=1,
+                retryable_failures=["timeout"],
+            )
+            first_error = "DELETE /api/session/ses_initial failed: HTTP 500"
+            client = FakeClient(["ses_initial", "ses_retry"], delete_failures={"ses_initial": first_error})
+            deadline_calls = []
+
+            class FirstAttemptTimeoutDeadline:
+                def __init__(self, timeout):
+                    self.timeout = timeout
+
+                def run(self, callback):
+                    deadline_calls.append(self.timeout)
+                    if len(deadline_calls) == 1:
+                        raise TimeoutExpired()
+                    return callback()
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": "msg_user_retry", "assistant": "msg_assistant_1"},
+                    "status": "done",
+                    "raw_status": "completed",
+                    "terminal_state": "done",
+                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
+                    "execution_strategy": "legacy_run_reply",
+                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
+                    "cost": 0.015,
+                    "tokens": {"total": 20},
+                    "text": "Worker finished after isolated retry.",
+                }
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            with mock.patch("opencode_session.worker_execution.TimeoutDeadline", FirstAttemptTimeoutDeadline):
+                outcome = service.start(
+                    MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker", cleanup=True)
+                )
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(outcome.error, f"api failure: disposable session cleanup failed: {first_error}")
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("create", directory, None, None),
+                ("execute", "ses_retry", "Finish the worker task"),
+                ("delete", "ses_initial"),
+                ("delete", "ses_retry"),
+            ],
+        )
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker["status"], "failed")
+        self.assertEqual(worker["failure_reason"], first_error)
+        self.assertEqual(
+            worker["cleanup"],
+            {"requested": True, "deleted": False, "error": first_error, "sessions": ["ses_retry"]},
         )
 
 
