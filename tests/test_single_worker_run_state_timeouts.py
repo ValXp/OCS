@@ -1,15 +1,15 @@
 import tempfile
 import unittest
 
-from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
+from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.worker_execution import WorkerExecutionTimeout
 
 try:
-    from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient
+    from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
 except ModuleNotFoundError:
-    from single_worker_run_state_helpers import CAPABILITIES, FakeClient
+    from single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
 
 
 class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
@@ -29,7 +29,7 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 client.requests.append(("execute", session_id, prompt))
                 raise WorkerExecutionTimeout()
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -37,13 +37,13 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -80,7 +80,7 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 self.assertIsNotNone(deadline)
                 raise TimeoutExpired()
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -88,13 +88,13 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -136,7 +136,7 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 remaining_values.append(deadline.remaining())
                 raise TimeoutExpired()
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -144,13 +144,13 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -184,7 +184,7 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 client.requests.append(("execute", session_id, prompt))
                 raise WorkerExecutionTimeout()
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -192,13 +192,13 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -236,20 +236,20 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
                 self.assertIsNotNone(deadline)
                 raise TimeoutExpired()
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
                 executor=execute_prompt,
                 now=lambda: "2026-07-03T00:00:00Z",
             )
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 

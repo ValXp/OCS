@@ -3,16 +3,21 @@ import unittest
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
+from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
 
 try:
-    from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES
+    from tests.single_worker_run_state_helpers import (
+        CAPABILITIES,
+        FakeClient,
+        UNSUPPORTED_CAPABILITIES,
+        start_single_worker_run,
+    )
 except ModuleNotFoundError:
-    from single_worker_run_state_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES
+    from single_worker_run_state_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES, start_single_worker_run
 
 
-class SingleWorkerRunStateServiceTest(unittest.TestCase):
+class SingleWorkerCanonicalOrchestrationTest(unittest.TestCase):
     def test_start_unsupported_blocking_execution_is_not_retryable(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)
@@ -25,7 +30,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 retryable_failures=["api"],
             )
             client = FakeClient()
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: UNSUPPORTED_CAPABILITIES,
@@ -33,13 +38,13 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -68,7 +73,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
             def detect_capabilities(client):
                 raise OpenCodeApiError("capability probe failed")
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=detect_capabilities,
@@ -76,13 +81,13 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -116,7 +121,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                     "text": "Worker finished.",
                 }
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -124,15 +129,15 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                    directory=directory,
-                    server_url="http://opencode.example",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
+                directory=directory,
+                server_url="http://opencode.example",
             )
             run = store.load_run("demo")
 
@@ -174,7 +179,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                     "text": "Worker finished.",
                 }
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -182,13 +187,13 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -214,7 +219,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
             def execute_prompt(client, session_id, prompt, capabilities):
                 self.fail(f"worker executed with malformed session id {session_id!r}")
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -222,15 +227,15 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                    directory=directory,
-                    server_url="http://opencode.example",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
+                directory=directory,
+                server_url="http://opencode.example",
             )
             run = store.load_run("demo")
 
@@ -258,7 +263,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 client.requests.append(("execute", session_id, prompt))
                 raise BlockingProviderFailure("provider rejected request", prompt_id="msg_user_1")
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -266,15 +271,15 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                    directory=directory,
-                    server_url="http://opencode.example",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
+                directory=directory,
+                server_url="http://opencode.example",
             )
             run = store.load_run("demo")
 

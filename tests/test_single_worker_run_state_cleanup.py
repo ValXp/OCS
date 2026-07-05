@@ -3,15 +3,15 @@ import unittest
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
+from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.worker_execution import WorkerExecutionTimeout
 
 try:
-    from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient
+    from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
 except ModuleNotFoundError:
-    from single_worker_run_state_helpers import CAPABILITIES, FakeClient
+    from single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
 
 
 class SingleWorkerRunStateCleanupTest(unittest.TestCase):
@@ -34,7 +34,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 self.assertIsNotNone(deadline)
                 raise TimeoutExpired()
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -42,14 +42,14 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                    cleanup=True,
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
+                cleanup=True,
             )
             run = store.load_run("demo")
 
@@ -106,7 +106,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                         client.requests.append(("execute", session_id, prompt))
                         raise error_factory()
 
-                    service = SingleWorkerRunStateService(
+                    service = DependencyOrderedSerialRunOrchestrationService(
                         store,
                         client_factory=lambda url: client,
                         capability_detector=lambda client: CAPABILITIES,
@@ -114,14 +114,14 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                         now=lambda: "2026-07-03T00:00:00Z",
                     )
 
-                    outcome = service.start(
-                        SingleWorkerRunStartRequest(
-                            name="demo",
-                            worker_id="worker",
-                            role="worker",
-                            prompt="Finish the worker task",
-                            cleanup=True,
-                        )
+                    outcome = start_single_worker_run(
+                        store,
+                        service,
+                        name="demo",
+                        worker_id="worker",
+                        role="worker",
+                        prompt="Finish the worker task",
+                        cleanup=True,
                     )
                     run = store.load_run("demo")
 
@@ -159,7 +159,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                     "text": "Worker finished.",
                 }
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -167,16 +167,16 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                    directory=directory,
-                    server_url="http://opencode.example",
-                    cleanup=True,
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
+                directory=directory,
+                server_url="http://opencode.example",
+                cleanup=True,
             )
             run = store.load_run("demo")
 
