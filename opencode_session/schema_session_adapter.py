@@ -14,7 +14,20 @@ SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "token
 
 
 @dataclass(frozen=True)
+class RouteFieldSource:
+    path: tuple
+    aliases: tuple
+
+
+@dataclass(frozen=True)
+class SessionRouteSchema:
+    fields: dict
+    known_fields: tuple
+
+
+@dataclass(frozen=True)
 class SessionRouteAdapter:
+    schema: SessionRouteSchema
     route: str = "session"
     version: str = "compatible"
 
@@ -53,18 +66,18 @@ class SessionRouteAdapter:
 
         normalized = dict(record)
         normalized["schema_status"] = "known"
-        set_missing(normalized, "id", self.value(record, *self.id_fields))
-        set_missing(normalized, "directory", self.value(record, *self.directory_fields))
-        set_missing(normalized, "title", self.value(record, *self.title_fields))
-        set_missing(normalized, "agent", self.value(record, *self.agent_fields))
-        set_missing(normalized, "model", self.value(record, *self.model_fields))
+        set_missing(normalized, "id", self.field_value(record, "id"))
+        set_missing(normalized, "directory", self.field_value(record, "directory"))
+        set_missing(normalized, "title", self.field_value(record, "title"))
+        set_missing(normalized, "agent", self.field_value(record, "agent"))
+        set_missing(normalized, "model", self.field_value(record, "model"))
         set_missing(
             normalized,
             "tokens",
-            normalized_tokens(self.value(record, *self.token_fields)),
+            normalized_tokens(self.field_value(record, "tokens")),
         )
-        set_missing(normalized, "createdAt", self.value(record, *self.created_fields))
-        set_missing(normalized, "updatedAt", self.value(record, *self.updated_fields))
+        set_missing(normalized, "createdAt", self.field_value(record, "createdAt"))
+        set_missing(normalized, "updatedAt", self.field_value(record, "updatedAt"))
         require_session_canonical_fields(normalized)
         return normalized
 
@@ -75,142 +88,93 @@ class SessionRouteAdapter:
 
     def value(self, session, *names):
         session = self.record(session)
-        value = first_present(session, *names)
-        if value is not None:
-            return value
-        info = session.get("info")
-        value = first_present(info, *names)
-        if value is not None:
-            return value
-        location = session.get("location")
-        if isinstance(location, dict):
-            for name in names:
-                if name in {"directory", "cwd"} and location.get("directory") is not None:
-                    return location.get("directory")
-        time = session.get("time")
-        if isinstance(time, dict):
-            for name in names:
-                if name in {"createdAt", "created_at"} and time.get("created") is not None:
-                    return time.get("created")
-                if name in {"updatedAt", "updated_at"} and time.get("updated") is not None:
-                    return time.get("updated")
+        requested_names = set(names)
+        for sources in self.schema.fields.values():
+            value = _field_source_value(session, sources, requested_names=requested_names)
+            if value is not None:
+                return value
         return None
 
+    def field_value(self, session, field_name):
+        session = self.record(session)
+        return _field_source_value(session, self.schema.fields.get(field_name, ()))
+
     def is_known_record(self, session):
-        return any(
-            self.value(session, *names) is not None
-            for names in self.known_field_groups
-        )
+        return any(self.field_value(session, field_name) is not None for field_name in self.schema.known_fields)
 
-    @property
-    def id_fields(self):
-        return ("id", "sessionID", "sessionId", "session_id")
 
-    @property
-    def directory_fields(self):
-        return ("directory", "cwd")
+def _field_source_value(record, sources, *, requested_names=None):
+    for source in sources:
+        if requested_names is not None and not requested_names.intersection(source.aliases):
+            continue
+        value = first_present(_mapping_at_path(record, source.path), *source.aliases)
+        if value is not None:
+            return value
+    return None
 
-    @property
-    def title_fields(self):
-        return ("title", "name")
 
-    @property
-    def agent_fields(self):
-        return ("agent", "agentID", "agentId", "agent_id")
+def _mapping_at_path(record, path):
+    current = record
+    for name in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(name)
+    return current if isinstance(current, dict) else None
 
-    @property
-    def model_fields(self):
-        return ("model", "modelID", "modelId", "model_id")
 
-    @property
-    def token_fields(self):
-        return ("tokens", "token", "tokenUsage", "token_usage", "usage")
+def _session_schema(field_aliases):
+    root_and_info_fields = {}
+    for field_name, aliases in field_aliases.items():
+        root_and_info_fields[field_name] = [
+            RouteFieldSource((), aliases),
+            RouteFieldSource(("info",), aliases),
+        ]
+    root_and_info_fields["directory"].append(RouteFieldSource(("location",), ("directory",)))
+    root_and_info_fields["createdAt"].append(RouteFieldSource(("time",), ("created",)))
+    root_and_info_fields["updatedAt"].append(RouteFieldSource(("time",), ("updated",)))
+    return SessionRouteSchema(
+        fields={field_name: tuple(sources) for field_name, sources in root_and_info_fields.items()},
+        known_fields=tuple(field_aliases),
+    )
 
-    @property
-    def created_fields(self):
-        return ("createdAt", "created_at", "created")
 
-    @property
-    def updated_fields(self):
-        return ("updatedAt", "updated_at", "updated")
+COMPATIBLE_SESSION_FIELD_ALIASES = {
+    "id": ("id", "sessionID", "sessionId", "session_id"),
+    "directory": ("directory", "cwd"),
+    "title": ("title", "name"),
+    "agent": ("agent", "agentID", "agentId", "agent_id"),
+    "model": ("model", "modelID", "modelId", "model_id"),
+    "tokens": ("tokens", "token", "tokenUsage", "token_usage", "usage"),
+    "createdAt": ("createdAt", "created_at", "created"),
+    "updatedAt": ("updatedAt", "updated_at", "updated"),
+}
 
-    @property
-    def known_field_groups(self):
-        return (
-            self.id_fields,
-            self.directory_fields,
-            self.title_fields,
-            self.agent_fields,
-            self.model_fields,
-            self.token_fields,
-            self.created_fields,
-            self.updated_fields,
-        )
+OPENAPI_SESSION_FIELD_ALIASES = {
+    "id": ("id",),
+    "directory": ("directory", "cwd"),
+    "title": ("title",),
+    "agent": ("agent",),
+    "model": ("model",),
+    "tokens": ("tokens", "tokenUsage", "usage"),
+    "createdAt": ("createdAt", "created"),
+    "updatedAt": ("updatedAt", "updated"),
+}
+
+
+COMPATIBLE_SESSION_SCHEMA = _session_schema(COMPATIBLE_SESSION_FIELD_ALIASES)
+OPENAPI_SESSION_SCHEMA = _session_schema(OPENAPI_SESSION_FIELD_ALIASES)
 
 
 @dataclass(frozen=True)
 class OpenApiSessionRouteAdapter(SessionRouteAdapter):
+    schema: SessionRouteSchema = OPENAPI_SESSION_SCHEMA
     version: str = "api-v1"
-
-    @property
-    def id_fields(self):
-        return ("id",)
-
-    @property
-    def directory_fields(self):
-        return ("directory", "cwd")
-
-    @property
-    def title_fields(self):
-        return ("title",)
-
-    @property
-    def agent_fields(self):
-        return ("agent",)
-
-    @property
-    def model_fields(self):
-        return ("model",)
-
-    @property
-    def token_fields(self):
-        return ("tokens", "tokenUsage", "usage")
-
-    @property
-    def created_fields(self):
-        return ("createdAt", "created")
-
-    @property
-    def updated_fields(self):
-        return ("updatedAt", "updated")
 
 
 @dataclass(frozen=True)
 class LegacySessionRouteAdapter(SessionRouteAdapter):
+    schema: SessionRouteSchema = COMPATIBLE_SESSION_SCHEMA
     version: str = "legacy"
-
-    def value(self, session, *names):
-        session = self.record(session)
-        value = first_present(session, *names)
-        if value is not None:
-            return value
-        info = session.get("info")
-        value = first_present(info, *names)
-        if value is not None:
-            return value
-        location = session.get("location")
-        if isinstance(location, dict):
-            for name in names:
-                if name in {"directory", "cwd"} and location.get("directory") is not None:
-                    return location.get("directory")
-        time = session.get("time")
-        if isinstance(time, dict):
-            for name in names:
-                if name in {"createdAt", "created_at"} and time.get("created") is not None:
-                    return time.get("created")
-                if name in {"updatedAt", "updated_at"} and time.get("updated") is not None:
-                    return time.get("updated")
-        return None
 
 
 def unknown_session_record(raw) -> NormalizedSessionRecord:
@@ -241,7 +205,7 @@ def collection_sessions(collection):
     return collection_records(collection, "sessions", "children", "data")
 
 
-SESSION_ADAPTER = SessionRouteAdapter()
+SESSION_ADAPTER = SessionRouteAdapter(COMPATIBLE_SESSION_SCHEMA)
 OPENAPI_SESSION_ADAPTER = OpenApiSessionRouteAdapter()
 LEGACY_SESSION_ADAPTER = LegacySessionRouteAdapter()
 
