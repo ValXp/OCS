@@ -102,26 +102,11 @@ class OpenCodeApiClient:
                 data={"kind": "invalid_event_stream"},
             ) from error
         except HTTPError as error:
-            error_body = error.read().decode("utf-8")
-            error_data = None
-            try:
-                error_data = json.loads(error_body or "{}")
-            except json.JSONDecodeError:
-                pass
-            raise OpenCodeApiError(
-                f"GET /{path.lstrip('/')} failed: HTTP {error.code}",
-                status=error.code,
-                method="GET",
-                path=f"/{path.lstrip('/')}",
-                body=error_body,
-                data=error_data,
-            ) from error
+            _raise_http_error(error, "GET", path)
         except URLError as error:
-            raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline, stream=True)
         except TimeoutError as error:
-            if deadline is not None and deadline.expired():
-                raise TimeoutExpired() from error
-            raise OpenCodeApiError(f"OpenCode event stream timed out at {self.base_url.rstrip('/')}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline, stream=True)
 
     def _request_json(self, method, path, payload=None, *, timeout=None, deadline=None):
         response_body = self._request_body(method, path, payload, timeout=timeout, deadline=deadline)
@@ -149,28 +134,11 @@ class OpenCodeApiClient:
         except TimeoutExpired:
             raise
         except HTTPError as error:
-            error_body = error.read().decode("utf-8")
-            error_data = None
-            try:
-                error_data = json.loads(error_body or "{}")
-            except json.JSONDecodeError:
-                pass
-            raise OpenCodeApiError(
-                f"{method} /{path.lstrip('/')} failed: HTTP {error.code}",
-                status=error.code,
-                method=method,
-                path=f"/{path.lstrip('/')}",
-                body=error_body,
-                data=error_data,
-            ) from error
+            _raise_http_error(error, method, path)
         except URLError as error:
-            if deadline is not None and _url_error_is_timeout(error):
-                raise TimeoutExpired() from error
-            raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline)
         except TimeoutError as error:
-            if deadline is not None:
-                raise TimeoutExpired() from error
-            raise OpenCodeApiError(f"OpenCode server timed out at {self.base_url.rstrip('/')}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline)
 
     def create_session(self, directory, *, agent=None, model=None, title=None, metadata=None):
         return self.create_session_response(directory, agent=agent, model=model, title=title, metadata=metadata).data
@@ -303,6 +271,34 @@ def _validate_base_url(base_url):
     parsed = urlparse(base_url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise OpenCodeApiError(f"invalid OpenCode server URL {base_url!r}: expected http(s) URL")
+
+
+def _raise_http_error(error, method, path):
+    error_body = error.read().decode("utf-8")
+    error_data = None
+    try:
+        error_data = json.loads(error_body or "{}")
+    except json.JSONDecodeError:
+        pass
+    raise OpenCodeApiError(
+        f"{method} /{path.lstrip('/')} failed: HTTP {error.code}",
+        status=error.code,
+        method=method,
+        path=f"/{path.lstrip('/')}",
+        body=error_body,
+        data=error_data,
+    ) from error
+
+
+def _raise_transport_error(error, *, base_url, deadline=None, stream=False):
+    if isinstance(error, URLError):
+        if deadline is not None and _url_error_is_timeout(error):
+            raise TimeoutExpired() from error
+        raise OpenCodeApiError(f"cannot reach OpenCode server at {base_url.rstrip('/')}: {error.reason}") from error
+    if deadline is not None:
+        raise TimeoutExpired() from error
+    target = "event stream" if stream else "server"
+    raise OpenCodeApiError(f"OpenCode {target} timed out at {base_url.rstrip('/')}") from error
 
 
 def _url_error_is_timeout(error):
