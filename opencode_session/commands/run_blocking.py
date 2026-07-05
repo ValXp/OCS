@@ -10,7 +10,7 @@ from opencode_session.blocking_execution import (
     format_blocking_execution_compact,
     unsupported_blocking_execution_message,
 )
-from opencode_session.capabilities import capabilities_from_openapi_doc
+from opencode_session.capabilities import capabilities_from_openapi_doc, configure_client_route_plan
 from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session
 from opencode_session.session_ids import require_session_id
 from opencode_session.session_lifecycle import is_session_not_found_error
@@ -51,6 +51,7 @@ def handle_run_blocking_command(
 
     try:
         capabilities = capabilities_from_openapi_doc(client.require_openapi_doc())
+        configure_client_route_plan(client, capabilities)
         if blocking_execution_strategy(capabilities) is None:
             print_error(unsupported_blocking_execution_message())
             return unsupported_exit

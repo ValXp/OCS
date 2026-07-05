@@ -10,11 +10,15 @@ LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 def detect_capabilities(client, *, deadline=None):
     health = client.get_health(deadline=deadline)
     doc = client.get_openapi_doc(deadline=deadline)
-    capabilities = capabilities_from_openapi_doc(doc, health=health)
+    return capabilities_from_openapi_doc(doc, health=health)
+
+
+def configure_client_route_plan(client, capabilities):
+    route_plan = capabilities.get("route_plan") if isinstance(capabilities, dict) else None
     configure = getattr(client, "configure_route_plan", None)
     if callable(configure):
-        configure(capabilities["route_plan"])
-    return capabilities
+        configure(route_plan)
+    return client
 
 
 def capabilities_from_openapi_doc(doc, *, health=None):

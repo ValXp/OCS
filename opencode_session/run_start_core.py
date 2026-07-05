@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
-from opencode_session.capabilities import detect_capabilities
+from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.run_start_policy import blocking_execution_start_error
 from opencode_session.schema_common import DomainRecord
 from opencode_session.worker_execution import (
@@ -51,6 +51,7 @@ class RunStartCore:
     def probe_capabilities(self, run):
         client = self.client_factory(run["server_url"])
         capabilities = self.capability_detector(client)
+        configure_client_route_plan(client, capabilities)
         return CapabilityProbeOutcome(client, capabilities, blocking_execution_start_error(capabilities))
 
     def execute_worker(

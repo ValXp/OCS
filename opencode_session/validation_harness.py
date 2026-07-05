@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 
 from opencode_session.api_client import OpenCodeApiError
-from opencode_session.capabilities import detect_capabilities
+from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
 
 
@@ -31,6 +31,7 @@ class DisposableValidationHarness:
 
     def detect_capabilities(self):
         capabilities = detect_capabilities(self.client)
+        configure_client_route_plan(self.client, capabilities)
         self.result["capabilities"] = capabilities
         self.result["health"] = capabilities["health"]
         self.result["version"] = capabilities["version"]

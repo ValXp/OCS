@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
-from opencode_session.capabilities import detect_capabilities
+from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
@@ -122,6 +122,7 @@ class RunCommandService:
         worker = _run_worker_with_session(run, worker_id)
         client = self.client_factory(run["server_url"])
         capabilities = self.capability_detector(client)
+        configure_client_route_plan(client, capabilities)
         result = admit_prompt(client, capabilities, worker["session_id"], text, delivery, message_id=message_id)
         admission = result.record
         admitted_message_id = admission["message_id"]

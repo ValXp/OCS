@@ -220,6 +220,7 @@ class SmokeCliTest(unittest.TestCase):
             f"cleanup stale=2 deleted=2 verified=2 prefix=ocs-smoke-test- dir={directory}\n",
         )
         self.assertEqual(parent_paths(server.requests), [
+            ("GET", "/doc"),
             ("GET", "/api/session"),
             ("DELETE", "/api/session/ses_old"),
             ("GET", "/api/session/ses_old"),

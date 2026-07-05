@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
+from opencode_session.capabilities import capabilities_from_openapi_doc, configure_client_route_plan
 from opencode_session.schema_common import DomainRecord, NormalizedAbortRecord, NormalizedSessionRecord, first_present
 from opencode_session.schema_session_adapter import collection_sessions, session_record
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
@@ -60,8 +61,11 @@ class SessionCommandError(Exception):
 
 
 class SessionCommandService:
-    def __init__(self, client):
+    def __init__(self, client, *, route_capabilities=None):
         self.client = client
+        if route_capabilities is None:
+            route_capabilities = capabilities_from_openapi_doc(self.client.get_openapi_doc())
+        configure_client_route_plan(self.client, route_capabilities)
 
     def create(self, directory, *, agent=None, model=None):
         resolved_directory = str(Path(directory).resolve())

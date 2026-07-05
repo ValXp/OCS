@@ -2,7 +2,7 @@ import argparse
 import unittest
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
-from opencode_session.capabilities import detect_capabilities
+from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 
 try:
     from tests.mocked_cli_harness import FakeOpenCodeServer, load_json, run_ocs
@@ -158,6 +158,7 @@ class CapabilityProbeCliTest(unittest.TestCase):
             client = OpenCodeApiClient(server.url)
 
             capabilities = detect_capabilities(client)
+            configure_client_route_plan(client, capabilities)
             created = client.create_session_response("/tmp/project")
             listed = client.list_sessions_response()
             inspected = client.get_session_response("ses_1")
@@ -180,6 +181,12 @@ class CapabilityProbeCliTest(unittest.TestCase):
                 ("DELETE", "/session/ses_1"),
             ],
         )
+
+    def test_route_dependent_client_calls_require_configured_route_plan(self):
+        client = OpenCodeApiClient("http://127.0.0.1:4096")
+
+        with self.assertRaisesRegex(OpenCodeApiError, "route plan is not configured"):
+            client.list_sessions_response()
 
     def test_configured_route_plan_drives_client_blocking_execution_routes(self):
         with FakeOpenCodeServer() as server:
@@ -212,7 +219,7 @@ class CapabilityProbeCliTest(unittest.TestCase):
         with FakeOpenCodeServer() as server:
             server.route("DELETE", "/api/session/ses_1", lambda handler, _request: handler._write_text("deleted"))
             server.json("DELETE", "/session/ses_1", {"id": "ses_1", "deleted": True})
-            client = OpenCodeApiClient(server.url)
+            client = OpenCodeApiClient(server.url).configure_route_plan({})
 
             with self.assertRaisesRegex(OpenCodeApiError, "returned invalid JSON"):
                 client.delete_session_response("ses_1")

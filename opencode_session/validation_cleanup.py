@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.capabilities import capabilities_from_openapi_doc, configure_client_route_plan
 from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session
 from opencode_session.formatting import compact_value
 from opencode_session.schema_session_adapter import collection_sessions, session_value
@@ -10,6 +11,7 @@ from opencode_session.schema_session_adapter import collection_sessions, session
 def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
     directory = str(Path(args.directory).resolve()) if args.directory else None
     try:
+        configure_client_route_plan(client, capabilities_from_openapi_doc(client.get_openapi_doc()))
         response = client.list_sessions_response()
     except OpenCodeApiError as error:
         print_error(str(error))

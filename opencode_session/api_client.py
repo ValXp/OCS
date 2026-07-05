@@ -39,7 +39,7 @@ class OpenCodeApiClient:
         _validate_base_url(base_url)
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
-        self.route_plan = dict(DEFAULT_ROUTE_PLAN)
+        self.route_plan = None
 
     def configure_route_plan(self, route_plan):
         self.route_plan = {**DEFAULT_ROUTE_PLAN, **(route_plan or {})}
@@ -249,10 +249,19 @@ class OpenCodeApiClient:
         return deadline.require_time()
 
     def _route_path(self, name, *, session_id=None):
-        path = self.route_plan.get(name) or DEFAULT_ROUTE_PLAN[name]
+        route_plan = self._require_route_plan()
+        path = route_plan.get(name) or DEFAULT_ROUTE_PLAN[name]
         if session_id is not None:
             path = _session_prompt_path(path, session_id)
         return path.lstrip("/")
+
+    def _require_route_plan(self):
+        if self.route_plan is None:
+            raise OpenCodeApiError(
+                "client route plan is not configured; discover capabilities and configure routes before session calls",
+                data={"kind": "route_plan_required"},
+            )
+        return self.route_plan
 
 
 def _session_prompt_path(prompt_path, session_id):
