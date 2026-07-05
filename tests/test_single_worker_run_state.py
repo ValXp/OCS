@@ -739,6 +739,74 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
         self.assertEqual(worker["next_eligible_action"], "none")
         self.assertNotIn("result", worker)
 
+    def test_start_cleanup_deletes_created_session_after_execution_failure(self):
+        cases = [
+            (
+                "api",
+                lambda: OpenCodeApiError("HTTP 503 POST /session/ses_new/run: upstream overloaded", status=503),
+                {},
+                69,
+                "api failure: HTTP 503 POST /session/ses_new/run: upstream overloaded",
+            ),
+            (
+                "provider",
+                lambda: BlockingProviderFailure("provider rejected request", prompt_id="msg_user_1"),
+                {},
+                69,
+                "provider failure: provider rejected request",
+            ),
+            (
+                "timeout",
+                lambda: WorkerExecutionTimeout(),
+                {"timeout_seconds": 1},
+                124,
+                "worker timed out after 1s",
+            ),
+        ]
+        for name, error_factory, worker_options, expected_exit_code, expected_error in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+                    store = RunStore(store_root)
+                    store.create_run("demo", directory=directory, server_url="http://opencode.example")
+                    if worker_options:
+                        store.upsert_worker("demo", "worker", role="worker", **worker_options)
+                    client = FakeClient()
+
+                    def execute_prompt(client, session_id, prompt, capabilities):
+                        client.requests.append(("execute", session_id, prompt))
+                        raise error_factory()
+
+                    service = SingleWorkerRunStateService(
+                        store,
+                        client_factory=lambda url: client,
+                        capability_detector=lambda client: CAPABILITIES,
+                        executor=execute_prompt,
+                        now=lambda: "2026-07-03T00:00:00Z",
+                    )
+
+                    outcome = service.start(
+                        SingleWorkerRunStartRequest(
+                            name="demo",
+                            worker_id="worker",
+                            role="worker",
+                            prompt="Finish the worker task",
+                            cleanup=True,
+                        )
+                    )
+                    run = store.load_run("demo")
+
+                self.assertEqual(outcome.exit_code, expected_exit_code)
+                self.assertEqual(outcome.error, expected_error)
+                self.assertEqual(
+                    client.requests,
+                    [
+                        ("create", directory, None, None),
+                        ("execute", "ses_new", "Finish the worker task"),
+                        ("delete", "ses_new"),
+                    ],
+                )
+                self.assertEqual(run["workers"]["worker"]["cleanup"], {"requested": True, "deleted": True})
+
     def test_start_retries_retryable_api_failure_and_persists_success_metadata(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)

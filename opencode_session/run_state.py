@@ -97,19 +97,20 @@ class SingleWorkerRunStateService:
                 agent=request.agent,
                 model=request.model,
             )
+            if request.cleanup:
+                remember_created_worker_sessions(created_session_ids_by_worker, worker, outcome.created_session_ids)
         except OpenCodeApiError as error:
             mark_orchestration_start_failed(run, [worker], str(error))
             self._save(run)
             return SingleWorkerRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
         _refresh_run_summary(run)
-        if outcome.error is not None:
-            self._save(run)
-            return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), outcome.error)
         if request.cleanup:
-            remember_created_worker_sessions(created_session_ids_by_worker, worker, outcome.created_session_ids)
             cleanup_failure = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
             if cleanup_failure is not None:
                 return SingleWorkerRunStartOutcome(run, cleanup_failure.exit_code, cleanup_failure.error)
+        if outcome.error is not None:
+            self._save(run)
+            return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), outcome.error)
         self._save(run)
         return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run))
 
