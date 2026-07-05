@@ -219,6 +219,10 @@ def cleanup_created_worker_sessions(client, worker, session_ids):
     if deleted_session_ids:
         if len(deleted_session_ids) > 1 or errors:
             cleanup["sessions"] = deleted_session_ids
+        else:
+            cleanup.pop("sessions", None)
+    else:
+        cleanup.pop("sessions", None)
     if errors:
         return WorkerCleanupOutcome(deleted_session_ids, errors[0])
     return WorkerCleanupOutcome(deleted_session_ids)

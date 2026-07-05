@@ -2,7 +2,11 @@ import tempfile
 import unittest
 
 from opencode_session.api_client import OpenCodeApiError
-from opencode_session.worker_execution import WorkerExecutionTimeout, execute_worker_attempts
+from opencode_session.worker_execution import (
+    WorkerExecutionTimeout,
+    cleanup_created_worker_sessions,
+    execute_worker_attempts,
+)
 from opencode_session.worker_state import ensure_worker
 
 
@@ -32,8 +36,29 @@ class FakeClient:
         self.requests.append(("create", directory, agent, model))
         return FakeResponse({"id": self.session_ids.pop(0), "directory": directory})
 
+    def delete_session(self, session_id):
+        self.requests.append(("delete", session_id))
+
 
 class WorkerExecutionTest(unittest.TestCase):
+    def test_cleanup_created_worker_sessions_clears_stale_sessions_after_single_session_success(self):
+        worker = {
+            "cleanup": {
+                "requested": True,
+                "deleted": False,
+                "error": "DELETE /api/session/ses_old failed: HTTP 500",
+                "sessions": ["ses_old", "ses_retry"],
+            }
+        }
+        client = FakeClient([])
+
+        outcome = cleanup_created_worker_sessions(client, worker, ["ses_new"])
+
+        self.assertEqual(client.requests, [("delete", "ses_new")])
+        self.assertEqual(outcome.deleted_session_ids, ["ses_new"])
+        self.assertIsNone(outcome.error)
+        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
+
     def test_execute_worker_attempts_rejects_create_response_without_session_id_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
