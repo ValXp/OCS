@@ -40,6 +40,8 @@ class DependencyOrderedSerialRunStartRequest:
     directory: Optional[str] = None
     server_url: Optional[str] = None
     session_id: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
     cleanup: bool = False
 
 
@@ -84,9 +86,14 @@ class DependencyOrderedSerialRunOrchestrationService:
                 latest_run["directory"] = str(Path(request.directory).resolve())
             if request.server_url is not None:
                 latest_run["server_url"] = request.server_url
-            if request.session_id is not None:
+            if request.session_id is not None or request.agent is not None or request.model is not None:
                 worker = _ensure_orchestration_worker(latest_run, request.worker_id, role=request.role)
-                worker["session_id"] = request.session_id
+                if request.session_id is not None:
+                    worker["session_id"] = request.session_id
+                if request.agent is not None:
+                    worker["agent"] = request.agent
+                if request.model is not None:
+                    worker["model"] = request.model
 
         run = self._persist_mutation(run, prepare)
         if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):

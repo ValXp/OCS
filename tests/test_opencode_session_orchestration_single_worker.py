@@ -122,6 +122,59 @@ class SingleWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(message_payloads[0]["parts"], [{"type": "text", "text": "Finish the worker task"}])
         self.assertTrue(message_payloads[0]["messageID"].startswith("msg_"))
 
+    def test_start_stored_prompt_applies_agent_and_model_arguments(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with FakeOpenCodeServer() as server:
+                configure_single_worker_server(server)
+                init = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "worker",
+                    "--role",
+                    "worker",
+                    "--prompt",
+                    "Finish the worker task",
+                )
+                start = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "start",
+                    "demo",
+                    "--agent",
+                    "build",
+                    "--model",
+                    "openai/gpt-5.5",
+                )
+                requests = list(server.requests)
+            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, format_completed_process(init))
+        self.assertEqual(worker.returncode, 0, format_completed_process(worker))
+        self.assertEqual(start.returncode, 0, format_completed_process(start))
+        self.assertEqual(status.returncode, 0, format_completed_process(status))
+        self.assertEqual(
+            payloads_for(requests, "POST", "/api/session"),
+            [{"location": {"directory": directory}, "agent": "build", "model": "openai/gpt-5.5"}],
+        )
+        payload = load_json(self, status, "status")
+        self.assertEqual(payload["workers"]["worker"]["agent"], "build")
+        self.assertEqual(payload["workers"]["worker"]["model"], "openai/gpt-5.5")
+
     def test_start_prompt_returns_aborted_exit_code_when_worker_result_is_aborted(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:

@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
@@ -11,7 +12,7 @@ from opencode_session.multi_worker_orchestration import (
     workers_in_dependency_order,
 )
 from opencode_session.prompt_admission import admit_prompt
-from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
+from opencode_session.run_record import DEFAULT_SERVER_URL
 from opencode_session.run_store import RunStoreError
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 from opencode_session.worker_state import mark_worker_aborted
@@ -79,21 +80,7 @@ class RunCommandService:
 
     def start_run(self, request):
         if request.prompt is not None:
-            return SingleWorkerRunStateService(self.store).start(
-                SingleWorkerRunStartRequest(
-                    name=request.name,
-                    worker_id=request.worker_id,
-                    role=request.role,
-                    prompt=request.prompt,
-                    directory=request.directory,
-                    server_url=request.server_url,
-                    session_id=request.session_id,
-                    agent=request.agent,
-                    model=request.model,
-                    cleanup=request.cleanup,
-                    default_server_url=request.default_server_url,
-                )
-            )
+            self._ensure_prompt_worker(request)
         return DependencyOrderedSerialRunOrchestrationService(self.store).start(
             DependencyOrderedSerialRunStartRequest(
                 name=request.name,
@@ -102,6 +89,8 @@ class RunCommandService:
                 directory=request.directory,
                 server_url=request.server_url,
                 session_id=request.session_id,
+                agent=request.agent,
+                model=request.model,
                 cleanup=request.cleanup,
             )
         )
@@ -166,6 +155,28 @@ class RunCommandService:
 
         return self.store.update_run(name, update)
 
+    def _ensure_prompt_worker(self, request):
+        try:
+            self.store.load_run(request.name)
+        except RunStoreError as error:
+            if error.kind != "missing":
+                raise
+            self.store.create_run(
+                request.name,
+                directory=request.directory or ".",
+                server_url=request.server_url or request.default_server_url or _server_default(),
+            )
+        self.store.upsert_worker(
+            request.name,
+            request.worker_id,
+            role=request.role,
+            prompt=request.prompt,
+            status="queued",
+            session_id=request.session_id,
+            agent=request.agent,
+            model=request.model,
+        )
+
 
 class RunWorkerSessionNotFound(Exception):
     def __init__(self, session_id):
@@ -194,3 +205,7 @@ def _run_worker_with_session(run, worker_id):
 
 def _utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _server_default():
+    return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL
