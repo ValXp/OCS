@@ -13,6 +13,7 @@ from opencode_session.multi_worker_orchestration import (
 from opencode_session.prompt_admission import admit_prompt
 from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_store import RunStoreError
+from opencode_session.schema_common import DomainRecord, NormalizedAbortRecord, NormalizedAdmissionRecord
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 from opencode_session.worker_state import mark_worker_aborted
 
@@ -35,23 +36,23 @@ class RunStartRequest:
 
 @dataclass
 class RunCollectResult:
-    run: dict
-    worker: Optional[dict] = None
-    workers: Sequence[dict] = ()
+    run: DomainRecord
+    worker: Optional[DomainRecord] = None
+    workers: Sequence[DomainRecord] = ()
 
 
 @dataclass
 class RunSteerResult:
-    run: dict
-    worker: dict
-    admission: dict
+    run: DomainRecord
+    worker: DomainRecord
+    admission: NormalizedAdmissionRecord
 
 
 @dataclass
 class RunAbortResult:
-    run: dict
-    worker: dict
-    abort: dict
+    run: DomainRecord
+    worker: DomainRecord
+    abort: NormalizedAbortRecord
     raw_body: str
 
 

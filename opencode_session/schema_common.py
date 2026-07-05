@@ -1,64 +1,80 @@
-from typing import TypedDict
+from typing import Any, Dict, List, Optional, TypedDict, Union
 
 
-class NormalizedSessionRecord(TypedDict, total=False):
-    id: str
-    directory: str
-    title: str
-    agent: str
-    model: str
-    tokens: object
-    createdAt: object
-    updatedAt: object
+JsonValue = Union[None, bool, int, float, str, List["JsonValue"], Dict[str, "JsonValue"]]
+JsonObject = Dict[str, JsonValue]
+
+
+class NormalizedSessionRecord(TypedDict):
+    id: Optional[str]
+    directory: Optional[str]
+    title: Optional[str]
+    agent: Optional[str]
+    model: Optional[str]
+    tokens: JsonValue
+    createdAt: JsonValue
+    updatedAt: JsonValue
     schema_status: str
-    raw: object
+    raw: JsonValue
 
 
-class NormalizedMessageRecord(TypedDict, total=False):
-    id: str
-    role: str
-    status: str
-    raw_status: str
-    cost: object
-    tokens: object
+class NormalizedMessageRecord(TypedDict):
+    id: Optional[str]
+    role: Optional[str]
+    status: Optional[str]
+    raw_status: Optional[str]
+    cost: JsonValue
+    tokens: JsonValue
     text: str
+    raw: JsonValue
 
 
-class NormalizedAdmissionRecord(TypedDict, total=False):
+class NormalizedAdmissionRecord(TypedDict):
     session_id: str
     message_id: str
     delivery: str
     state: str
     raw_state: str
     status: str
-    terminal_state: object
+    terminal_state: JsonValue
     api_path: str
-    fallback: dict
-    admitted_sequence: object
-    promoted_sequence: object
+    fallback: JsonObject
+    admitted_sequence: JsonValue
+    promoted_sequence: JsonValue
 
 
-class NormalizedEventRecord(TypedDict, total=False):
-    kind: str
+class NormalizedAbortRecord(TypedDict):
     session_id: str
-    target_session_id: str
-    type: str
-    message_id: str
-    status: str
-    raw_status: str
-    delivery: str
-    text: str
-    tool: str
-    call_id: str
-    step: str
-    title: str
-    blocker: str
-    blocker_id: str
-    question: str
-    error: str
-    reason: str
+    accepted: bool
+    status: Optional[str]
+    raw_status: JsonValue
+    response: JsonObject
+
+
+class NormalizedEventRecord(TypedDict):
+    kind: str
+    session_id: Optional[str]
+    target_session_id: Optional[str]
+    type: Optional[str]
+    message_id: Optional[str]
+    status: Optional[str]
+    raw_status: Optional[str]
+    delivery: Optional[str]
+    text: Optional[str]
+    tool: Optional[str]
+    call_id: Optional[str]
+    step: Optional[str]
+    title: Optional[str]
+    blocker: Optional[str]
+    blocker_id: Optional[str]
+    question: Optional[str]
+    error: Optional[str]
+    reason: Optional[str]
     schema_status: str
-    raw: object
+    raw: JsonValue
+
+
+DomainRecord = Dict[str, Any]
 
 
 def collection_records(collection, *names):

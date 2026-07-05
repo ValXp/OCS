@@ -1,30 +1,31 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Sequence
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
-from opencode_session.schema_common import first_present
+from opencode_session.schema_common import DomainRecord, NormalizedAbortRecord, NormalizedSessionRecord, first_present
 from opencode_session.schema_session_adapter import collection_sessions, session_record
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 
 
 @dataclass
 class SessionCreateResult:
-    session: dict
+    session: NormalizedSessionRecord
     raw_body: str
 
 
 @dataclass
 class SessionListResult:
-    sessions: list
-    blocker_counts: dict
+    sessions: Sequence[NormalizedSessionRecord]
+    blocker_counts: Optional[DomainRecord]
     raw_body: str
 
 
 @dataclass
 class SessionInspectResult:
-    session: dict
-    blocker_counts: dict
+    session: NormalizedSessionRecord
+    blocker_counts: Optional[DomainRecord]
     raw_body: str
 
 
@@ -38,19 +39,19 @@ class SessionDeleteResult:
 
 @dataclass
 class SessionAbortResult:
-    abort: dict
+    abort: NormalizedAbortRecord
     raw_body: str
 
 
 @dataclass
 class SessionForkResult:
-    fork: dict
+    fork: DomainRecord
     raw_body: str
 
 
 @dataclass
 class SessionChildrenResult:
-    children: list
+    children: Sequence[NormalizedSessionRecord]
     raw_body: str
 
 

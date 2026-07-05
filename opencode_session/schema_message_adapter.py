@@ -1,7 +1,11 @@
+from copy import deepcopy
 from dataclasses import dataclass
 
 from opencode_session.schema_common import NormalizedMessageRecord, first_present, normalized_tokens, set_missing
 from opencode_session.status import short_status
+
+
+MESSAGE_CANONICAL_FIELDS = ("id", "role", "status", "raw_status", "cost", "tokens", "text")
 
 
 @dataclass(frozen=True)
@@ -10,6 +14,8 @@ class MessageRouteAdapter:
     version: str = "opencode-compatible"
 
     def normalize_record(self, message) -> NormalizedMessageRecord:
+        if not isinstance(message, dict):
+            return unknown_message_record(message)
         message = self.record(message)
         normalized = dict(message)
         set_missing(normalized, "id", self.value(message, "id", "messageID", "messageId", "message_id"))
@@ -22,6 +28,7 @@ class MessageRouteAdapter:
         set_missing(normalized, "cost", self.value(message, "cost"))
         set_missing(normalized, "tokens", self.tokens(message))
         set_missing(normalized, "text", self.text(message))
+        require_message_canonical_fields(normalized)
         return normalized
 
     def iter_normalized_records(self, data):
@@ -71,6 +78,20 @@ class MessageRouteAdapter:
                 if isinstance(part, dict) and part.get("type") == "text"
             )
         return ""
+
+
+def unknown_message_record(raw) -> NormalizedMessageRecord:
+    normalized = {field_name: None for field_name in MESSAGE_CANONICAL_FIELDS}
+    normalized["text"] = ""
+    normalized["schema_status"] = "unknown"
+    normalized["raw"] = deepcopy(raw)
+    return normalized
+
+
+def require_message_canonical_fields(record):
+    for field_name in MESSAGE_CANONICAL_FIELDS:
+        record.setdefault(field_name, None)
+    record.setdefault("text", "")
 
 
 MESSAGE_ADAPTER = MessageRouteAdapter()

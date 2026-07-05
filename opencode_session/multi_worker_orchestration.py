@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
@@ -15,6 +15,7 @@ from opencode_session.run_persistence import (
 from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
+from opencode_session.schema_common import DomainRecord
 from opencode_session.worker_execution import RETRY_SCHEDULED
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_model import is_executable_worker
@@ -53,7 +54,7 @@ class DependencyOrderedSerialRunStartRequest:
 
 @dataclass
 class DependencyOrderedSerialRunStartOutcome:
-    run: dict
+    run: DomainRecord
     exit_code: int
     error: Optional[str] = None
 
@@ -68,17 +69,17 @@ class DependencyScheduleTick:
 
 @dataclass
 class OrchestrationExecutionState:
-    client: object
-    capabilities: dict
-    created_session_ids_by_worker: dict = field(default_factory=dict)
-    first_error_outcome: object = None
+    client: Any
+    capabilities: DomainRecord
+    created_session_ids_by_worker: DomainRecord = field(default_factory=dict)
+    first_error_outcome: Any = None
 
 
 @dataclass(frozen=True)
 class WorkerBatchExecutionResult:
     retry_workers: tuple
-    first_error_outcome: object = None
-    fail_fast_outcome: object = None
+    first_error_outcome: Any = None
+    fail_fast_outcome: Any = None
 
 
 class DependencySchedulePlanner:

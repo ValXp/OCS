@@ -1,18 +1,19 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.run_start_policy import blocking_execution_start_error
+from opencode_session.schema_common import DomainRecord
 from opencode_session.worker_execution import cleanup_created_worker_sessions, execute_worker_attempts
 from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition
 
 
 @dataclass
 class CapabilityProbeOutcome:
-    client: object
-    capabilities: dict
+    client: Any
+    capabilities: DomainRecord
     start_error: Optional[str] = None
 
 
