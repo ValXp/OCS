@@ -7,6 +7,7 @@ from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_state import (
     apply_worker_result,
     create_isolated_timeout_retry_session,
+    mark_worker_active,
     mark_worker_failed,
     mark_worker_timeout,
     schedule_worker_retry,
@@ -94,9 +95,7 @@ def execute_worker_attempts(
             worker["model"] = model
 
     while True:
-        worker["status"] = "active"
-        worker["next_eligible_action"] = "wait"
-        worker["timeout_started_at"] = now() if worker.get("timeout_seconds") else None
+        mark_worker_active(worker, now=now)
         attempt_session_id = worker["session_id"]
         try:
             result = _call_worker_with_timeout(

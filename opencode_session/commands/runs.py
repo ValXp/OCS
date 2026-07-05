@@ -23,6 +23,7 @@ from opencode_session.records import tokens_total as _tokens_total
 from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
 from opencode_session.session_lifecycle import abort_record, format_abort_compact, is_session_not_found_error
+from opencode_session.worker_state import mark_worker_aborted as _mark_worker_aborted
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
@@ -303,9 +304,7 @@ def _abort_run_worker(args, store, *, print_error, unavailable_exit):
             print_error(str(error))
         return unavailable_exit
     abort = abort_record(worker["session_id"], response.data)
-    if abort["accepted"]:
-        worker["status"] = "aborted"
-    worker["abort"] = abort
+    _mark_worker_aborted(worker, abort)
     _refresh_orchestration_run_summary(run)
     _save_orchestration_run(store, run)
     if args.json:

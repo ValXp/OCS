@@ -1,0 +1,67 @@
+import unittest
+
+from opencode_session.worker_state import (
+    mark_dependency_blocked,
+    mark_worker_aborted,
+    mark_worker_active,
+    normalize_worker,
+)
+
+
+class WorkerStateContractTest(unittest.TestCase):
+    def test_normalize_worker_applies_defaults_and_derives_next_action(self):
+        worker = normalize_worker(
+            {
+                "id": "",
+                "status": "failed",
+                "dependencies": "build",
+                "retry_count": "1",
+                "retry_limit": "2",
+                "retryable_failures": ["api"],
+                "last_failure_category": "api",
+            },
+            "review",
+        )
+
+        self.assertEqual(worker["id"], "review")
+        self.assertEqual(worker["status"], "failed")
+        self.assertEqual(worker["dependencies"], [])
+        self.assertEqual(worker["prompt_ids"], [])
+        self.assertEqual(worker["timeout_policy"], "timeout")
+        self.assertEqual(worker["next_eligible_action"], "retry")
+
+    def test_mark_worker_active_sets_waiting_action_and_timeout_start(self):
+        worker = normalize_worker({"timeout_seconds": 30}, "builder")
+
+        mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z")
+
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["next_eligible_action"], "wait")
+        self.assertEqual(worker["timeout_started_at"], "2026-07-04T00:00:00Z")
+
+    def test_mark_dependency_blocked_records_blockers_and_resolution_action(self):
+        worker = normalize_worker({}, "review")
+
+        mark_dependency_blocked(worker, ["dependency:build"])
+
+        self.assertEqual(worker["status"], "blocked")
+        self.assertEqual(worker["blockers"], ["dependency:build"])
+        self.assertEqual(worker["next_eligible_action"], "resolve_blocker")
+
+    def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
+        worker = normalize_worker({"status": "active", "next_eligible_action": "wait"}, "planner")
+
+        mark_worker_aborted(worker, {"accepted": False})
+
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["next_eligible_action"], "wait")
+
+        mark_worker_aborted(worker, {"accepted": True})
+
+        self.assertEqual(worker["status"], "aborted")
+        self.assertEqual(worker["next_eligible_action"], "none")
+        self.assertEqual(worker["abort"], {"accepted": True})
+
+
+if __name__ == "__main__":
+    unittest.main()

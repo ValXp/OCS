@@ -13,6 +13,10 @@ from opencode_session.formatting import (
     format_table as _format_table,
 )
 from opencode_session.status import short_status
+from opencode_session.worker_state import (
+    default_worker as _default_worker,
+    normalize_worker as _normalize_worker,
+)
 
 
 SCHEMA_VERSION = 1
@@ -83,7 +87,7 @@ class RunStore:
                 "timeout_policy",
             ):
                 if changes.get(key) is not None:
-                    worker[key] = short_status(changes[key]) if key == "status" else changes[key]
+                    worker[key] = changes[key]
             for key in ("dependencies", "prompt_ids", "retryable_failures", "blockers", "output_refs"):
                 if changes.get(key) is not None:
                     worker[key] = changes[key]
@@ -379,85 +383,6 @@ def _normalize_run(run, *, fallback_name):
     normalized.setdefault("created_at", None)
     normalized.setdefault("updated_at", None)
     return normalized
-
-
-def _default_worker(worker_id):
-    return {
-        "id": worker_id,
-        "role": None,
-        "session_id": None,
-        "agent": None,
-        "model": None,
-        "dependencies": [],
-        "prompt_ids": [],
-        "status": "queued",
-        "retry_count": 0,
-        "retry_limit": 0,
-        "retryable_failures": [],
-        "timeout_seconds": None,
-        "timeout_policy": "timeout",
-        "timeout_started_at": None,
-        "timed_out_at": None,
-        "failure_category": None,
-        "failure_reason": None,
-        "last_failure_category": None,
-        "last_failure_reason": None,
-        "next_eligible_action": "start",
-        "blockers": [],
-        "output_refs": [],
-    }
-
-
-def _normalize_worker(worker, worker_id):
-    normalized = _default_worker(worker_id)
-    if isinstance(worker, dict):
-        normalized.update(worker)
-    normalized["id"] = normalized.get("id") or worker_id
-    for key in ("dependencies", "prompt_ids", "retryable_failures", "blockers", "output_refs"):
-        value = normalized.get(key)
-        normalized[key] = value if isinstance(value, list) else []
-    if normalized.get("retry_count") is None:
-        normalized["retry_count"] = 0
-    if normalized.get("retry_limit") is None:
-        normalized["retry_limit"] = 0
-    if not normalized.get("timeout_policy"):
-        normalized["timeout_policy"] = "timeout"
-    if not normalized.get("status"):
-        normalized["status"] = "queued"
-    else:
-        normalized["status"] = short_status(normalized["status"])
-    normalized["next_eligible_action"] = _next_eligible_action(normalized)
-    return normalized
-
-
-def _next_eligible_action(worker):
-    status = worker.get("status")
-    if status == "queued":
-        return "start"
-    if status == "active":
-        return "retry" if worker.get("next_eligible_action") == "retry" else "wait"
-    if status == "blocked":
-        return "resolve_blocker"
-    if status == "done":
-        return "collect"
-    if status == "failed" and _retry_available(worker):
-        return "retry"
-    return "none"
-
-
-def _retry_available(worker):
-    retryable = set(worker.get("retryable_failures") or [])
-    if not retryable:
-        return False
-    category = worker.get("failure_category") or worker.get("last_failure_category")
-    if category and category not in retryable and "all" not in retryable:
-        return False
-    try:
-        retry_count = int(worker.get("retry_count") or 0)
-        retry_limit = int(worker.get("retry_limit") or 0)
-    except (TypeError, ValueError):
-        return False
-    return retry_count < retry_limit
 
 
 def _format_worker_compact(worker):

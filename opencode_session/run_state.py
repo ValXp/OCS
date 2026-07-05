@@ -21,6 +21,8 @@ from opencode_session.worker_state import (
     EX_UNSUPPORTED,
     ensure_worker as _ensure_worker,
     exit_code_for_run as _exit_code_for_run,
+    mark_worker_active as _mark_worker_active,
+    mark_worker_failed as _mark_worker_failed,
     refresh_run_summary as _refresh_run_summary,
 )
 
@@ -68,7 +70,7 @@ class SingleWorkerRunStateService:
         worker = _ensure_worker(run, request.worker_id, role=request.role)
         worker["prompt"] = request.prompt
         run["status"] = "active"
-        worker["status"] = "active"
+        _mark_worker_active(worker)
         self._save(run)
 
         created_session_ids = []
@@ -145,13 +147,7 @@ class SingleWorkerRunStateService:
 
 
 def _mark_orchestration_failed(worker, error):
-    worker["status"] = "failed"
-    worker["error"] = error
-    worker["failure_category"] = "api"
-    worker["failure_reason"] = error
-    worker["last_failure_category"] = "api"
-    worker["last_failure_reason"] = error
-    worker["next_eligible_action"] = "none"
+    _mark_worker_failed(worker, "api", error, retryable=False)
 
 
 def _server_default():

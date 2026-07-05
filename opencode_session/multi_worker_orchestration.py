@@ -25,6 +25,8 @@ from opencode_session.worker_state import (
     EX_UNSUPPORTED,
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
+    mark_dependency_blocked as _mark_dependency_blocked,
+    mark_worker_active as _mark_worker_active,
     mark_worker_failed as _mark_worker_failed,
     refresh_run_summary as _refresh_worker_run_summary,
     worker_prompt as _worker_prompt,
@@ -106,8 +108,7 @@ class MultiWorkerRunOrchestrationService:
                     break
 
                 for worker in ready_workers:
-                    worker["status"] = "active"
-                    worker["next_eligible_action"] = "wait"
+                    _mark_worker_active(worker)
                 self._save(run)
 
                 for worker in ready_workers:
@@ -253,7 +254,7 @@ def _mark_invalid_dependency_graph_workers(run):
         for worker_id in set(cycle[:-1]):
             worker = workers.get(worker_id)
             if _blockable_prompted_worker(worker):
-                _mark_worker_blocked(worker, [blocker])
+                _mark_dependency_blocked(worker, [blocker])
                 invalid_worker_ids.add(worker_id)
 
     for worker_id in sorted(workers):
@@ -262,7 +263,7 @@ def _mark_invalid_dependency_graph_workers(run):
         worker = workers.get(worker_id)
         blockers = _non_runnable_dependency_blockers(worker, workers)
         if blockers and _blockable_prompted_worker(worker):
-            _mark_worker_blocked(worker, blockers)
+            _mark_dependency_blocked(worker, blockers)
             invalid_worker_ids.add(worker_id)
 
     while True:
@@ -279,7 +280,7 @@ def _mark_invalid_dependency_graph_workers(run):
                 if dependency in invalid_worker_ids
             ]
             if blockers and _blockable_prompted_worker(worker):
-                _mark_worker_blocked(worker, blockers)
+                _mark_dependency_blocked(worker, blockers)
                 newly_blocked.add(worker_id)
         if not newly_blocked:
             break
@@ -314,7 +315,7 @@ def _mark_dependency_blocked_workers(run):
         if worker.get("status") in {"done", "failed", "aborted", "timeout"}:
             continue
         if _dependencies_failed(worker, workers):
-            _mark_worker_blocked(worker, [f"dependency:{dependency}" for dependency in worker.get("dependencies", [])])
+            _mark_dependency_blocked(worker, [f"dependency:{dependency}" for dependency in worker.get("dependencies", [])])
 
 
 def _dependency_cycles(workers):
@@ -350,12 +351,6 @@ def _blockable_prompted_worker(worker):
         and _worker_prompt(worker)
         and worker.get("status") not in {"done", "failed", "aborted", "timeout"}
     )
-
-
-def _mark_worker_blocked(worker, blockers):
-    worker["status"] = "blocked"
-    worker["blockers"] = blockers
-    worker["next_eligible_action"] = "resolve_blocker"
 
 
 def _dependencies_done(worker, workers):
