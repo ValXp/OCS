@@ -19,10 +19,6 @@ from opencode_session.worker_execution import RETRY_SCHEDULED
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_model import is_executable_worker
 from opencode_session.worker_state import (
-    EX_ABORTED,
-    EX_BLOCKED,
-    EX_PARTIAL,
-    EX_TIMEOUT,
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,
     WorkerTransition,
@@ -85,107 +81,56 @@ class WorkerBatchExecutionResult:
     fail_fast_outcome: object = None
 
 
-class DependencyOrderedSerialRunOrchestrationService:
-    """Run prompted workers one at a time after their dependencies are satisfied."""
-
-    def __init__(
-        self,
-        store,
-        *,
-        client_factory=OpenCodeApiClient,
-        capability_detector=detect_capabilities,
-        executor=execute_blocking_prompt,
-        now=None,
-    ):
-        self.store = store
-        self.client_factory = client_factory
-        self.capability_detector = capability_detector
-        self.executor = executor
-        self.now = now or _utc_now
-        self.core = RunStartCore(
-            persist_worker_update=self._persist_worker_update,
-            refresh_run_summary=refresh_orchestration_run_summary,
-            client_factory=self.client_factory,
-            capability_detector=self.capability_detector,
-            executor=self.executor,
-            now=self.now,
+class DependencySchedulePlanner:
+    def plan(self, workers):
+        workers = workers if isinstance(workers, dict) else {}
+        analysis = analyze_worker_dependencies(workers)
+        blocked_worker_ids = set(analysis.blockers_by_worker_id)
+        return DependencyScheduleTick(
+            ready_worker_ids=analysis.ready_worker_ids,
+            dependency_blocked_transitions=tuple(
+                _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
+                for worker_id in sorted(blocked_worker_ids)
+                if isinstance(workers.get(worker_id), dict)
+            ),
+            has_pending_workers=bool(_pending_prompted_worker_ids(workers, blocked_worker_ids=blocked_worker_ids)),
+            blockers_by_worker_id=analysis.blockers_by_worker_id,
         )
 
-    def start(self, request):
-        run = self.store.load_run(request.name)
-        execution_policy = _normalize_execution_policy(request.execution_policy)
 
-        def prepare(latest_run):
-            if request.directory is not None:
-                latest_run["directory"] = str(Path(request.directory).resolve())
-            if request.server_url is not None:
-                latest_run["server_url"] = request.server_url
-            if request.session_id is not None or request.agent is not None or request.model is not None:
-                worker = _ensure_orchestration_worker(latest_run, request.worker_id, role=request.role)
-                if request.session_id is not None:
-                    worker["session_id"] = request.session_id
-                if request.agent is not None:
-                    worker["agent"] = request.agent
-                if request.model is not None:
-                    worker["model"] = request.model
+class DurableDependencyScheduler:
+    def __init__(self, store, *, now, planner=None):
+        self.store = store
+        self.now = now
+        self.planner = planner or DependencySchedulePlanner()
 
-        run = self._persist_mutation(run, prepare)
-        if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):
-            raise RunStoreError(f"run '{request.name}' has no worker prompts; pass --prompt or add workers with --prompt")
-        return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
-
-    def _start_prompted_workers(self, run, *, cleanup=False, execution_policy=EXECUTION_POLICY_FAIL_FAST):
-        schedule_tick = self._persist_schedule_tick(run)
-        early_outcome = self._outcome_if_no_ready_workers(run, schedule_tick)
-        if early_outcome is not None:
-            return early_outcome
-
-        execution_state = None
-
-        try:
-            probe_outcome = self._probe_execution(run)
-            if probe_outcome.start_error is not None:
-                return self._unsupported_probe_outcome(run, probe_outcome)
-
-            execution_state = OrchestrationExecutionState(probe_outcome.client, probe_outcome.capabilities)
-            self._activate_run(run)
-            fail_fast_outcome = self._execute_scheduled_workers(
+    def persist_next_tick(self, run):
+        tick = self.planner.plan(run.get("workers", {}))
+        if tick.dependency_blocked_transitions:
+            persist_worker_transitions(
+                self.store,
                 run,
-                schedule_tick,
-                execution_state,
-                cleanup=cleanup,
-                execution_policy=execution_policy,
+                tick.dependency_blocked_transitions,
+                refresh_run_summary=refresh_orchestration_run_summary,
+                now=self.now,
             )
-            if fail_fast_outcome is not None:
-                cleanup_error = self._cleanup_after_execution(run, execution_state, cleanup=cleanup)
-                return cleanup_error or self._execution_outcome(run, fail_fast_outcome)
-        except OpenCodeApiError as error:
-            self._mark_prompted_workers_failed(run, str(error))
-            cleanup_error = self._cleanup_after_execution(run, execution_state, cleanup=cleanup)
-            if cleanup_error:
-                return cleanup_error
-            return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
+        else:
+            persist_run_summary(
+                self.store,
+                run,
+                refresh_run_summary=refresh_orchestration_run_summary,
+                now=self.now,
+            )
+        return tick
 
-        cleanup_error = self._cleanup_after_execution(run, execution_state, cleanup=cleanup)
-        return cleanup_error or self._execution_outcome(run, execution_state.first_error_outcome)
 
-    def _outcome_if_no_ready_workers(self, run, schedule_tick):
-        if schedule_tick.ready_worker_ids:
-            return None
-        return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+class WorkerExecutionCoordinator:
+    def __init__(self, core, scheduler, *, persist_summary):
+        self.core = core
+        self.scheduler = scheduler
+        self.persist_summary = persist_summary
 
-    def _probe_execution(self, run):
-        return self.core.probe_capabilities(run)
-
-    def _unsupported_probe_outcome(self, run, probe_outcome):
-        self._mark_prompted_workers_failed(run, probe_outcome.start_error)
-        return DependencyOrderedSerialRunStartOutcome(run, EX_UNSUPPORTED, probe_outcome.start_error)
-
-    def _activate_run(self, run):
-        run["status"] = "active"
-        self._persist_mutation(run, _mark_run_active)
-
-    def _execute_scheduled_workers(self, run, schedule_tick, execution_state, *, cleanup, execution_policy):
+    def execute_scheduled_workers(self, run, schedule_tick, execution_state, *, cleanup, execution_policy):
         while schedule_tick.ready_worker_ids:
             outcome = self._execute_schedule_tick(
                 run,
@@ -194,13 +139,22 @@ class DependencyOrderedSerialRunOrchestrationService:
                 cleanup=cleanup,
                 execution_policy=execution_policy,
             )
-            schedule_tick = self._persist_schedule_tick(run)
+            schedule_tick = self.scheduler.persist_next_tick(run)
             if outcome is not None:
                 if execution_state.first_error_outcome is None:
                     execution_state.first_error_outcome = outcome
                 if execution_policy == EXECUTION_POLICY_FAIL_FAST:
                     return outcome
         return None
+
+    def cleanup_after_execution(self, run, execution_state, *, cleanup):
+        if not cleanup or execution_state is None or not execution_state.created_session_ids_by_worker:
+            return None
+        return self._cleanup_created_workers(
+            execution_state.client,
+            run,
+            execution_state.created_session_ids_by_worker,
+        )
 
     def _execute_schedule_tick(self, run, schedule_tick, execution_state, *, cleanup, execution_policy):
         ready_workers = _workers_by_ids(run.get("workers", {}), schedule_tick.ready_worker_ids)
@@ -212,22 +166,6 @@ class DependencyOrderedSerialRunOrchestrationService:
             cleanup=cleanup,
             created_session_ids_by_worker=execution_state.created_session_ids_by_worker,
             execution_policy=execution_policy,
-        )
-
-    def _cleanup_after_execution(self, run, execution_state, *, cleanup):
-        if not cleanup or execution_state is None or not execution_state.created_session_ids_by_worker:
-            return None
-        return self._cleanup_created_workers(
-            execution_state.client,
-            run,
-            execution_state.created_session_ids_by_worker,
-        )
-
-    def _execution_outcome(self, run, first_error_outcome):
-        return DependencyOrderedSerialRunStartOutcome(
-            run,
-            _exit_code_for_orchestration_run(run),
-            first_error_outcome.error if first_error_outcome is not None else None,
         )
 
     def _execute_ready_workers_serially(
@@ -257,7 +195,7 @@ class DependencyOrderedSerialRunOrchestrationService:
                 first_error_outcome = batch_result.first_error_outcome
             if batch_result.fail_fast_outcome is not None:
                 return batch_result.fail_fast_outcome
-            self._persist_summary(run)
+            self.persist_summary(run)
             attempt_workers = list(batch_result.retry_workers)
         return first_error_outcome
 
@@ -327,24 +265,124 @@ class DependencyOrderedSerialRunOrchestrationService:
             return DependencyOrderedSerialRunStartOutcome(run, cleanup_failure.exit_code, cleanup_failure.error)
         return None
 
+
+class DependencyOrderedSerialRunOrchestrationService:
+    """Run prompted workers one at a time after their dependencies are satisfied."""
+
+    def __init__(
+        self,
+        store,
+        *,
+        client_factory=OpenCodeApiClient,
+        capability_detector=detect_capabilities,
+        executor=execute_blocking_prompt,
+        now=None,
+    ):
+        self.store = store
+        self.client_factory = client_factory
+        self.capability_detector = capability_detector
+        self.executor = executor
+        self.now = now or _utc_now
+        self.scheduler = DurableDependencyScheduler(self.store, now=self.now)
+        self.core = RunStartCore(
+            persist_worker_update=self._persist_worker_update,
+            refresh_run_summary=refresh_orchestration_run_summary,
+            client_factory=self.client_factory,
+            capability_detector=self.capability_detector,
+            executor=self.executor,
+            now=self.now,
+        )
+        self.execution = WorkerExecutionCoordinator(
+            self.core,
+            self.scheduler,
+            persist_summary=self._persist_summary,
+        )
+
+    def start(self, request):
+        run = self.store.load_run(request.name)
+        execution_policy = _normalize_execution_policy(request.execution_policy)
+
+        def prepare(latest_run):
+            if request.directory is not None:
+                latest_run["directory"] = str(Path(request.directory).resolve())
+            if request.server_url is not None:
+                latest_run["server_url"] = request.server_url
+            if request.session_id is not None or request.agent is not None or request.model is not None:
+                worker = _ensure_orchestration_worker(latest_run, request.worker_id, role=request.role)
+                if request.session_id is not None:
+                    worker["session_id"] = request.session_id
+                if request.agent is not None:
+                    worker["agent"] = request.agent
+                if request.model is not None:
+                    worker["model"] = request.model
+
+        run = self._persist_mutation(run, prepare)
+        if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):
+            raise RunStoreError(f"run '{request.name}' has no worker prompts; pass --prompt or add workers with --prompt")
+        return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
+
+    def _start_prompted_workers(self, run, *, cleanup=False, execution_policy=EXECUTION_POLICY_FAIL_FAST):
+        schedule_tick = self.scheduler.persist_next_tick(run)
+        early_outcome = self._outcome_if_no_ready_workers(run, schedule_tick)
+        if early_outcome is not None:
+            return early_outcome
+
+        execution_state = None
+
+        try:
+            probe_outcome = self._probe_execution(run)
+            if probe_outcome.start_error is not None:
+                return self._unsupported_probe_outcome(run, probe_outcome)
+
+            execution_state = OrchestrationExecutionState(probe_outcome.client, probe_outcome.capabilities)
+            self._activate_run(run)
+            fail_fast_outcome = self.execution.execute_scheduled_workers(
+                run,
+                schedule_tick,
+                execution_state,
+                cleanup=cleanup,
+                execution_policy=execution_policy,
+            )
+            if fail_fast_outcome is not None:
+                cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+                return cleanup_error or self._execution_outcome(run, fail_fast_outcome)
+        except OpenCodeApiError as error:
+            self._mark_prompted_workers_failed(run, str(error))
+            cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+            if cleanup_error:
+                return cleanup_error
+            return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
+
+        cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+        return cleanup_error or self._execution_outcome(run, execution_state.first_error_outcome)
+
+    def _outcome_if_no_ready_workers(self, run, schedule_tick):
+        if schedule_tick.ready_worker_ids:
+            return None
+        return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+
+    def _probe_execution(self, run):
+        return self.core.probe_capabilities(run)
+
+    def _unsupported_probe_outcome(self, run, probe_outcome):
+        self._mark_prompted_workers_failed(run, probe_outcome.start_error)
+        return DependencyOrderedSerialRunStartOutcome(run, EX_UNSUPPORTED, probe_outcome.start_error)
+
+    def _activate_run(self, run):
+        run["status"] = "active"
+        self._persist_mutation(run, _mark_run_active)
+
+    def _execution_outcome(self, run, first_error_outcome):
+        return DependencyOrderedSerialRunStartOutcome(
+            run,
+            _exit_code_for_orchestration_run(run),
+            first_error_outcome.error if first_error_outcome is not None else None,
+        )
+
     def _mark_prompted_workers_failed(self, run, error):
         workers = _pending_prompted_workers(run.get("workers", {}))
         transitions = mark_orchestration_start_failed(run, workers, error)
         self._persist_transitions(run, transitions)
-
-    def _persist_schedule_tick(self, run):
-        tick = schedule_dependency_ordered_tick(run.get("workers", {}))
-        if tick.dependency_blocked_transitions:
-            persist_worker_transitions(
-                self.store,
-                run,
-                tick.dependency_blocked_transitions,
-                refresh_run_summary=refresh_orchestration_run_summary,
-                now=self.now,
-            )
-        else:
-            self._persist_summary(run)
-        return tick
 
     def _persist_mutation(self, run, mutator):
         return persist_run_mutation(self.store, run, mutator, now=self.now)
@@ -367,15 +405,6 @@ class DependencyOrderedSerialRunOrchestrationService:
             now=self.now,
         )
 
-    def _persist_workers(self, run, workers):
-        persist_worker_updates(
-            self.store,
-            run,
-            workers,
-            refresh_run_summary=refresh_orchestration_run_summary,
-            now=self.now,
-        )
-
     def _persist_summary(self, run):
         persist_run_summary(
             self.store,
@@ -394,19 +423,7 @@ def _mark_run_active(run):
 
 
 def schedule_dependency_ordered_tick(workers):
-    workers = workers if isinstance(workers, dict) else {}
-    analysis = analyze_worker_dependencies(workers)
-    blocked_worker_ids = set(analysis.blockers_by_worker_id)
-    return DependencyScheduleTick(
-        ready_worker_ids=analysis.ready_worker_ids,
-        dependency_blocked_transitions=tuple(
-            _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
-            for worker_id in sorted(blocked_worker_ids)
-            if isinstance(workers.get(worker_id), dict)
-        ),
-        has_pending_workers=bool(_pending_prompted_worker_ids(workers, blocked_worker_ids=blocked_worker_ids)),
-        blockers_by_worker_id=analysis.blockers_by_worker_id,
-    )
+    return DependencySchedulePlanner().plan(workers)
 
 
 def _workers_by_ids(workers, worker_ids):
