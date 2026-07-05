@@ -24,13 +24,52 @@ def persist_worker_updates(store, run, workers, *, refresh_run_summary, now):
     def update(latest_run):
         latest_workers = latest_run.setdefault("workers", {})
         for worker_id, worker_record in worker_records.items():
-            latest_workers[worker_id] = deepcopy(worker_record)
+            latest_workers[worker_id] = merge_worker_transition(latest_workers.get(worker_id), worker_record)
         refresh_run_summary(latest_run)
         latest_run["updated_at"] = now()
 
     persisted = store.update_run(name, update)
     replace_mapping_in_place(run, persisted)
     return [run["workers"][worker_id] for worker_id in worker_records if worker_id in run.get("workers", {})]
+
+
+def merge_worker_transition(latest_worker, worker_record):
+    if not isinstance(latest_worker, dict):
+        return deepcopy(worker_record)
+    if _accepted_abort(latest_worker) and not _accepted_abort(worker_record):
+        return _merge_into_aborted_worker(latest_worker, worker_record)
+
+    merged = deepcopy(latest_worker)
+    merged.update(deepcopy(worker_record))
+    _merge_unique_list_field(merged, latest_worker, worker_record, "prompt_ids")
+    if "abort" not in worker_record and "abort" in latest_worker:
+        merged["abort"] = deepcopy(latest_worker["abort"])
+    return merged
+
+
+def _merge_into_aborted_worker(latest_worker, worker_record):
+    merged = deepcopy(latest_worker)
+    _merge_unique_list_field(merged, latest_worker, worker_record, "prompt_ids")
+    if "cleanup" in worker_record:
+        merged["cleanup"] = deepcopy(worker_record["cleanup"])
+    return merged
+
+
+def _accepted_abort(worker):
+    abort = worker.get("abort") if isinstance(worker, dict) else None
+    return isinstance(abort, dict) and abort.get("accepted") and worker.get("status") == "aborted"
+
+
+def _merge_unique_list_field(target, latest_worker, worker_record, field):
+    merged_values = []
+    for source in (latest_worker, worker_record):
+        values = source.get(field) if isinstance(source, dict) else None
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if value not in merged_values:
+                merged_values.append(deepcopy(value))
+    target[field] = merged_values
 
 
 def persist_run_summary(store, run, *, refresh_run_summary, now):

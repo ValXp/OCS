@@ -4,7 +4,7 @@ import unittest
 
 from opencode_session.run_persistence import persist_worker_update
 from opencode_session.run_store import RunStore
-from opencode_session.worker_state import refresh_run_summary
+from opencode_session.worker_state import mark_worker_aborted, refresh_run_summary
 
 
 class RunStoreConcurrencyTest(unittest.TestCase):
@@ -100,6 +100,78 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(persisted["workers"]["docs"]["prompt_ids"], ["prompt-docs"])
         self.assertEqual(persisted["workers"]["build"]["status"], "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
+
+    def test_worker_patch_preserves_concurrent_prompt_id_on_same_worker(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active")
+            run = run_store.load_run("demo")
+
+            run_store.update_run(
+                "demo",
+                lambda latest_run: latest_run["workers"]["build"]["prompt_ids"].append("prompt-steer"),
+            )
+            build_worker = run["workers"]["build"]
+            build_worker["status"] = "done"
+            build_worker["prompt_ids"] = ["prompt-build"]
+            build_worker["result"] = {
+                "session_id": "ses_build",
+                "status": "done",
+                "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
+            }
+            build_worker["output_refs"] = ["assistant:msg_build"]
+            persist_worker_update(
+                run_store,
+                run,
+                build_worker,
+                refresh_run_summary=refresh_run_summary,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            persisted = RunStore(store).load_run("demo")
+
+        self.assertEqual(persisted["workers"]["build"]["prompt_ids"], ["prompt-steer", "prompt-build"])
+        self.assertEqual(persisted["workers"]["build"]["status"], "done")
+
+    def test_worker_patch_does_not_overwrite_concurrent_abort(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active", session_id="ses_build")
+            run = run_store.load_run("demo")
+
+            def abort_build(latest_run):
+                mark_worker_aborted(
+                    latest_run["workers"]["build"],
+                    {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}},
+                )
+
+            run_store.update_run("demo", abort_build)
+            build_worker = run["workers"]["build"]
+            build_worker["status"] = "done"
+            build_worker["result"] = {
+                "session_id": "ses_build",
+                "status": "done",
+                "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
+            }
+            build_worker["output_refs"] = ["assistant:msg_build"]
+            persist_worker_update(
+                run_store,
+                run,
+                build_worker,
+                refresh_run_summary=refresh_run_summary,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            persisted = RunStore(store).load_run("demo")
+
+        build = persisted["workers"]["build"]
+        self.assertEqual(build["status"], "aborted")
+        self.assertEqual(build["abort"], {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}})
+        self.assertNotIn("result", build)
+        self.assertEqual(persisted["status"], "aborted")
+        self.assertEqual(persisted["output_refs"], [])
 
 if __name__ == "__main__":
     unittest.main()
