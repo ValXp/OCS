@@ -129,6 +129,112 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(worker["retryable_failures"], ["api"])
         self.assertEqual(worker["next_eligible_action"], "none")
 
+    def test_start_keeps_failed_dependency_blocker_when_capability_probe_fails(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Run the implementation",
+                status="failed",
+            )
+            store.upsert_worker(
+                "demo",
+                "review",
+                role="review",
+                prompt="Review the implementation",
+                dependencies=["build"],
+            )
+            store.upsert_worker(
+                "demo",
+                "docs",
+                role="write",
+                prompt="Draft the release notes",
+            )
+            client = FakeClient([])
+            detector_calls = []
+
+            def detect_capabilities(client):
+                detector_calls.append(client)
+                raise OpenCodeApiError("capability probe failed")
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=detect_capabilities,
+                executor=lambda *args, **kwargs: self.fail("blocked worker should not execute"),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(outcome.error, "api failure: capability probe failed")
+        self.assertEqual(detector_calls, [client])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["workers"]["build"]["status"], "failed")
+        self.assertEqual(run["workers"]["docs"]["status"], "failed")
+        self.assertEqual(run["workers"]["docs"]["failure_category"], "api")
+        review = run["workers"]["review"]
+        self.assertEqual(review["status"], "blocked")
+        self.assertEqual(review["blockers"], ["dependency:build"])
+        self.assertEqual(review["next_eligible_action"], "resolve_blocker")
+        self.assertIsNone(review.get("failure_category"))
+        self.assertIsNone(review.get("error"))
+
+    def test_start_keeps_missing_dependency_blocker_when_capability_probe_fails(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "review",
+                role="review",
+                prompt="Review the implementation",
+                dependencies=["build"],
+            )
+            store.upsert_worker(
+                "demo",
+                "docs",
+                role="write",
+                prompt="Draft the release notes",
+            )
+            client = FakeClient([])
+            detector_calls = []
+
+            def detect_capabilities(client):
+                detector_calls.append(client)
+                raise OpenCodeApiError("capability probe failed")
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=detect_capabilities,
+                executor=lambda *args, **kwargs: self.fail("blocked worker should not execute"),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(outcome.error, "api failure: capability probe failed")
+        self.assertEqual(detector_calls, [client])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["workers"]["docs"]["status"], "failed")
+        self.assertEqual(run["workers"]["docs"]["failure_category"], "api")
+        review = run["workers"]["review"]
+        self.assertEqual(review["status"], "blocked")
+        self.assertEqual(review["blockers"], ["dependency:build"])
+        self.assertEqual(review["next_eligible_action"], "resolve_blocker")
+        self.assertIsNone(review.get("failure_category"))
+        self.assertIsNone(review.get("error"))
+
     def test_start_executes_each_ready_worker_through_blocking_executor(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:

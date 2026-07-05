@@ -87,10 +87,12 @@ class MultiWorkerRunOrchestrationService:
     def _start_prompted_workers(self, run, *, cleanup=False):
         created_session_ids_by_worker = {}
         client = None
-        if _mark_invalid_dependency_graph_workers(run):
+        dependency_analysis = _mark_dependency_blocked_workers(run)
+        if dependency_analysis.blockers_by_worker_id or not dependency_analysis.ready_worker_ids:
             refresh_orchestration_run_summary(run)
             self._save(run)
-            return MultiWorkerRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+            if not dependency_analysis.ready_worker_ids:
+                return MultiWorkerRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
         try:
             client = self.client_factory(run["server_url"])
@@ -205,7 +207,7 @@ class MultiWorkerRunOrchestrationService:
         return None
 
     def _mark_prompted_workers_failed(self, run, error):
-        mark_orchestration_start_failed(run, _prompted_unfinished_workers(run), error)
+        mark_orchestration_start_failed(run, _pending_prompted_workers(run.get("workers", {})), error)
         self._save(run)
 
     def _save(self, run):
@@ -237,31 +239,14 @@ def _pending_prompted_workers(workers):
     ]
 
 
-def _prompted_unfinished_workers(run):
-    return [
-        worker
-        for worker in run.get("workers", {}).values()
-        if isinstance(worker, dict) and _worker_prompt(worker) and worker.get("status") not in {"done", "failed"}
-    ]
-
-
-def _mark_invalid_dependency_graph_workers(run):
-    workers = run.get("workers", {})
-    analysis = analyze_worker_dependencies(workers)
-    for worker_id in sorted(analysis.invalid_graph_blockers_by_worker_id):
-        worker = workers.get(worker_id)
-        if isinstance(worker, dict):
-            _mark_dependency_blocked(worker, analysis.invalid_graph_blockers_by_worker_id[worker_id])
-    return bool(analysis.invalid_graph_blockers_by_worker_id)
-
-
 def _mark_dependency_blocked_workers(run):
     workers = run.get("workers", {})
     analysis = analyze_worker_dependencies(workers)
-    for worker_id in sorted(analysis.dependency_blockers_by_worker_id):
+    for worker_id in sorted(analysis.blockers_by_worker_id):
         worker = workers.get(worker_id)
         if isinstance(worker, dict):
-            _mark_dependency_blocked(worker, analysis.dependency_blockers_by_worker_id[worker_id])
+            _mark_dependency_blocked(worker, analysis.blockers_by_worker_id[worker_id])
+    return analysis
 
 
 def _created_session_ids(created_session_ids_by_worker, worker):
