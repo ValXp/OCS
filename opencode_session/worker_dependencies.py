@@ -125,6 +125,8 @@ def _invalid_graph_blockers(workers, cycles):
 
 def _dependency_blockers(workers):
     blockers_by_worker_id = {}
+    blocked_worker_ids = set()
+
     for worker_id in sorted(workers):
         worker = workers.get(worker_id)
         if not _dependency_blockable_prompted_worker(worker):
@@ -136,6 +138,28 @@ def _dependency_blockers(workers):
                 blockers.append(f"dependency:{dependency}")
         if blockers:
             blockers_by_worker_id[worker_id] = tuple(blockers)
+            blocked_worker_ids.add(worker_id)
+
+    while True:
+        newly_blocked = set()
+        for worker_id in sorted(workers):
+            if worker_id in blocked_worker_ids:
+                continue
+            worker = workers.get(worker_id)
+            if not _dependency_blockable_prompted_worker(worker):
+                continue
+            blockers = [
+                f"dependency:{dependency}"
+                for dependency in _worker_dependencies(worker)
+                if dependency in blocked_worker_ids
+            ]
+            if blockers:
+                blockers_by_worker_id[worker_id] = tuple(blockers)
+                newly_blocked.add(worker_id)
+        if not newly_blocked:
+            break
+        blocked_worker_ids.update(newly_blocked)
+
     return blockers_by_worker_id
 
 

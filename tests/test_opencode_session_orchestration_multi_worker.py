@@ -37,6 +37,52 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             {"review": ("dependency-cycle:build->review->build",)},
         )
 
+    def test_dependency_blockers_propagate_through_failed_and_missing_chains(self):
+        workers = {
+            "deploy": {
+                "id": "deploy",
+                "prompt": "Deploy the reviewed implementation",
+                "status": "queued",
+                "dependencies": ["review"],
+            },
+            "review": {
+                "id": "review",
+                "prompt": "Review the implementation",
+                "status": "queued",
+                "dependencies": ["build"],
+            },
+            "build": {
+                "id": "build",
+                "prompt": "Run the implementation",
+                "status": "failed",
+            },
+            "publish": {
+                "id": "publish",
+                "prompt": "Publish the docs",
+                "status": "queued",
+                "dependencies": ["docs"],
+            },
+            "docs": {
+                "id": "docs",
+                "prompt": "Draft the docs",
+                "status": "queued",
+                "dependencies": ["missing"],
+            },
+        }
+
+        analysis = analyze_worker_dependencies(workers)
+
+        expected_blockers = {
+            "deploy": ("dependency:review",),
+            "docs": ("dependency:missing",),
+            "publish": ("dependency:docs",),
+            "review": ("dependency:build",),
+        }
+        self.assertEqual(analysis.ready_worker_ids, ())
+        self.assertEqual(analysis.invalid_graph_blockers_by_worker_id, {})
+        self.assertEqual(analysis.dependency_blockers_by_worker_id, expected_blockers)
+        self.assertEqual(analysis.blockers_by_worker_id, expected_blockers)
+
 
 class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
     def test_start_unsupported_blocking_execution_is_not_retryable(self):
@@ -214,6 +260,82 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(review["next_eligible_action"], "resolve_blocker")
         self.assertIsNone(review.get("failure_category"))
         self.assertIsNone(review.get("error"))
+
+    def test_start_blocks_failed_and_missing_dependency_chains_before_probe(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Run the implementation",
+                status="failed",
+            )
+            store.upsert_worker(
+                "demo",
+                "review",
+                role="review",
+                prompt="Review the implementation",
+                dependencies=["build"],
+            )
+            store.upsert_worker(
+                "demo",
+                "deploy",
+                role="deploy",
+                prompt="Deploy the reviewed implementation",
+                dependencies=["review"],
+            )
+            store.upsert_worker(
+                "demo",
+                "docs",
+                role="write",
+                prompt="Draft the docs",
+                dependencies=["missing"],
+            )
+            store.upsert_worker(
+                "demo",
+                "publish",
+                role="publish",
+                prompt="Publish the docs",
+                dependencies=["docs"],
+            )
+            client = FakeClient([])
+            detector_calls = []
+
+            def detect_capabilities(client):
+                detector_calls.append(client)
+                return CAPABILITIES
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=detect_capabilities,
+                executor=lambda *args, **kwargs: self.fail("locally blocked run should not execute workers"),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="deploy", role="deploy"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertIsNone(outcome.error)
+        self.assertEqual(detector_calls, [])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["workers"]["build"]["status"], "failed")
+        self.assertEqual(run["workers"]["review"]["status"], "blocked")
+        self.assertEqual(run["workers"]["review"]["blockers"], ["dependency:build"])
+        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+        self.assertEqual(run["workers"]["deploy"]["status"], "blocked")
+        self.assertEqual(run["workers"]["deploy"]["blockers"], ["dependency:review"])
+        self.assertEqual(run["workers"]["deploy"]["next_eligible_action"], "resolve_blocker")
+        self.assertEqual(run["workers"]["docs"]["status"], "blocked")
+        self.assertEqual(run["workers"]["docs"]["blockers"], ["dependency:missing"])
+        self.assertEqual(run["workers"]["docs"]["next_eligible_action"], "resolve_blocker")
+        self.assertEqual(run["workers"]["publish"]["status"], "blocked")
+        self.assertEqual(run["workers"]["publish"]["blockers"], ["dependency:docs"])
+        self.assertEqual(run["workers"]["publish"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_blocks_only_failed_dependency_when_another_dependency_is_done(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
