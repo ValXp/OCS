@@ -5,31 +5,23 @@ from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import (
-    BlockingProviderFailure,
     blocking_execution_strategy,
     execute_blocking_prompt,
     unsupported_blocking_execution_message,
 )
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.run_store import DEFAULT_SERVER_URL, RunStoreError
-from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
+from opencode_session.worker_execution import (
+    WorkerExecutionTimeout,
+    cleanup_created_worker_sessions,
+    execute_worker_attempts,
+)
 from opencode_session.worker_state import (
-    EX_ABORTED,
-    EX_BLOCKED,
-    EX_PARTIAL,
-    EX_TIMEOUT,
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,
-    apply_worker_result as _apply_worker_result,
-    create_isolated_timeout_retry_session as _create_isolated_timeout_retry_session,
     ensure_worker as _ensure_worker,
     exit_code_for_run as _exit_code_for_run,
-    mark_worker_failed as _mark_worker_failed,
-    mark_worker_timeout as _mark_worker_timeout,
     refresh_run_summary as _refresh_run_summary,
-    schedule_worker_retry as _schedule_worker_retry,
-    session_value as _session_value,
-    worker_timeout_reason as _worker_timeout_reason,
 )
 
 
@@ -53,10 +45,6 @@ class SingleWorkerRunStartOutcome:
     run: dict
     exit_code: int
     error: Optional[str] = None
-
-
-class WorkerExecutionTimeout(TimeoutExpired):
-    pass
 
 
 class SingleWorkerRunStateService:
@@ -95,113 +83,41 @@ class SingleWorkerRunStateService:
                 return SingleWorkerRunStartOutcome(run, EX_UNSUPPORTED, message)
 
             session_id = request.session_id or worker.get("session_id")
-            if session_id is None:
-                create_response = client.create_session_response(run["directory"], agent=request.agent, model=request.model)
-                session_id = _session_value(create_response.data, "id", "sessionID", "sessionId")
-                if session_id is not None:
-                    created_session_ids.append(session_id)
+            outcome = execute_worker_attempts(
+                client,
+                run,
+                worker,
+                request.prompt,
+                capabilities,
+                executor=self.executor,
+                now=self.now,
+                session_id=session_id,
+                agent=request.agent,
+                model=request.model,
+                on_worker_update=lambda: self._save(run),
+            )
         except OpenCodeApiError as error:
             run["status"] = "failed"
             _mark_orchestration_failed(worker, str(error))
             self._save(run)
             return SingleWorkerRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
-        worker["session_id"] = session_id
-        self._save(run)
-
-        if request.agent is not None:
-            worker["agent"] = request.agent
-        if request.model is not None:
-            worker["model"] = request.model
-
-        while True:
-            worker["status"] = "active"
-            worker["next_eligible_action"] = "wait"
-            worker["timeout_started_at"] = self.now() if worker.get("timeout_seconds") else None
-            attempt_session_id = session_id
-            try:
-                result = _call_worker_with_timeout(
-                    worker,
-                    lambda attempt_session_id=attempt_session_id: self.executor(
-                        client,
-                        attempt_session_id,
-                        request.prompt,
-                        capabilities,
-                    ),
-                )
-            except WorkerExecutionTimeout:
-                reason = _worker_timeout_reason(worker)
-                if _schedule_worker_retry(worker, "timeout", reason):
-                    timed_out_at = self.now()
-                    worker["timed_out_at"] = timed_out_at
-                    try:
-                        session_id = _create_isolated_timeout_retry_session(
-                            client,
-                            run,
-                            worker,
-                            reason,
-                            timed_out_at,
-                            agent=request.agent,
-                            model=request.model,
-                        )
-                    except OpenCodeApiError as error:
-                        message = f"timeout retry session creation failed: {error}"
-                        _mark_worker_failed(worker, "api", message)
-                        _refresh_run_summary(run)
-                        self._save(run)
-                        return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), f"api failure: {message}")
-                    created_session_ids.append(session_id)
-                    self._save(run)
-                    continue
-                _mark_worker_timeout(worker, reason, self.now)
-                _refresh_run_summary(run)
-                self._save(run)
-                return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), reason)
-            except OpenCodeApiError as error:
-                if _schedule_worker_retry(worker, "api", str(error)):
-                    self._save(run)
-                    continue
-                _mark_worker_failed(worker, "api", str(error))
-                _refresh_run_summary(run)
-                self._save(run)
-                return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), f"api failure: {error}")
-            except BlockingProviderFailure as error:
-                if error.prompt_id is not None:
-                    worker["prompt_ids"] = [error.prompt_id]
-                if _schedule_worker_retry(worker, "provider", str(error)):
-                    self._save(run)
-                    continue
-                _mark_worker_failed(worker, "provider", str(error))
-                _refresh_run_summary(run)
-                self._save(run)
-                return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), f"provider failure: {error}")
-
-            prompt_id = result["message_ids"].get("user")
-            if prompt_id is not None:
-                worker["prompt_ids"] = [prompt_id]
-            break
-        _apply_worker_result(worker, result)
+        created_session_ids.extend(outcome.created_session_ids)
         _refresh_run_summary(run)
+        if outcome.error is not None:
+            self._save(run)
+            return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), outcome.error)
         if request.cleanup:
             worker["cleanup"] = {"requested": True, "deleted": False}
-            deleted_session_ids = []
-            for created_session_id in created_session_ids:
-                try:
-                    client.delete_session(created_session_id)
-                except OpenCodeApiError as error:
-                    worker["cleanup"]["error"] = str(error)
-                    run["status"] = "failed"
-                    _mark_orchestration_failed(worker, str(error))
-                    self._save(run)
-                    return SingleWorkerRunStartOutcome(
-                        run,
-                        EX_UNAVAILABLE,
-                        f"api failure: disposable session cleanup failed: {error}",
-                    )
-                deleted_session_ids.append(created_session_id)
-            if deleted_session_ids:
-                worker["cleanup"]["deleted"] = True
-                if len(deleted_session_ids) > 1:
-                    worker["cleanup"]["sessions"] = deleted_session_ids
+            cleanup_outcome = cleanup_created_worker_sessions(client, worker, created_session_ids)
+            if cleanup_outcome.error is not None:
+                run["status"] = "failed"
+                _mark_orchestration_failed(worker, str(cleanup_outcome.error))
+                self._save(run)
+                return SingleWorkerRunStartOutcome(
+                    run,
+                    EX_UNAVAILABLE,
+                    f"api failure: disposable session cleanup failed: {cleanup_outcome.error}",
+                )
         self._save(run)
         return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run))
 
@@ -236,14 +152,6 @@ def _mark_orchestration_failed(worker, error):
     worker["last_failure_category"] = "api"
     worker["last_failure_reason"] = error
     worker["next_eligible_action"] = "none"
-
-
-def _call_worker_with_timeout(worker, callback):
-    timeout = worker.get("timeout_seconds")
-    try:
-        return TimeoutDeadline(timeout).run(callback)
-    except TimeoutExpired as error:
-        raise WorkerExecutionTimeout() from error
 
 
 def _server_default():

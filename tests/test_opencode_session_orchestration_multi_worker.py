@@ -548,10 +548,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
             )
 
             try:
-                with mock.patch(
-                    "opencode_session.multi_worker_orchestration.TimeoutDeadline",
-                    DelayedFirstTimeoutDeadline,
-                ):
+                with mock.patch("opencode_session.worker_execution.TimeoutDeadline", DelayedFirstTimeoutDeadline):
                     outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker"))
                 run = store.load_run("demo")
             finally:
@@ -624,7 +621,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            with mock.patch("opencode_session.multi_worker_orchestration.TimeoutDeadline", FirstAttemptTimeoutDeadline):
+            with mock.patch("opencode_session.worker_execution.TimeoutDeadline", FirstAttemptTimeoutDeadline):
                 outcome = service.start(
                     MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker", cleanup=True)
                 )

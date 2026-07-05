@@ -377,7 +377,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
             )
 
             try:
-                with mock.patch("opencode_session.run_state.TimeoutDeadline", DelayedFirstTimeoutDeadline):
+                with mock.patch("opencode_session.worker_execution.TimeoutDeadline", DelayedFirstTimeoutDeadline):
                     outcome = service.start(
                         SingleWorkerRunStartRequest(
                             name="demo",
@@ -456,7 +456,7 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            with mock.patch("opencode_session.run_state.TimeoutDeadline", FirstAttemptTimeoutDeadline):
+            with mock.patch("opencode_session.worker_execution.TimeoutDeadline", FirstAttemptTimeoutDeadline):
                 outcome = service.start(
                     SingleWorkerRunStartRequest(
                         name="demo",
