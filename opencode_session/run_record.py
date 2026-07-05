@@ -2,7 +2,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from opencode_session.status import short_status
-from opencode_session.worker_state import default_worker, normalize_worker
+from opencode_session.worker_state import default_worker, normalize_worker, worker_output_refs_in_dependency_order
 
 
 SCHEMA_VERSION = 1
@@ -112,6 +112,8 @@ def merge_run_changes(baseline, incoming, current):
     current = current if isinstance(current, dict) else {}
     merged = {}
     for key in set(baseline) | set(incoming) | set(current):
+        if key == "output_refs":
+            continue
         if key == "workers":
             workers = _merge_workers(
                 baseline.get("workers", {}),
@@ -129,7 +131,9 @@ def merge_run_changes(baseline, incoming, current):
         )
         if value is not _MISSING:
             merged[key] = value
-    return normalize_run(merged, fallback_name=incoming.get("name") or current.get("name") or baseline.get("name"))
+    merged = normalize_run(merged, fallback_name=incoming.get("name") or current.get("name") or baseline.get("name"))
+    merged["output_refs"] = worker_output_refs_in_dependency_order(merged.get("workers", {}))
+    return merged
 
 
 def _merge_run_field(key, baseline, incoming, current):
@@ -149,7 +153,7 @@ def _merge_run_field(key, baseline, incoming, current):
         return deepcopy(incoming)
     if key == "status":
         return _merge_status(incoming, current)
-    if key in {"blockers", "output_refs"} and isinstance(incoming, list) and isinstance(current, list):
+    if key == "blockers" and isinstance(incoming, list) and isinstance(current, list):
         return _merge_lists(current, incoming)
     return deepcopy(incoming)
 

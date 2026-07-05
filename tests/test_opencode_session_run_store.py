@@ -3,6 +3,7 @@ import threading
 import unittest
 
 from opencode_session.run_store import RunStore
+from opencode_session.worker_state import refresh_run_summary
 
 
 class RunStoreConcurrencyTest(unittest.TestCase):
@@ -110,6 +111,40 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(worker["prompt_ids"], ["prompt-start", "prompt-steer"])
         self.assertEqual(worker["result"]["message_ids"]["assistant"], "msg_done")
         self.assertEqual(worker["output_refs"], ["assistant:msg_done"])
+
+    def test_stale_worker_done_saves_keep_run_output_refs_in_dependency_order(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            first = RunStore(store)
+            first.create_run("demo", directory=directory, server_url="http://opencode.example")
+            first.upsert_worker("demo", "docs", role="write", prompt="Draft docs", status="active")
+            first.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Build implementation",
+                dependencies=["docs"],
+                status="active",
+            )
+            docs_run = first.load_run("demo")
+            build_run = first.load_run("demo")
+
+            build_worker = build_run["workers"]["build"]
+            build_worker["status"] = "done"
+            build_worker["output_refs"] = ["assistant:msg_build"]
+            refresh_run_summary(build_run)
+            first.save_run(build_run)
+
+            docs_worker = docs_run["workers"]["docs"]
+            docs_worker["status"] = "done"
+            docs_worker["output_refs"] = ["assistant:msg_docs"]
+            refresh_run_summary(docs_run)
+            first.save_run(docs_run)
+
+            run = RunStore(store).load_run("demo")
+
+        self.assertEqual(run["workers"]["docs"]["output_refs"], ["assistant:msg_docs"])
+        self.assertEqual(run["workers"]["build"]["output_refs"], ["assistant:msg_build"])
+        self.assertEqual(run["output_refs"], ["docs:msg_docs", "build:msg_build"])
 
 
 class _InterleavedRunStore(RunStore):
