@@ -17,8 +17,3 @@ def mark_orchestration_start_failed(run, workers, error):
     for worker in workers:
         transitions.append(mark_worker_failed(worker, "api", error, retryable=False))
     return transitions
-
-
-def mark_orchestration_cleanup_failed(run, worker, error):
-    run["status"] = "failed"
-    return mark_worker_failed(worker, "api", error, retryable=False)

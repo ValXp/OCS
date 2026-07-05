@@ -90,10 +90,10 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
             run["workers"]["alpha"]["cleanup"],
             {"requested": True, "deleted": False, "error": first_error},
         )
-        self.assertEqual(run["workers"]["alpha"]["status"], "failed")
-        self.assertEqual(run["workers"]["alpha"]["failure_reason"], first_error)
+        self.assertEqual(run["workers"]["alpha"]["status"], "done")
+        self.assertNotIn("failure_reason", run["workers"]["alpha"])
         self.assertEqual(run["workers"]["beta"]["cleanup"], {"requested": True, "deleted": True})
-        self.assertEqual(persisted_worker_ids, ["alpha", "alpha", "beta"])
+        self.assertEqual(persisted_worker_ids, ["alpha", "beta"])
 
     def test_timeout_retry_is_manual_and_keeps_original_session(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -238,8 +238,8 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(worker["failure_reason"], first_error)
+        self.assertEqual(worker["status"], "timeout")
+        self.assertEqual(worker["failure_reason"], "worker timed out after 0.01s")
         self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "error": first_error})
 
 

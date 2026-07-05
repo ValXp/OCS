@@ -4,7 +4,7 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.run_start_policy import blocking_execution_start_error, mark_orchestration_cleanup_failed
+from opencode_session.run_start_policy import blocking_execution_start_error
 from opencode_session.worker_execution import cleanup_created_worker_sessions, execute_worker_attempts
 from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition
 
@@ -85,8 +85,6 @@ class RunStartCore:
             if cleanup_outcome.error is not None:
                 if first_error is None:
                     first_error = cleanup_outcome.error
-                transition = mark_orchestration_cleanup_failed(run, worker, str(cleanup_outcome.error))
-                self.persist_worker_update(run, transition)
         if first_error is not None:
             self.refresh_run_summary(run)
             return CleanupFailureOutcome(

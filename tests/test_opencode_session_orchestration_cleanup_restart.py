@@ -103,14 +103,14 @@ class CleanupRestartOrchestrationCliTest(unittest.TestCase):
 
         expected_failure_reason = "DELETE /api/session/ses_new failed: HTTP 500"
         expected_worker_state = {
-            "status": "failed",
-            "error": expected_failure_reason,
-            "failure_category": "api",
-            "failure_reason": expected_failure_reason,
-            "last_failure_category": "api",
-            "last_failure_reason": expected_failure_reason,
-            "failure_retryable": False,
-            "next_eligible_action": "none",
+            "status": "done",
+            "error": None,
+            "failure_category": None,
+            "failure_reason": None,
+            "last_failure_category": None,
+            "last_failure_reason": None,
+            "failure_retryable": None,
+            "next_eligible_action": "collect",
             "retry_limit": 1,
             "retryable_failures": ["api"],
             "cleanup": {
