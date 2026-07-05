@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
@@ -10,7 +11,6 @@ from opencode_session.multi_worker_orchestration import (
     MultiWorkerRunOrchestrationService,
     MultiWorkerRunStartRequest,
     refresh_orchestration_run_summary as _refresh_orchestration_run_summary,
-    save_orchestration_run as _save_orchestration_run,
     workers_in_dependency_order as _workers_in_dependency_order,
 )
 from opencode_session.prompt_admission import (
@@ -281,10 +281,16 @@ def _steer_run_worker(args, store, *, print_error, unavailable_exit, unsupported
         return unavailable_exit
 
     admission = result.record
-    prompt_ids = worker.setdefault("prompt_ids", [])
-    if admission["message_id"] not in prompt_ids:
-        prompt_ids.append(admission["message_id"])
-    _save_orchestration_run(store, run)
+    message_id = admission["message_id"]
+
+    def append_prompt_id(latest_run):
+        latest_worker = _run_worker_with_session(latest_run, args.worker_id)
+        prompt_ids = latest_worker.setdefault("prompt_ids", [])
+        if message_id not in prompt_ids:
+            prompt_ids.append(message_id)
+
+    run = _update_orchestration_run(store, args.name, append_prompt_id)
+    worker = run["workers"][args.worker_id]
     if args.json:
         print(json.dumps({"run": run["name"], "worker": worker["id"], "admission": admission}, sort_keys=True))
     else:
@@ -305,14 +311,27 @@ def _abort_run_worker(args, store, *, print_error, unavailable_exit):
             print_error(str(error))
         return unavailable_exit
     abort = abort_record(worker["session_id"], response.data)
-    _mark_worker_aborted(worker, abort)
-    _refresh_orchestration_run_summary(run)
-    _save_orchestration_run(store, run)
+
+    def mark_aborted(latest_run):
+        latest_worker = _run_worker_with_session(latest_run, args.worker_id)
+        _mark_worker_aborted(latest_worker, abort)
+        _refresh_orchestration_run_summary(latest_run)
+
+    run = _update_orchestration_run(store, args.name, mark_aborted)
+    worker = run["workers"][args.worker_id]
     if args.json:
         print(json.dumps({"run": run["name"], "worker": worker["id"], "abort": abort}, sort_keys=True))
     else:
         print(f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {format_abort_compact(abort)}")
     return 0
+
+
+def _update_orchestration_run(store, name, mutator):
+    def update(run):
+        mutator(run)
+        run["updated_at"] = _utc_now()
+
+    return store.update_run(name, update)
 
 
 def _run_worker_with_session(run, worker_id):
@@ -322,6 +341,10 @@ def _run_worker_with_session(run, worker_id):
     if not worker.get("session_id"):
         raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no session", kind="missing")
     return worker
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _format_worker_result_compact(worker):

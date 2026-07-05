@@ -9,6 +9,17 @@ SCHEMA_VERSION = 1
 DEFAULT_RUN_STATUS = "queued"
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 _MISSING = object()
+_WORKER_APPEND_ONLY_FIELDS = {"prompt_ids", "output_refs"}
+_WORKER_STATUS_OWNED_FIELDS = {
+    "abort",
+    "error",
+    "failure_category",
+    "failure_reason",
+    "last_failure_category",
+    "last_failure_reason",
+    "result",
+    "timed_out_at",
+}
 
 
 class RunRecordError(Exception):
@@ -174,17 +185,96 @@ def _merge_worker(worker_id, baseline, incoming, current):
         return deepcopy(current)
     if current == baseline or incoming == current:
         return normalize_worker(incoming, worker_id)
-    return _merge_conflicting_worker(worker_id, incoming, current)
+    return _merge_conflicting_worker(worker_id, baseline, incoming, current)
 
 
-def _merge_conflicting_worker(worker_id, incoming, current):
+def _merge_conflicting_worker(worker_id, baseline, incoming, current):
+    baseline_worker = normalize_worker(baseline, worker_id)
     incoming_worker = normalize_worker(incoming, worker_id)
     current_worker = normalize_worker(current, worker_id)
+    status_owner = _worker_status_owner(incoming_worker, current_worker)
+    merged_status = _merge_status(incoming_worker.get("status"), current_worker.get("status"))
+    merged = {}
+    for key in set(baseline_worker) | set(incoming_worker) | set(current_worker):
+        value = _merge_worker_field(
+            key,
+            baseline_worker.get(key, _MISSING),
+            incoming_worker.get(key, _MISSING),
+            current_worker.get(key, _MISSING),
+            merged_status=merged_status,
+            status_owner=status_owner,
+        )
+        if value is not _MISSING:
+            merged[key] = value
+    return normalize_worker(merged, worker_id)
+
+
+def _merge_worker_field(key, baseline, incoming, current, *, merged_status, status_owner):
+    if key == "status":
+        return merged_status
+    if key in _WORKER_STATUS_OWNED_FIELDS:
+        return _merge_worker_status_owned_field(incoming, current, status_owner=status_owner)
+    if key in _WORKER_APPEND_ONLY_FIELDS:
+        return _merge_worker_append_only_field(incoming, current, status_owner=status_owner)
+    if key == "blockers":
+        return _merge_worker_blockers(incoming, current, merged_status=merged_status, status_owner=status_owner)
+    return _merge_independent_worker_field(baseline, incoming, current)
+
+
+def _merge_worker_status_owned_field(incoming, current, *, status_owner):
+    owner_value = current if status_owner == "current" else incoming
+    if owner_value is _MISSING:
+        return _MISSING
+    return deepcopy(owner_value)
+
+
+def _merge_worker_append_only_field(incoming, current, *, status_owner):
+    if incoming is _MISSING:
+        return deepcopy(current) if current is not _MISSING else _MISSING
+    if current is _MISSING:
+        return deepcopy(incoming)
+    if status_owner == "current":
+        return deepcopy(current)
+    if isinstance(incoming, list) and isinstance(current, list):
+        return _merge_lists(current, incoming)
+    return deepcopy(incoming)
+
+
+def _merge_worker_blockers(incoming, current, *, merged_status, status_owner):
+    if incoming is _MISSING:
+        return deepcopy(current) if current is not _MISSING else _MISSING
+    if current is _MISSING:
+        return deepcopy(incoming)
+    if merged_status == "blocked" and isinstance(incoming, list) and isinstance(current, list):
+        return _merge_lists(current, incoming)
+    owner_value = current if status_owner == "current" else incoming
+    return deepcopy(owner_value)
+
+
+def _merge_independent_worker_field(baseline, incoming, current):
+    if incoming is _MISSING:
+        if current is _MISSING:
+            return _MISSING
+        if baseline is not _MISSING and current == baseline:
+            return _MISSING
+        return deepcopy(current)
+    if current is _MISSING:
+        if baseline is not _MISSING and incoming == baseline:
+            return _MISSING
+        return deepcopy(incoming)
+    if incoming == baseline:
+        return deepcopy(current)
+    if current == baseline or incoming == current:
+        return deepcopy(incoming)
+    return deepcopy(incoming)
+
+
+def _worker_status_owner(incoming_worker, current_worker):
     incoming_status = incoming_worker.get("status")
     current_status = current_worker.get("status")
     if _status_priority(current_status) > _status_priority(incoming_status):
-        return deepcopy(current_worker)
-    return deepcopy(incoming_worker)
+        return "current"
+    return "incoming"
 
 
 def _merge_lists(current, incoming):

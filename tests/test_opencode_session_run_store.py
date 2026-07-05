@@ -81,6 +81,36 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(run["workers"]["builder"]["prompt_ids"], ["prompt-done"])
         self.assertEqual(run["workers"]["builder"]["result"]["message_ids"]["user"], "prompt-done")
 
+    def test_stale_worker_done_save_preserves_concurrent_steer_prompt_id(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            first = RunStore(store)
+            first.create_run("demo", directory=directory, server_url="http://opencode.example")
+            first.upsert_worker("demo", "builder", role="build", status="active", prompt_ids=["prompt-start"])
+            stale_run = first.load_run("demo")
+
+            second = RunStore(store)
+            steered_run = second.load_run("demo")
+            steered_run["workers"]["builder"]["prompt_ids"].append("prompt-steer")
+            second.save_run(steered_run)
+
+            stale_worker = stale_run["workers"]["builder"]
+            stale_worker["status"] = "done"
+            stale_worker["result"] = {
+                "session_id": "ses_builder",
+                "status": "done",
+                "message_ids": {"user": "prompt-start", "assistant": "msg_done"},
+            }
+            stale_worker["output_refs"] = ["assistant:msg_done"]
+            first.save_run(stale_run)
+
+            run = RunStore(store).load_run("demo")
+
+        worker = run["workers"]["builder"]
+        self.assertEqual(worker["status"], "done")
+        self.assertEqual(worker["prompt_ids"], ["prompt-start", "prompt-steer"])
+        self.assertEqual(worker["result"]["message_ids"]["assistant"], "msg_done")
+        self.assertEqual(worker["output_refs"], ["assistant:msg_done"])
+
 
 class _InterleavedRunStore(RunStore):
     def __init__(self, root):
