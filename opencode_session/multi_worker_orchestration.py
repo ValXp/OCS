@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,7 +7,12 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.run_persistence import persist_run_mutation, persist_run_summary, persist_worker_updates
+from opencode_session.run_persistence import (
+    persist_run_mutation,
+    persist_run_summary,
+    persist_worker_transitions,
+    persist_worker_updates,
+)
 from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
@@ -20,6 +26,7 @@ from opencode_session.worker_state import (
     EX_TIMEOUT,
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,
+    WorkerTransition,
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
     mark_dependency_blocked as _mark_dependency_blocked,
@@ -55,6 +62,14 @@ class DependencyOrderedSerialRunStartOutcome:
     run: dict
     exit_code: int
     error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DependencyScheduleTick:
+    ready_worker_ids: tuple
+    dependency_blocked_transitions: tuple
+    has_pending_workers: bool
+    blockers_by_worker_id: dict
 
 
 class DependencyOrderedSerialRunOrchestrationService:
@@ -110,9 +125,9 @@ class DependencyOrderedSerialRunOrchestrationService:
         created_session_ids_by_worker = {}
         client = None
         first_error_outcome = None
-        dependency_analysis = self._mark_and_persist_dependency_blocked_workers(run)
-        if dependency_analysis.blockers_by_worker_id or not dependency_analysis.ready_worker_ids:
-            if not dependency_analysis.ready_worker_ids:
+        schedule_tick = self._persist_schedule_tick(run)
+        if schedule_tick.blockers_by_worker_id or not schedule_tick.ready_worker_ids:
+            if not schedule_tick.ready_worker_ids:
                 return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
         try:
@@ -124,12 +139,8 @@ class DependencyOrderedSerialRunOrchestrationService:
 
             run["status"] = "active"
             self._persist_mutation(run, _mark_run_active)
-            while True:
-                ready_workers = _ready_prompted_workers(run.get("workers", {}))
-                if not ready_workers:
-                    self._mark_and_persist_dependency_blocked_workers(run)
-                    break
-
+            while schedule_tick.ready_worker_ids:
+                ready_workers = _workers_by_ids(run.get("workers", {}), schedule_tick.ready_worker_ids)
                 outcome = self._execute_ready_workers_serially(
                     client,
                     run,
@@ -139,10 +150,10 @@ class DependencyOrderedSerialRunOrchestrationService:
                     created_session_ids_by_worker=created_session_ids_by_worker,
                     execution_policy=execution_policy,
                 )
+                schedule_tick = self._persist_schedule_tick(run)
                 if outcome is not None:
                     if first_error_outcome is None:
                         first_error_outcome = outcome
-                    self._mark_and_persist_dependency_blocked_workers(run)
                     if execution_policy == EXECUTION_POLICY_FAIL_FAST:
                         cleanup_error = (
                             self._cleanup_created_workers(client, run, created_session_ids_by_worker) if cleanup else None
@@ -154,11 +165,6 @@ class DependencyOrderedSerialRunOrchestrationService:
                             _exit_code_for_orchestration_run(run),
                             outcome.error,
                         )
-
-                if not _ready_prompted_workers(run.get("workers", {})):
-                    self._mark_and_persist_dependency_blocked_workers(run)
-                    if not _pending_prompted_workers(run.get("workers", {})):
-                        break
         except OpenCodeApiError as error:
             self._mark_prompted_workers_failed(run, str(error))
             cleanup_error = (
@@ -234,18 +240,19 @@ class DependencyOrderedSerialRunOrchestrationService:
         mark_orchestration_start_failed(run, workers, error)
         self._persist_workers(run, workers)
 
-    def _mark_and_persist_dependency_blocked_workers(self, run):
-        analysis = _mark_dependency_blocked_workers(run)
-        blocked_workers = [
-            run.get("workers", {}).get(worker_id)
-            for worker_id in sorted(analysis.blockers_by_worker_id)
-            if isinstance(run.get("workers", {}).get(worker_id), dict)
-        ]
-        if blocked_workers:
-            self._persist_workers(run, blocked_workers)
+    def _persist_schedule_tick(self, run):
+        tick = schedule_dependency_ordered_tick(run.get("workers", {}))
+        if tick.dependency_blocked_transitions:
+            persist_worker_transitions(
+                self.store,
+                run,
+                tick.dependency_blocked_transitions,
+                refresh_run_summary=refresh_orchestration_run_summary,
+                now=self.now,
+            )
         else:
             self._persist_summary(run)
-        return analysis
+        return tick
 
     def _persist_mutation(self, run, mutator):
         return persist_run_mutation(self.store, run, mutator, now=self.now)
@@ -285,29 +292,49 @@ def _mark_run_active(run):
     run["status"] = "active"
 
 
-def _ready_prompted_workers(workers):
+def schedule_dependency_ordered_tick(workers):
+    workers = workers if isinstance(workers, dict) else {}
     analysis = analyze_worker_dependencies(workers)
-    return [workers[worker_id] for worker_id in analysis.ready_worker_ids]
+    blocked_worker_ids = set(analysis.blockers_by_worker_id)
+    return DependencyScheduleTick(
+        ready_worker_ids=analysis.ready_worker_ids,
+        dependency_blocked_transitions=tuple(
+            _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
+            for worker_id in sorted(blocked_worker_ids)
+            if isinstance(workers.get(worker_id), dict)
+        ),
+        has_pending_workers=bool(_pending_prompted_worker_ids(workers, blocked_worker_ids=blocked_worker_ids)),
+        blockers_by_worker_id=analysis.blockers_by_worker_id,
+    )
+
+
+def _workers_by_ids(workers, worker_ids):
+    return [workers[worker_id] for worker_id in worker_ids if isinstance(workers.get(worker_id), dict)]
 
 
 def _pending_prompted_workers(workers):
     return [
-        worker
-        for worker in workers.values()
-        if isinstance(worker, dict)
-        and _worker_prompt(worker)
-        and is_runnable_status(worker.get("status"))
+        workers[worker_id]
+        for worker_id in _pending_prompted_worker_ids(workers)
     ]
 
 
-def _mark_dependency_blocked_workers(run):
-    workers = run.get("workers", {})
-    analysis = analyze_worker_dependencies(workers)
-    for worker_id in sorted(analysis.blockers_by_worker_id):
-        worker = workers.get(worker_id)
-        if isinstance(worker, dict):
-            _mark_dependency_blocked(worker, analysis.blockers_by_worker_id[worker_id])
-    return analysis
+def _pending_prompted_worker_ids(workers, *, blocked_worker_ids=()):
+    blocked_worker_ids = set(blocked_worker_ids)
+    return tuple(
+        worker_id
+        for worker_id in sorted(workers)
+        if worker_id not in blocked_worker_ids
+        and isinstance(workers.get(worker_id), dict)
+        and _worker_prompt(workers[worker_id])
+        and is_runnable_status(workers[worker_id].get("status"))
+    )
+
+
+def _dependency_blocked_transition(worker, blockers):
+    blocked_worker = deepcopy(worker)
+    _mark_dependency_blocked(blocked_worker, blockers)
+    return WorkerTransition.replace_with_worker(blocked_worker)
 
 
 def _normalize_execution_policy(policy):

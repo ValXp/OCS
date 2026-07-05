@@ -6,6 +6,7 @@ from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
+    schedule_dependency_ordered_tick,
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore
@@ -87,6 +88,31 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(analysis.invalid_graph_blockers_by_worker_id, {})
         self.assertEqual(analysis.dependency_blockers_by_worker_id, expected_blockers)
         self.assertEqual(analysis.blockers_by_worker_id, expected_blockers)
+
+    def test_schedule_tick_returns_ready_workers_and_block_transitions_without_mutation(self):
+        workers = {
+            "build": {"id": "build", "prompt": "Build", "status": "failed"},
+            "docs": {"id": "docs", "prompt": "Docs", "status": "queued"},
+            "review": {
+                "id": "review",
+                "prompt": "Review",
+                "status": "queued",
+                "dependencies": ["build"],
+            },
+        }
+
+        tick = schedule_dependency_ordered_tick(workers)
+
+        self.assertEqual(tick.ready_worker_ids, ("docs",))
+        self.assertEqual([transition.worker_id for transition in tick.dependency_blocked_transitions], ["review"])
+        self.assertTrue(tick.has_pending_workers)
+        self.assertEqual(workers["review"]["status"], "queued")
+
+        latest_workers = {"review": dict(workers["review"])}
+        tick.dependency_blocked_transitions[0].apply_to(latest_workers)
+
+        self.assertEqual(latest_workers["review"]["status"], "blocked")
+        self.assertEqual(latest_workers["review"]["blockers"], ["dependency:build"])
 
 
 class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
