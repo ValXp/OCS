@@ -63,11 +63,11 @@ class SessionCommandError(Exception):
 class SessionCommandService:
     def __init__(self, client, *, route_capabilities=None):
         self.client = client
-        if route_capabilities is None:
-            route_capabilities = capabilities_from_openapi_doc(self.client.get_openapi_doc())
-        configure_client_route_plan(self.client, route_capabilities)
+        self.route_capabilities = route_capabilities
+        self.routes_configured = False
 
     def create(self, directory, *, agent=None, model=None):
+        self._ensure_routes()
         resolved_directory = str(Path(directory).resolve())
         try:
             response = self.client.create_session_response(resolved_directory, agent=agent, model=model)
@@ -76,6 +76,7 @@ class SessionCommandService:
         return SessionCreateResult(session=response.data, raw_body=response.body)
 
     def list(self, *, directory=None, agent=None, model=None, include_blockers=False):
+        self._ensure_routes()
         try:
             response = self.client.list_sessions_response()
         except OpenCodeApiError as error:
@@ -91,6 +92,7 @@ class SessionCommandService:
         return SessionListResult(sessions=sessions, blocker_counts=blocker_counts, raw_body=response.body)
 
     def inspect(self, session_id, *, include_blockers=False):
+        self._ensure_routes()
         try:
             response = self.client.get_session_response(session_id)
         except OpenCodeApiError as error:
@@ -99,6 +101,7 @@ class SessionCommandService:
         return SessionInspectResult(session=response.data, blocker_counts=blocker_counts, raw_body=response.body)
 
     def delete(self, session_id):
+        self._ensure_routes()
         delete_response = None
         deleted = False
         try:
@@ -149,6 +152,15 @@ class SessionCommandService:
             return load_blocker_counts(self.client)
         except OpenCodeApiError as error:
             raise SessionCommandError(f"blocker summary failed: {error}") from error
+
+    def _ensure_routes(self):
+        if self.routes_configured:
+            return
+        route_capabilities = self.route_capabilities
+        if route_capabilities is None:
+            route_capabilities = capabilities_from_openapi_doc(self.client.get_openapi_doc())
+        configure_client_route_plan(self.client, route_capabilities)
+        self.routes_configured = True
 
 
 def fork_record(parent_session_id, message_id, data):
