@@ -1,5 +1,3 @@
-from opencode_session.api_client import OpenCodeApiError
-from opencode_session.records import session_value
 from opencode_session.status import short_status
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 
@@ -150,36 +148,6 @@ def worker_retry_available(worker, category=None):
     except (TypeError, ValueError):
         return False
     return retry_count < retry_limit
-
-
-def create_isolated_timeout_retry_session(client, run, worker, reason, created_at, *, agent=None, model=None):
-    timed_out_session_id = worker.get("session_id")
-    retry_agent = agent if agent is not None else worker.get("agent")
-    retry_model = model if model is not None else worker.get("model")
-    create_response = client.create_session_response(run["directory"], agent=retry_agent, model=retry_model)
-    retry_session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
-    if not retry_session_id:
-        raise OpenCodeApiError("timeout retry session creation did not return a session id")
-    if retry_session_id == timed_out_session_id:
-        raise OpenCodeApiError(f"timeout retry session creation returned original in-flight session '{timed_out_session_id}'")
-    worker["session_id"] = retry_session_id
-    _timeout_retry_sessions(worker).append(
-        {
-            "timed_out_session_id": timed_out_session_id,
-            "retry_session_id": retry_session_id,
-            "reason": reason,
-            "created_at": created_at,
-        }
-    )
-    return retry_session_id
-
-
-def _timeout_retry_sessions(worker):
-    sessions = worker.get("timeout_retry_sessions")
-    if not isinstance(sessions, list):
-        sessions = []
-        worker["timeout_retry_sessions"] = sessions
-    return sessions
 
 
 def worker_timeout_reason(worker):
