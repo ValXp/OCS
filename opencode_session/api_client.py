@@ -4,8 +4,7 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from opencode_session.events import EventStreamError, iter_event_stream
-from opencode_session.records import normalized_tokens as _normalized_tokens
-from opencode_session.records import session_value as _session_value
+from opencode_session.schema_normalization import normalize_session_payload
 from opencode_session.timeout_boundary import TimeoutExpired
 
 
@@ -259,56 +258,7 @@ def _session_prompt_path(prompt_path, session_id):
 
 
 def _with_session_payload(response):
-    return OpenCodeApiResponse(_normalize_session_payload(response.data), response.body)
-
-
-def _normalize_session_payload(payload):
-    if isinstance(payload, list):
-        return [_normalize_session_record(item) for item in payload]
-    if not isinstance(payload, dict):
-        return payload
-
-    normalized = dict(payload)
-    data = normalized.get("data")
-    if isinstance(data, list):
-        normalized["data"] = [_normalize_session_record(item) for item in data]
-        return normalized
-    if isinstance(data, dict):
-        normalized["data"] = _normalize_session_record(data)
-        return normalized
-
-    for name in ("sessions", "children"):
-        records = normalized.get(name)
-        if isinstance(records, list):
-            normalized[name] = [_normalize_session_record(item) for item in records]
-            return normalized
-
-    return _normalize_session_record(normalized)
-
-
-def _normalize_session_record(record):
-    if not isinstance(record, dict):
-        return record
-    if isinstance(record.get("data"), dict):
-        normalized = dict(record)
-        normalized["data"] = _normalize_session_record(record["data"])
-        return normalized
-
-    normalized = dict(record)
-    _set_missing(normalized, "id", _session_value(record, "id", "sessionID", "sessionId", "session_id"))
-    _set_missing(normalized, "directory", _session_value(record, "directory", "cwd"))
-    _set_missing(normalized, "title", _session_value(record, "title", "name"))
-    _set_missing(normalized, "agent", _session_value(record, "agent", "agentID", "agentId", "agent_id"))
-    _set_missing(normalized, "model", _session_value(record, "model", "modelID", "modelId", "model_id"))
-    _set_missing(normalized, "tokens", _normalized_tokens(_session_value(record, "tokens", "token", "tokenUsage", "token_usage", "usage")))
-    _set_missing(normalized, "createdAt", _session_value(record, "createdAt", "created_at", "created"))
-    _set_missing(normalized, "updatedAt", _session_value(record, "updatedAt", "updated_at", "updated"))
-    return normalized
-
-
-def _set_missing(record, name, value):
-    if value is not None and record.get(name) is None:
-        record[name] = value
+    return OpenCodeApiResponse(normalize_session_payload(response.data), response.body)
 
 
 def _validate_base_url(base_url):

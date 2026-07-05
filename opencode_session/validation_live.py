@@ -8,7 +8,8 @@ from opencode_session.capabilities import unsupported_reasons
 from opencode_session.events import is_terminal_event, normalize_event
 from opencode_session.formatting import compact_bool, compact_value
 from opencode_session.prompt_admission import admit_prompt
-from opencode_session.records import first_present, message_text, message_tokens, message_value, session_value
+from opencode_session.records import first_present, session_value
+from opencode_session.schema_normalization import iter_normalized_message_records
 from opencode_session.status import short_status
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.validation_cleanup import format_cleanup_summary
@@ -190,12 +191,12 @@ def live_message_execution_observation(client, steer):
 
 
 def assistant_message_status(session):
-    for message in iter_message_evidence_candidates(session):
-        role = str(first_present(message, "role", "author", "speaker", "type", "kind") or "").lower()
+    for message in iter_normalized_message_records(session):
+        role = str(message.get("role") or "").lower()
         if "assistant" not in role:
             continue
-        status = short_status(first_present(message, "status", "state", "phase"))
-        if message_text(message) or message_tokens(message) is not None or message_value(message, "cost") is not None:
+        status = message.get("status")
+        if message.get("text") or message.get("tokens") is not None or message.get("cost") is not None:
             return status or "unknown"
         if status in {"active", "done"}:
             return status
@@ -239,22 +240,6 @@ def event_execution_observation(event):
     if event.get("kind") == "status" and status in {"active", "done"}:
         return execution_observation(True, source="event", status=status, reason="observed_execution_event")
     return execution_observation("unknown", source="event", status=status, reason="no_execution_evidence")
-
-
-def iter_message_evidence_candidates(data):
-    if not isinstance(data, dict):
-        return
-    for key in ("message", "assistant", "reply", "output"):
-        value = data.get(key)
-        if isinstance(value, dict):
-            yield value
-    for key in ("messages", "items", "entries"):
-        value = data.get(key)
-        if not isinstance(value, list):
-            continue
-        for item in value:
-            if isinstance(item, dict):
-                yield item
 
 
 def execution_observation(executed, *, source, status, reason, error=None):
