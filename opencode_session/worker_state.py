@@ -1,3 +1,6 @@
+from copy import deepcopy
+from dataclasses import dataclass, field
+
 from opencode_session.status import short_status
 from opencode_session.status_policy import (
     EX_ABORTED,
@@ -20,6 +23,105 @@ WORKER_LIST_FIELDS = (
     "blockers",
     "output_refs",
 )
+
+REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
+
+
+@dataclass(frozen=True)
+class WorkerRecord:
+    worker_id: str
+    fields: dict
+
+    @classmethod
+    def from_worker(cls, worker):
+        return cls(worker["id"], deepcopy(worker))
+
+
+@dataclass(frozen=True)
+class WorkerTransition:
+    worker_id: str
+    set_fields: dict = field(default_factory=dict)
+    delete_fields: tuple = ()
+    merge_unique_fields: dict = field(default_factory=dict)
+    preserve_accepted_abort: bool = True
+
+    @classmethod
+    def replace_with_worker(cls, worker):
+        return cls.replace_with_record(WorkerRecord.from_worker(worker))
+
+    @classmethod
+    def replace_with_record(cls, record):
+        set_fields = deepcopy(record.fields)
+        merge_unique_fields = {}
+        prompt_ids = set_fields.pop("prompt_ids", None)
+        if isinstance(prompt_ids, list):
+            merge_unique_fields["prompt_ids"] = tuple(prompt_ids)
+        return cls(
+            record.worker_id,
+            set_fields=set_fields,
+            delete_fields=tuple(
+                field_name for field_name in REMOVABLE_WORKER_TRANSITION_FIELDS if field_name not in record.fields
+            ),
+            merge_unique_fields=merge_unique_fields,
+        )
+
+    def apply_to(self, latest_workers):
+        latest_worker = latest_workers.get(self.worker_id)
+        if self.preserve_accepted_abort and _accepted_abort(latest_worker) and not _accepted_abort(self.set_fields):
+            merged = self._apply_to_aborted_worker(latest_worker)
+        else:
+            merged = self._apply_to_worker(latest_worker)
+        latest_workers[self.worker_id] = merged
+        return merged
+
+    def _apply_to_worker(self, latest_worker):
+        merged = deepcopy(latest_worker) if isinstance(latest_worker, dict) else {}
+        merged.update(deepcopy(self.set_fields))
+        for field_name in self.delete_fields:
+            merged.pop(field_name, None)
+        self._merge_unique_fields(merged, latest_worker)
+        if "abort" not in self.set_fields and isinstance(latest_worker, dict) and "abort" in latest_worker:
+            merged["abort"] = deepcopy(latest_worker["abort"])
+        return merged
+
+    def _apply_to_aborted_worker(self, latest_worker):
+        merged = deepcopy(latest_worker)
+        self._merge_unique_fields(merged, latest_worker)
+        if "cleanup" in self.set_fields:
+            merged["cleanup"] = deepcopy(self.set_fields["cleanup"])
+        return merged
+
+    def _merge_unique_fields(self, target, latest_worker):
+        for field_name, values in self.merge_unique_fields.items():
+            source_worker = latest_worker
+            if field_name == "prompt_ids" and _latest_prompt_ids_are_retry_marker(latest_worker):
+                source_worker = {}
+            _merge_unique_list_field(target, source_worker, {field_name: list(values)}, field_name)
+
+
+def _latest_prompt_ids_are_retry_marker(latest_worker):
+    return (
+        isinstance(latest_worker, dict)
+        and latest_worker.get("next_eligible_action") == "retry"
+        and latest_worker.get("last_failure_category") is not None
+    )
+
+
+def _accepted_abort(worker):
+    abort = worker.get("abort") if isinstance(worker, dict) else None
+    return isinstance(abort, dict) and abort.get("accepted") and worker.get("status") == "aborted"
+
+
+def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
+    merged_values = []
+    for source in (latest_worker, worker_record):
+        values = source.get(field_name) if isinstance(source, dict) else None
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if value not in merged_values:
+                merged_values.append(deepcopy(value))
+    target[field_name] = merged_values
 
 
 def default_worker(worker_id):

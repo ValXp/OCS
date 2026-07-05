@@ -1,7 +1,6 @@
 from copy import deepcopy
 
-
-REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
+from opencode_session.worker_state import WorkerTransition
 
 
 def persist_run_mutation(store, run, mutator, *, now):
@@ -21,76 +20,32 @@ def persist_worker_update(store, run, worker, *, refresh_run_summary, now):
 
 
 def persist_worker_updates(store, run, workers, *, refresh_run_summary, now):
+    transitions = [
+        WorkerTransition.replace_with_worker(worker)
+        for worker in workers
+        if isinstance(worker, dict) and worker.get("id")
+    ]
+    return persist_worker_transitions(store, run, transitions, refresh_run_summary=refresh_run_summary, now=now)
+
+
+def persist_worker_transitions(store, run, transitions, *, refresh_run_summary, now):
     name = run["name"]
-    worker_records = {worker["id"]: deepcopy(worker) for worker in workers if isinstance(worker, dict) and worker.get("id")}
+    transitions = tuple(transitions)
 
     def update(latest_run):
         latest_workers = latest_run.setdefault("workers", {})
-        for worker_id, worker_record in worker_records.items():
-            latest_workers[worker_id] = merge_worker_transition(latest_workers.get(worker_id), worker_record)
+        for transition in transitions:
+            transition.apply_to(latest_workers)
         refresh_run_summary(latest_run)
         latest_run["updated_at"] = now()
 
     persisted = store.update_run(name, update)
     replace_mapping_in_place(run, persisted)
-    return [run["workers"][worker_id] for worker_id in worker_records if worker_id in run.get("workers", {})]
-
-
-def merge_worker_transition(latest_worker, worker_record):
-    if not isinstance(latest_worker, dict):
-        return deepcopy(worker_record)
-    if _accepted_abort(latest_worker) and not _accepted_abort(worker_record):
-        return _merge_into_aborted_worker(latest_worker, worker_record)
-
-    merged = deepcopy(latest_worker)
-    merged.update(deepcopy(worker_record))
-    _delete_removed_transition_fields(merged, worker_record)
-    _merge_prompt_ids(merged, latest_worker, worker_record)
-    if "abort" not in worker_record and "abort" in latest_worker:
-        merged["abort"] = deepcopy(latest_worker["abort"])
-    return merged
-
-
-def _delete_removed_transition_fields(target, worker_record):
-    for field in REMOVABLE_WORKER_TRANSITION_FIELDS:
-        if field not in worker_record:
-            target.pop(field, None)
-
-
-def _merge_into_aborted_worker(latest_worker, worker_record):
-    merged = deepcopy(latest_worker)
-    _merge_prompt_ids(merged, latest_worker, worker_record)
-    if "cleanup" in worker_record:
-        merged["cleanup"] = deepcopy(worker_record["cleanup"])
-    return merged
-
-
-def _merge_prompt_ids(target, latest_worker, worker_record):
-    if _latest_prompt_ids_are_retry_marker(latest_worker):
-        _merge_unique_list_field(target, {}, worker_record, "prompt_ids")
-        return
-    _merge_unique_list_field(target, latest_worker, worker_record, "prompt_ids")
-
-
-def _latest_prompt_ids_are_retry_marker(latest_worker):
-    return latest_worker.get("next_eligible_action") == "retry" and latest_worker.get("last_failure_category") is not None
-
-
-def _accepted_abort(worker):
-    abort = worker.get("abort") if isinstance(worker, dict) else None
-    return isinstance(abort, dict) and abort.get("accepted") and worker.get("status") == "aborted"
-
-
-def _merge_unique_list_field(target, latest_worker, worker_record, field):
-    merged_values = []
-    for source in (latest_worker, worker_record):
-        values = source.get(field) if isinstance(source, dict) else None
-        if not isinstance(values, list):
-            continue
-        for value in values:
-            if value not in merged_values:
-                merged_values.append(deepcopy(value))
-    target[field] = merged_values
+    return [
+        run["workers"][transition.worker_id]
+        for transition in transitions
+        if transition.worker_id in run.get("workers", {})
+    ]
 
 
 def persist_run_summary(store, run, *, refresh_run_summary, now):
