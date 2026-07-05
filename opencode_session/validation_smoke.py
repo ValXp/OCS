@@ -18,7 +18,7 @@ from opencode_session.event_watcher import (
 )
 from opencode_session.formatting import compact_bool, compact_list, compact_value
 from opencode_session.prompt_admission import admit_prompt
-from opencode_session.records import session_value
+from opencode_session.schema_session_adapter import session_value
 from opencode_session.validation_cleanup import format_cleanup_summary
 from opencode_session.validation_harness import DisposableValidationHarness
 

@@ -3,7 +3,8 @@ from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
-from opencode_session.records import collection_sessions, first_present, session_record
+from opencode_session.schema_common import first_present
+from opencode_session.schema_session_adapter import collection_sessions, session_record
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 
 

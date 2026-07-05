@@ -1,4 +1,4 @@
-from opencode_session.records import collection_records, first_present
+from opencode_session.schema_common import collection_records, first_present
 
 
 def load_blocker_counts(client):

@@ -1,7 +1,13 @@
 from copy import deepcopy
 from dataclasses import dataclass
 
-from opencode_session.schema_common import NormalizedSessionRecord, first_present, normalized_tokens, set_missing
+from opencode_session.schema_common import (
+    NormalizedSessionRecord,
+    collection_records,
+    first_present,
+    normalized_tokens,
+    set_missing,
+)
 
 
 SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "tokens", "createdAt", "updatedAt")
@@ -116,6 +122,10 @@ def unknown_session_record(raw) -> NormalizedSessionRecord:
 def require_session_canonical_fields(record):
     for field_name in SESSION_CANONICAL_FIELDS:
         record.setdefault(field_name, None)
+
+
+def collection_sessions(collection):
+    return collection_records(collection, "sessions", "children", "data")
 
 
 SESSION_ADAPTER = SessionRouteAdapter()

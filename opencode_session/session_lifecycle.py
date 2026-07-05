@@ -1,5 +1,5 @@
 from opencode_session.formatting import compact_bool, compact_value
-from opencode_session.records import bool_value, first_present
+from opencode_session.schema_common import bool_value, first_present
 from opencode_session.status import short_status
 
 

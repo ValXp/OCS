@@ -5,7 +5,7 @@ from opencode_session.formatting import (
     compact_value as _compact_value,
     format_table as _format_table,
 )
-from opencode_session.records import first_present as _first_present
+from opencode_session.schema_common import first_present as _first_present
 
 
 def format_permission_compact(permission):

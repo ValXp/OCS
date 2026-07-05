@@ -8,7 +8,8 @@ from opencode_session.capabilities import (
     SESSION_MESSAGE_PATH,
 )
 from opencode_session.formatting import compact_value as _compact_value
-from opencode_session.records import message_text, message_tokens, message_value, tokens_total
+from opencode_session.schema_common import tokens_total
+from opencode_session.schema_message_adapter import message_text, message_tokens, message_value
 from opencode_session.status import short_status
 
 

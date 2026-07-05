@@ -1,7 +1,7 @@
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.formatting import format_table as _format_table
-from opencode_session.records import session_record as _session_record
-from opencode_session.records import tokens_total as _tokens_total
+from opencode_session.schema_common import tokens_total as _tokens_total
+from opencode_session.schema_session_adapter import session_record as _session_record
 from opencode_session.session_services import counts_for_session
 
 

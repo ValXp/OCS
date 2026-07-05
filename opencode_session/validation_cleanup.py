@@ -4,7 +4,7 @@ from pathlib import Path
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session
 from opencode_session.formatting import compact_value
-from opencode_session.records import collection_sessions, session_value
+from opencode_session.schema_session_adapter import collection_sessions, session_value
 
 
 def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):

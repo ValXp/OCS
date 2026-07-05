@@ -3,7 +3,7 @@ from opencode_session.formatting import (
     compact_value as _compact_value,
     format_table as _format_table,
 )
-from opencode_session.records import tokens_total as _tokens_total
+from opencode_session.schema_common import tokens_total as _tokens_total
 from opencode_session.status import short_status
 from opencode_session.worker_state import normalize_worker
 

@@ -1,4 +1,4 @@
-from typing import Any, TypedDict
+from typing import TypedDict
 
 
 class NormalizedSessionRecord(TypedDict, total=False):
@@ -7,11 +7,11 @@ class NormalizedSessionRecord(TypedDict, total=False):
     title: str
     agent: str
     model: str
-    tokens: Any
-    createdAt: Any
-    updatedAt: Any
+    tokens: object
+    createdAt: object
+    updatedAt: object
     schema_status: str
-    raw: Any
+    raw: object
 
 
 class NormalizedMessageRecord(TypedDict, total=False):
@@ -19,8 +19,8 @@ class NormalizedMessageRecord(TypedDict, total=False):
     role: str
     status: str
     raw_status: str
-    cost: Any
-    tokens: Any
+    cost: object
+    tokens: object
     text: str
 
 
@@ -31,11 +31,11 @@ class NormalizedAdmissionRecord(TypedDict, total=False):
     state: str
     raw_state: str
     status: str
-    terminal_state: Any
+    terminal_state: object
     api_path: str
     fallback: dict
-    admitted_sequence: Any
-    promoted_sequence: Any
+    admitted_sequence: object
+    promoted_sequence: object
 
 
 class NormalizedEventRecord(TypedDict, total=False):
@@ -58,7 +58,18 @@ class NormalizedEventRecord(TypedDict, total=False):
     error: str
     reason: str
     schema_status: str
-    raw: Any
+    raw: object
+
+
+def collection_records(collection, *names):
+    if isinstance(collection, list):
+        return collection
+    if isinstance(collection, dict):
+        for name in names:
+            records = collection.get(name)
+            if isinstance(records, list):
+                return records
+    return []
 
 
 def first_present(mapping, *names):
