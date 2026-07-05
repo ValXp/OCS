@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-from unittest import mock
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
@@ -15,7 +14,7 @@ except ModuleNotFoundError:
 
 
 class SingleWorkerRunStateCleanupTest(unittest.TestCase):
-    def test_start_with_cleanup_deletes_initial_and_timeout_retry_sessions(self):
+    def test_start_with_cleanup_deletes_initial_session_after_timeout_without_retry(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)
             store.create_run("demo", directory=directory, server_url="http://opencode.example")
@@ -28,33 +27,11 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 retryable_failures=["timeout"],
             )
             client = FakeClient(session_ids=["ses_initial", "ses_retry"])
-            deadline_calls = []
 
-            class FirstAttemptTimeoutDeadline:
-                def __init__(self, timeout):
-                    self.timeout = timeout
-
-                def run(self, callback):
-                    deadline_calls.append(self.timeout)
-                    if len(deadline_calls) == 1:
-                        raise TimeoutExpired()
-                    return callback()
-
-            def execute_prompt(client, session_id, prompt, capabilities):
+            def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
                 client.requests.append(("execute", session_id, prompt))
-                return {
-                    "session_id": session_id,
-                    "message_ids": {"user": "msg_user_retry", "assistant": "msg_assistant_1"},
-                    "status": "done",
-                    "raw_status": "completed",
-                    "terminal_state": "done",
-                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
-                    "execution_strategy": "legacy_run_reply",
-                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
-                    "cost": 0.015,
-                    "tokens": {"total": 20},
-                    "text": "Worker finished after isolated retry.",
-                }
+                self.assertIsNotNone(deadline)
+                raise TimeoutExpired()
 
             service = SingleWorkerRunStateService(
                 store,
@@ -64,33 +41,31 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            with mock.patch("opencode_session.worker_execution.TimeoutDeadline", FirstAttemptTimeoutDeadline):
-                outcome = service.start(
-                    SingleWorkerRunStartRequest(
-                        name="demo",
-                        worker_id="worker",
-                        role="worker",
-                        prompt="Finish the worker task",
-                        cleanup=True,
-                    )
+            outcome = service.start(
+                SingleWorkerRunStartRequest(
+                    name="demo",
+                    worker_id="worker",
+                    role="worker",
+                    prompt="Finish the worker task",
+                    cleanup=True,
                 )
+            )
             run = store.load_run("demo")
 
-        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.exit_code, 124)
+        self.assertIn("automatic timeout retry skipped", outcome.error)
         self.assertEqual(
             client.requests,
             [
                 ("create", directory, None, None),
-                ("create", directory, None, None),
-                ("execute", "ses_retry", "Finish the worker task"),
+                ("execute", "ses_initial", "Finish the worker task"),
                 ("delete", "ses_initial"),
-                ("delete", "ses_retry"),
             ],
         )
-        self.assertEqual(
-            run["workers"]["worker"]["cleanup"],
-            {"requested": True, "deleted": True, "sessions": ["ses_initial", "ses_retry"]},
-        )
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker["status"], "timeout")
+        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
+        self.assertTrue(worker["manual_retry_required"])
 
     def test_start_cleanup_deletes_created_session_after_execution_failure(self):
         cases = [

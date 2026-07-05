@@ -81,6 +81,8 @@ def next_eligible_action(worker):
         return "resolve_blocker"
     if status == "done":
         return "collect"
+    if status == "timeout" and worker_retry_available(worker, "timeout"):
+        return "retry"
     if status == "failed" and worker_retry_available(worker):
         return "retry"
     return "none"
@@ -110,6 +112,7 @@ def _clear_current_status_metadata(worker):
     worker["failure_category"] = None
     worker["failure_reason"] = None
     worker.pop("failure_retryable", None)
+    worker.pop("manual_retry_required", None)
 
 
 def mark_worker_failed(worker, category, reason, *, retryable=True):
@@ -186,6 +189,8 @@ def mark_worker_timeout(worker, reason, now):
     if status == "blocked":
         worker["blockers"] = ["timeout"]
         worker["next_eligible_action"] = "resolve_blocker"
+    elif status in {"failed", "timeout"} and worker_retry_available(worker, "timeout"):
+        worker["next_eligible_action"] = "retry"
     else:
         worker["next_eligible_action"] = "none"
 

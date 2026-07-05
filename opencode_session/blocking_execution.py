@@ -45,12 +45,13 @@ def execute_blocking_prompt(
     capabilities,
     *,
     timeout=DEFAULT_BLOCKING_EXECUTION_TIMEOUT_SECONDS,
+    deadline=None,
 ):
     strategy = blocking_execution_strategy(capabilities)
     if strategy == "session_message":
-        return _execute_session_message_prompt(client, session_id, prompt, capabilities, timeout)
+        return _execute_session_message_prompt(client, session_id, prompt, capabilities, timeout, deadline)
     if strategy == "legacy_run_reply":
-        return _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout)
+        return _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout, deadline)
     raise OpenCodeApiError(unsupported_blocking_execution_message())
 
 
@@ -119,30 +120,33 @@ def provider_failure(message):
     return error or status
 
 
-def _execute_session_message_prompt(client, session_id, prompt, capabilities, timeout):
+def _execute_session_message_prompt(client, session_id, prompt, capabilities, timeout, deadline):
     message_id = f"msg_{uuid.uuid4().hex}"
-    response = client.message_session_response(
-        session_id,
-        prompt,
-        message_id=message_id,
-        timeout=_request_timeout(client, timeout),
-    )
+    kwargs = {"message_id": message_id, "timeout": _request_timeout(client, timeout, deadline)}
+    if deadline is not None:
+        kwargs["deadline"] = deadline
+    response = client.message_session_response(session_id, prompt, **kwargs)
     error = provider_failure(response.data)
     if error:
         raise BlockingProviderFailure(error, prompt_id=message_id)
     return _session_message_result(session_id, message_id, response.data, capabilities)
 
 
-def _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout):
-    request_timeout = _request_timeout(client, timeout)
-    run_response = client.run_session_response(session_id, prompt, timeout=request_timeout)
+def _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout, deadline):
+    run_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
+    if deadline is not None:
+        run_kwargs["deadline"] = deadline
+    run_response = client.run_session_response(session_id, prompt, **run_kwargs)
     error = provider_failure(run_response.data)
     if error:
         raise BlockingProviderFailure(
             error,
             prompt_id=message_value(run_response.data, "id", "messageID", "messageId"),
         )
-    reply_response = client.reply_session_response(session_id, timeout=request_timeout)
+    reply_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
+    if deadline is not None:
+        reply_kwargs["deadline"] = deadline
+    reply_response = client.reply_session_response(session_id, **reply_kwargs)
     error = provider_failure(reply_response.data)
     if error:
         raise BlockingProviderFailure(
@@ -152,13 +156,13 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout):
     return legacy_run_reply_result(session_id, run_response.data, reply_response.data)
 
 
-def _request_timeout(client, timeout):
+def _request_timeout(client, timeout, deadline=None):
+    if deadline is not None:
+        return deadline.require_time()
     default_timeout = getattr(client, "timeout", None)
     if timeout is None:
         return default_timeout
-    if default_timeout is None:
-        return timeout
-    return max(default_timeout, timeout)
+    return timeout
 
 
 def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities):

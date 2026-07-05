@@ -90,19 +90,18 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIsNone(worker["model"])
         self.assertNotIn("result", worker)
 
-    def test_execute_worker_attempts_rejects_timeout_retry_create_response_without_session_id(self):
+    def test_execute_worker_attempts_skips_automatic_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
             worker["timeout_seconds"] = 0.05
             worker["retry_limit"] = 1
             worker["retryable_failures"] = ["timeout"]
-            client = FakeClient(["ses_initial", None])
+            client = FakeClient(["ses_initial", "ses_unused"])
 
-            def execute_prompt(client, session_id, prompt, capabilities):
+            def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
                 client.requests.append(("execute", session_id, prompt))
-                if session_id is None:
-                    self.fail("worker executed timeout retry with malformed session id")
+                self.assertIsNotNone(deadline)
                 raise WorkerExecutionTimeout()
 
             outcome = execute_worker_attempts(
@@ -116,31 +115,25 @@ class WorkerExecutionTest(unittest.TestCase):
             )
 
         self.assertEqual(outcome.kind, "terminal_failure")
-        self.assertEqual(outcome.failure_category, "api")
-        self.assertEqual(
-            outcome.error,
-            "api failure: timeout retry session creation failed: "
-            "timeout retry session creation returned malformed response: missing session id",
-        )
+        self.assertEqual(outcome.failure_category, "timeout")
+        self.assertIn("automatic timeout retry skipped", outcome.error)
         self.assertEqual(
             client.requests,
             [
                 ("create", directory, None, None),
                 ("execute", "ses_initial", "Finish the worker task"),
-                ("create", directory, None, None),
             ],
         )
         self.assertEqual(worker["session_id"], "ses_initial")
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(
-            worker["failure_reason"],
-            "timeout retry session creation failed: "
-            "timeout retry session creation returned malformed response: missing session id",
-        )
+        self.assertEqual(worker["status"], "timeout")
+        self.assertEqual(worker["retry_count"], 0)
+        self.assertTrue(worker["manual_retry_required"])
+        self.assertEqual(worker["next_eligible_action"], "retry")
+        self.assertEqual(worker["failure_reason"], "worker timed out after 0.05s")
         self.assertNotIn("timeout_retry_sessions", worker)
         self.assertNotIn("result", worker)
 
-    def test_execute_worker_attempts_retries_timeout_in_isolated_session_and_applies_result(self):
+    def test_execute_worker_attempts_does_not_start_retry_session_after_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
@@ -149,23 +142,10 @@ class WorkerExecutionTest(unittest.TestCase):
             worker["retryable_failures"] = ["timeout"]
             client = FakeClient(["ses_initial", "ses_retry"])
 
-            def execute_prompt(client, session_id, prompt, capabilities):
+            def execute_prompt(client, session_id, prompt, capabilities, *, timeout=None):
                 client.requests.append(("execute", session_id, prompt, capabilities["legacy_fallback_available"]))
-                if session_id == "ses_initial":
-                    raise WorkerExecutionTimeout()
-                return {
-                    "session_id": session_id,
-                    "message_ids": {"user": "msg_user_retry", "assistant": "msg_assistant_1"},
-                    "status": "done",
-                    "raw_status": "completed",
-                    "terminal_state": "done",
-                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
-                    "execution_strategy": "legacy_run_reply",
-                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
-                    "cost": 0.015,
-                    "tokens": {"total": 20},
-                    "text": "Worker finished after isolated retry.",
-                }
+                self.assertLessEqual(timeout, 0.05)
+                raise WorkerExecutionTimeout()
 
             outcome = execute_worker_attempts(
                 client,
@@ -179,39 +159,27 @@ class WorkerExecutionTest(unittest.TestCase):
                 model="openai/gpt-5.5",
             )
 
-        self.assertIsNone(outcome.error)
-        self.assertEqual(outcome.created_session_ids, ["ses_initial", "ses_retry"])
+        self.assertEqual(outcome.failure_category, "timeout")
+        self.assertIn("automatic timeout retry skipped", outcome.error)
+        self.assertEqual(outcome.created_session_ids, ["ses_initial"])
         self.assertEqual(
             client.requests,
             [
                 ("create", directory, "build", "openai/gpt-5.5"),
                 ("execute", "ses_initial", "Finish the worker task", True),
-                ("create", directory, "build", "openai/gpt-5.5"),
-                ("execute", "ses_retry", "Finish the worker task", True),
             ],
         )
-        self.assertEqual(worker["status"], "done")
-        self.assertEqual(worker["session_id"], "ses_retry")
-        self.assertEqual(worker["retry_count"], 1)
+        self.assertEqual(worker["status"], "timeout")
+        self.assertEqual(worker["session_id"], "ses_initial")
+        self.assertEqual(worker["retry_count"], 0)
         self.assertEqual(worker["last_failure_category"], "timeout")
         self.assertEqual(worker["last_failure_reason"], "worker timed out after 0.05s")
-        self.assertEqual(worker["prompt_ids"], ["msg_user_retry"])
-        self.assertEqual(worker["output_refs"], ["assistant:msg_assistant_1"])
-        self.assertEqual(worker["next_eligible_action"], "collect")
-        self.assertEqual(worker["result"]["session_id"], "ses_retry")
-        self.assertEqual(
-            worker["timeout_retry_sessions"],
-            [
-                {
-                    "timed_out_session_id": "ses_initial",
-                    "retry_session_id": "ses_retry",
-                    "reason": "worker timed out after 0.05s",
-                    "created_at": "2026-07-03T00:00:00Z",
-                }
-            ],
-        )
+        self.assertEqual(worker["next_eligible_action"], "retry")
+        self.assertTrue(worker["manual_retry_required"])
+        self.assertNotIn("result", worker)
+        self.assertNotIn("timeout_retry_sessions", worker)
 
-    def test_execute_worker_attempts_returns_retry_scheduled_when_requested(self):
+    def test_execute_worker_attempts_does_not_schedule_timeout_retry_when_requested(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
@@ -220,8 +188,9 @@ class WorkerExecutionTest(unittest.TestCase):
             worker["retryable_failures"] = ["timeout"]
             client = FakeClient(["ses_initial", "ses_retry"])
 
-            def execute_prompt(client, session_id, prompt, capabilities):
+            def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
                 client.requests.append(("execute", session_id, prompt))
+                self.assertIsNotNone(deadline)
                 raise WorkerExecutionTimeout()
 
             outcome = execute_worker_attempts(
@@ -235,21 +204,20 @@ class WorkerExecutionTest(unittest.TestCase):
                 stop_after_retry=True,
             )
 
-        self.assertEqual(outcome.kind, "retry_scheduled")
-        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.kind, "terminal_failure")
+        self.assertIn("automatic timeout retry skipped", outcome.error)
         self.assertEqual(outcome.failure_category, "timeout")
-        self.assertEqual(outcome.created_session_ids, ["ses_initial", "ses_retry"])
+        self.assertEqual(outcome.created_session_ids, ["ses_initial"])
         self.assertEqual(
             client.requests,
             [
                 ("create", directory, None, None),
                 ("execute", "ses_initial", "Finish the worker task"),
-                ("create", directory, None, None),
             ],
         )
-        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["status"], "timeout")
         self.assertEqual(worker["next_eligible_action"], "retry")
-        self.assertEqual(worker["session_id"], "ses_retry")
+        self.assertEqual(worker["session_id"], "ses_initial")
 
 
 if __name__ == "__main__":

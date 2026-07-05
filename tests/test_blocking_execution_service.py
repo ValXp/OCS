@@ -43,6 +43,20 @@ class _ExplicitTimeoutClient:
         return _Response({"id": "msg_assistant_explicit", "status": "completed", "text": "ok"})
 
 
+class _DeadlineClient:
+    def __init__(self):
+        self.timeout = 3
+        self.requests = []
+
+    def run_session_response(self, session_id, message, *, timeout=None, deadline=None):
+        self.requests.append(("run", session_id, message, timeout, deadline is not None))
+        return _Response({"id": "msg_user_deadline", "status": "submitted"})
+
+    def reply_session_response(self, session_id, *, timeout=None, deadline=None):
+        self.requests.append(("reply", session_id, None, timeout, deadline is not None))
+        return _Response({"id": "msg_assistant_deadline", "status": "completed", "text": "ok"})
+
+
 class BlockingExecutionServiceTest(unittest.TestCase):
     def test_prefers_modern_session_message_and_returns_normalized_result(self):
         from opencode_session.blocking_execution import (
@@ -97,6 +111,19 @@ class BlockingExecutionServiceTest(unittest.TestCase):
 
         self.assertEqual(client.requests, [("message", 120, 3)])
         self.assertEqual(client.timeout, 3)
+
+    def test_passes_deadline_to_legacy_run_and_reply_requests(self):
+        from opencode_session.blocking_execution import execute_blocking_prompt
+        from opencode_session.timeout_boundary import TimeoutDeadline
+
+        capabilities = {"route_availability": {}, "legacy_fallback_available": True}
+        client = _DeadlineClient()
+
+        execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities, deadline=TimeoutDeadline(5))
+
+        self.assertEqual([request[0] for request in client.requests], ["run", "reply"])
+        self.assertTrue(all(request[4] for request in client.requests))
+        self.assertTrue(all(0 < request[3] <= 5 for request in client.requests))
 
 
 if __name__ == "__main__":

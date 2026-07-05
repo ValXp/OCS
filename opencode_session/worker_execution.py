@@ -1,3 +1,4 @@
+import inspect
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -11,6 +12,7 @@ from opencode_session.worker_state import (
     mark_worker_failed,
     mark_worker_timeout,
     schedule_worker_retry,
+    worker_retry_available,
     worker_timeout_reason,
 )
 
@@ -117,45 +119,19 @@ def provision_worker_session(
     return WorkerSessionOutcome(worker.get("session_id"))
 
 
-def create_isolated_timeout_retry_session(client, run, worker, reason, created_at, *, agent=None, model=None):
-    timed_out_session_id = worker.get("session_id")
-    retry_agent = agent if agent is not None else worker.get("agent")
-    retry_model = model if model is not None else worker.get("model")
-    create_response = client.create_session_response(run["directory"], agent=retry_agent, model=retry_model)
-    retry_session_id = require_session_id(create_response, "timeout retry session creation")
-    if retry_session_id == timed_out_session_id:
-        raise OpenCodeApiError(f"timeout retry session creation returned original in-flight session '{timed_out_session_id}'")
-    worker["session_id"] = retry_session_id
-    _timeout_retry_sessions(worker).append(
-        {
-            "timed_out_session_id": timed_out_session_id,
-            "retry_session_id": retry_session_id,
-            "reason": reason,
-            "created_at": created_at,
-        }
-    )
-    return retry_session_id
-
-
-def _timeout_retry_sessions(worker):
-    sessions = worker.get("timeout_retry_sessions")
-    if not isinstance(sessions, list):
-        sessions = []
-        worker["timeout_retry_sessions"] = sessions
-    return sessions
-
-
 def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor, now):
     mark_worker_active(worker, now=now)
     attempt_session_id = worker["session_id"]
     try:
-        result = _call_worker_with_timeout(
+        result = _call_worker_with_deadline(
             worker,
-            lambda attempt_session_id=attempt_session_id: executor(
+            lambda deadline, attempt_session_id=attempt_session_id: _execute_with_optional_deadline(
+                executor,
                 client,
                 attempt_session_id,
                 prompt,
                 capabilities,
+                deadline=deadline,
             ),
         )
     except WorkerExecutionTimeout:
@@ -247,26 +223,17 @@ def _apply_completed_attempt(worker, result):
 
 
 def _apply_timeout_attempt_failure(client, run, worker, reason, now, *, agent=None, model=None):
-    if not schedule_worker_retry(worker, "timeout", reason):
-        mark_worker_timeout(worker, reason, now)
-        return WorkerAttemptTransition(TERMINAL_FAILURE, error=reason, failure_category="timeout")
-    timed_out_at = now()
-    worker["timed_out_at"] = timed_out_at
-    try:
-        retry_session_id = create_isolated_timeout_retry_session(
-            client,
-            run,
-            worker,
-            reason,
-            timed_out_at,
-            agent=agent,
-            model=model,
+    manual_retry_available = worker_retry_available(worker, "timeout")
+    mark_worker_timeout(worker, reason, now)
+    if manual_retry_available:
+        worker["manual_retry_required"] = True
+        return WorkerAttemptTransition(
+            TERMINAL_FAILURE,
+            error=f"{reason}; automatic timeout retry skipped because the timed-out request may still be running",
+            failure_category="timeout",
         )
-    except OpenCodeApiError as error:
-        message = f"timeout retry session creation failed: {error}"
-        mark_worker_failed(worker, "api", message)
-        return WorkerAttemptTransition(TERMINAL_FAILURE, error=f"api failure: {message}", failure_category="api")
-    return WorkerAttemptTransition(RETRY_SCHEDULED, created_session_id=retry_session_id, failure_category="timeout")
+    worker.pop("manual_retry_required", None)
+    return WorkerAttemptTransition(TERMINAL_FAILURE, error=reason, failure_category="timeout")
 
 
 def _apply_retryable_attempt_failure(worker, category, reason, *, error_prefix):
@@ -305,12 +272,39 @@ def cleanup_created_worker_sessions(client, worker, session_ids):
     return WorkerCleanupOutcome(deleted_session_ids)
 
 
-def _call_worker_with_timeout(worker, callback):
+def _call_worker_with_deadline(worker, callback):
     timeout = worker.get("timeout_seconds")
+    deadline = TimeoutDeadline(timeout) if timeout is not None else None
     try:
-        return TimeoutDeadline(timeout).run(callback)
+        if deadline is not None:
+            deadline.require_time()
+        return callback(deadline)
     except TimeoutExpired as error:
         raise WorkerExecutionTimeout() from error
+    except TimeoutError as error:
+        raise WorkerExecutionTimeout() from error
+
+
+def _execute_with_optional_deadline(executor, client, session_id, prompt, capabilities, *, deadline):
+    if deadline is not None and _accepts_keyword(executor, "deadline"):
+        return executor(client, session_id, prompt, capabilities, deadline=deadline)
+    if deadline is not None and _accepts_keyword(executor, "timeout"):
+        return executor(client, session_id, prompt, capabilities, timeout=deadline.require_time())
+    return executor(client, session_id, prompt, capabilities)
+
+
+def _accepts_keyword(callable_object, name):
+    try:
+        signature = inspect.signature(callable_object)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.kind in {inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
+            if parameter.name == name:
+                return True
+    return False
 
 
 def _notify_worker_update(callback):
