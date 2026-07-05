@@ -169,6 +169,37 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(run["workers"]["build"]["status"], "done")
         self.assertEqual(run["status"], "done")
 
+    def test_stale_same_worker_terminal_conflict_uses_failed_status_owner(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            first = RunStore(store)
+            first.create_run("demo", directory=directory, server_url="http://opencode.example")
+            first.upsert_worker("demo", "builder", role="build", prompt="Build", status="active")
+            stale_run = first.load_run("demo")
+
+            second = RunStore(store)
+            current_run = second.load_run("demo")
+            current_worker = current_run["workers"]["builder"]
+            current_worker["status"] = "aborted"
+            current_worker["abort"] = {"accepted": True, "source": "current"}
+            second.save_run(current_run)
+
+            stale_worker = stale_run["workers"]["builder"]
+            stale_worker["status"] = "failed"
+            stale_worker["error"] = "provider failed"
+            stale_worker["failure_category"] = "provider"
+            stale_worker["failure_reason"] = "provider failed"
+            first.save_run(stale_run)
+
+            run = RunStore(store).load_run("demo")
+
+        worker = run["workers"]["builder"]
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(worker["status"], "failed")
+        self.assertEqual(worker["error"], "provider failed")
+        self.assertEqual(worker["failure_category"], "provider")
+        self.assertEqual(worker["failure_reason"], "provider failed")
+        self.assertNotIn("abort", worker)
+
 
 class _InterleavedRunStore(RunStore):
     def __init__(self, root):

@@ -1,14 +1,18 @@
 from opencode_session.status import short_status
+from opencode_session.status_policy import (
+    EX_ABORTED,
+    EX_BLOCKED,
+    EX_PARTIAL,
+    EX_TIMEOUT,
+    EX_UNAVAILABLE,
+    EX_UNSUPPORTED,
+    aggregate_run_status,
+    exit_code_for_status,
+)
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_status import is_blocked_status
 
 
-EX_UNAVAILABLE = 69
-EX_UNSUPPORTED = 70
-EX_TIMEOUT = 124
-EX_PARTIAL = 1
-EX_BLOCKED = 75
-EX_ABORTED = 130
 WORKER_LIST_FIELDS = (
     "dependencies",
     "prompt_ids",
@@ -209,22 +213,7 @@ def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False
     status_workers = prompted_workers
     if include_unprompted_when_no_prompts:
         status_workers = prompted_workers or [worker for worker in workers.values() if isinstance(worker, dict)]
-    if not status_workers:
-        return None
-    statuses = {worker.get("status") for worker in status_workers}
-    if statuses == {"done"}:
-        return "done"
-    if any(status == "failed" for status in statuses):
-        return "failed"
-    if any(status == "aborted" for status in statuses):
-        return "aborted"
-    if any(status == "timeout" for status in statuses):
-        return "timeout"
-    if any(status == "blocked" for status in statuses):
-        return "blocked"
-    if any(status == "active" for status in statuses):
-        return "active"
-    return "queued"
+    return aggregate_run_status(worker.get("status") for worker in status_workers)
 
 
 def worker_output_refs_in_dependency_order(workers):
@@ -247,18 +236,7 @@ def workers_in_dependency_order(workers):
 
 
 def exit_code_for_run(run):
-    status = run.get("status")
-    if status == "done":
-        return 0
-    if status == "timeout":
-        return EX_TIMEOUT
-    if status == "blocked":
-        return EX_BLOCKED
-    if status == "aborted":
-        return EX_ABORTED
-    if has_partial_worker_success(run):
-        return EX_PARTIAL
-    return EX_UNAVAILABLE
+    return exit_code_for_status(run.get("status"), partial_success=has_partial_worker_success(run))
 
 
 def has_partial_worker_success(run):

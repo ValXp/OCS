@@ -1,10 +1,13 @@
 import unittest
 
 from opencode_session.worker_state import (
+    EX_UNAVAILABLE,
+    exit_code_for_run,
     mark_dependency_blocked,
     mark_worker_aborted,
     mark_worker_active,
     normalize_worker,
+    refresh_run_summary,
 )
 
 
@@ -61,6 +64,20 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["status"], "aborted")
         self.assertEqual(worker["next_eligible_action"], "none")
         self.assertEqual(worker["abort"], {"accepted": True})
+
+    def test_refresh_run_summary_and_exit_code_use_failed_precedence_for_mixed_terminal_workers(self):
+        run = {
+            "workers": {
+                "build": {"id": "build", "prompt": "Build", "status": "timeout"},
+                "review": {"id": "review", "prompt": "Review", "status": "aborted"},
+                "test": {"id": "test", "prompt": "Test", "status": "failed"},
+            }
+        }
+
+        refresh_run_summary(run)
+
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(exit_code_for_run(run), EX_UNAVAILABLE)
 
 
 if __name__ == "__main__":

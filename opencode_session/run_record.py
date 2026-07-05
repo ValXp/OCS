@@ -2,6 +2,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from opencode_session.status import short_status
+from opencode_session.status_policy import merge_status, status_owner
 from opencode_session.worker_state import (
     default_worker,
     normalize_worker,
@@ -284,11 +285,7 @@ def _merge_independent_worker_field(baseline, incoming, current):
 
 
 def _worker_status_owner(incoming_worker, current_worker):
-    incoming_status = incoming_worker.get("status")
-    current_status = current_worker.get("status")
-    if _status_priority(current_status) > _status_priority(incoming_status):
-        return "current"
-    return "incoming"
+    return status_owner(incoming_worker.get("status"), current_worker.get("status"))
 
 
 def _merge_lists(current, incoming):
@@ -300,11 +297,4 @@ def _merge_lists(current, incoming):
 
 
 def _merge_status(incoming, current):
-    if not isinstance(incoming, str) or not isinstance(current, str):
-        return deepcopy(incoming)
-    return current if _status_priority(current) > _status_priority(incoming) else incoming
-
-
-def _status_priority(status):
-    priority = {"queued": 0, "active": 1, "blocked": 2, "done": 3, "timeout": 4, "failed": 4, "aborted": 5}
-    return priority.get(status, 0)
+    return deepcopy(merge_status(incoming, current))
