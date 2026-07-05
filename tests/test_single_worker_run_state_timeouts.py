@@ -1,9 +1,10 @@
 import tempfile
 import unittest
 
-from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService, WorkerExecutionTimeout
+from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
+from opencode_session.worker_execution import WorkerExecutionTimeout
 
 try:
     from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient
