@@ -20,8 +20,9 @@ from opencode_session.prompt_admission import (
     format_admission_compact,
 )
 from opencode_session.records import tokens_total as _tokens_total
+from opencode_session.run_formatting import format_run_compact
 from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
-from opencode_session.run_store import RunStore, RunStoreError, default_store_root, format_run_compact
+from opencode_session.run_store import RunStore, RunStoreError, default_store_root
 from opencode_session.session_lifecycle import abort_record, format_abort_compact, is_session_not_found_error
 from opencode_session.worker_state import mark_worker_aborted as _mark_worker_aborted
 

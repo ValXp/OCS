@@ -10,7 +10,8 @@ from opencode_session.blocking_execution import (
     unsupported_blocking_execution_message,
 )
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.run_store import DEFAULT_SERVER_URL, RunStoreError
+from opencode_session.run_record import DEFAULT_SERVER_URL
+from opencode_session.run_store import RunStoreError
 from opencode_session.worker_execution import (
     WorkerExecutionTimeout,
     cleanup_created_worker_sessions,
