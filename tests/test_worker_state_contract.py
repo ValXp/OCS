@@ -12,7 +12,7 @@ from opencode_session.worker_state import (
     refresh_run_summary,
     schedule_worker_retry,
 )
-from opencode_session.worker_model import WorkerSchedulingState
+from opencode_session.worker_model import WorkerRecord, WorkerSchedulingState
 
 
 class WorkerStateContractTest(unittest.TestCase):
@@ -57,6 +57,21 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertFalse(WorkerSchedulingState.from_worker(stale_action).can_execute())
         self.assertEqual(WorkerSchedulingState.from_worker(stale_action).lifecycle_state, "active_wait")
         self.assertEqual(WorkerSchedulingState.from_worker(stale_action).next_eligible_action, "wait")
+
+    def test_worker_record_serializes_public_state_from_lifecycle(self):
+        worker = WorkerRecord.from_worker(
+            {
+                "id": "review",
+                "lifecycle_state": "active_wait",
+                "status": "failed",
+                "next_eligible_action": "retry",
+            },
+            "review",
+        ).to_worker()
+
+        self.assertEqual(worker["lifecycle_state"], "active_wait")
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["next_eligible_action"], "wait")
 
     def test_mark_worker_active_sets_waiting_action_and_timeout_start(self):
         worker = normalize_worker({"timeout_seconds": 30}, "builder")
@@ -190,6 +205,25 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["last_failure_reason"], "previous failure")
         self.assertEqual(worker["next_eligible_action"], "retry")
         self.assertEqual(worker["lifecycle_state"], "active_retry")
+
+    def test_mark_worker_active_clears_retry_marker_prompt_ids(self):
+        worker = normalize_worker(
+            {
+                "status": "failed",
+                "retryable_failures": ["provider"],
+                "retry_count": 0,
+                "retry_limit": 1,
+                "prompt_ids": ["msg_failed"],
+            },
+            "review",
+        )
+        schedule_worker_retry(worker, "provider", "provider failed", prompt_ids=("msg_failed",))
+
+        mark_worker_active(worker)
+
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["lifecycle_state"], "active_wait")
+        self.assertEqual(worker["prompt_ids"], [])
 
     def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
         worker = normalize_worker({"status": "active", "next_eligible_action": "wait"}, "planner")

@@ -42,6 +42,13 @@ FAILED_DEPENDENCY_STATUSES = frozenset(
     {WORKER_STATUS_FAILED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT, WORKER_STATUS_BLOCKED}
 )
 EXECUTABLE_WORKER_ACTIONS = frozenset({WORKER_ACTION_START, WORKER_ACTION_RETRY})
+WORKER_LIST_FIELDS = (
+    "dependencies",
+    "prompt_ids",
+    "retryable_failures",
+    "blockers",
+    "output_refs",
+)
 
 PUBLIC_WORKER_STATE_BY_LIFECYCLE = {
     WORKER_LIFECYCLE_QUEUED: (WORKER_STATUS_QUEUED, WORKER_ACTION_START),
@@ -63,6 +70,152 @@ WORKER_LIFECYCLE_STATES = frozenset(PUBLIC_WORKER_STATE_BY_LIFECYCLE)
 
 
 @dataclass(frozen=True)
+class WorkerRecord:
+    worker_id: str
+    fields: dict
+    has_explicit_lifecycle: bool = False
+
+    @classmethod
+    def from_worker(cls, worker, worker_id=None):
+        fields = dict(worker) if isinstance(worker, dict) else {}
+        resolved_worker_id = fields.get("id") or worker_id
+        has_explicit_lifecycle = isinstance(worker, dict) and bool(worker.get("lifecycle_state"))
+        return cls(resolved_worker_id, fields, has_explicit_lifecycle)
+
+    @classmethod
+    def default_fields(cls, worker_id):
+        return {
+            "id": worker_id,
+            "role": None,
+            "session_id": None,
+            "agent": None,
+            "model": None,
+            "dependencies": [],
+            "prompt_ids": [],
+            "status": WORKER_STATUS_QUEUED,
+            "retry_count": 0,
+            "retry_limit": 0,
+            "retryable_failures": [],
+            "timeout_seconds": None,
+            "timeout_policy": WORKER_STATUS_TIMEOUT,
+            "timeout_started_at": None,
+            "timed_out_at": None,
+            "lifecycle_state": WORKER_LIFECYCLE_QUEUED,
+            "failure_category": None,
+            "failure_reason": None,
+            "last_failure_category": None,
+            "last_failure_reason": None,
+            "next_eligible_action": WORKER_ACTION_START,
+            "blockers": [],
+            "output_refs": [],
+        }
+
+    @classmethod
+    def public_state(cls, lifecycle_state):
+        return PUBLIC_WORKER_STATE_BY_LIFECYCLE.get(lifecycle_state, (None, WORKER_ACTION_NONE))
+
+    @classmethod
+    def public_state_fields(cls, lifecycle_state):
+        status, action = cls.public_state(lifecycle_state)
+        return {
+            "lifecycle_state": lifecycle_state,
+            "status": status,
+            "next_eligible_action": action,
+        }
+
+    @classmethod
+    def lifecycle_set_fields(cls, worker_id, lifecycle_state):
+        fields = {"id": worker_id}
+        fields.update(cls.public_state_fields(lifecycle_state))
+        return fields
+
+    @property
+    def lifecycle_state(self):
+        lifecycle_state = self.fields.get("lifecycle_state")
+        if lifecycle_state in WORKER_LIFECYCLE_STATES:
+            return lifecycle_state
+        return self._infer_lifecycle_state(self.fields)
+
+    @property
+    def status(self):
+        return self.public_state(self.lifecycle_state)[0]
+
+    @property
+    def next_eligible_action(self):
+        return self.public_state(self.lifecycle_state)[1]
+
+    def scheduling_state(self):
+        return WorkerSchedulingState(
+            self.lifecycle_state,
+            self.status,
+            self.next_eligible_action,
+            worker_has_prompt(self.fields),
+        )
+
+    def to_worker(self):
+        normalized = self.default_fields(self.worker_id)
+        normalized.update(self.fields)
+        normalized["id"] = normalized.get("id") or self.worker_id
+        for key in WORKER_LIST_FIELDS:
+            value = normalized.get(key)
+            normalized[key] = value if isinstance(value, list) else []
+        if normalized.get("retry_count") is None:
+            normalized["retry_count"] = 0
+        if normalized.get("retry_limit") is None:
+            normalized["retry_limit"] = 0
+        if not normalized.get("timeout_policy"):
+            normalized["timeout_policy"] = WORKER_STATUS_TIMEOUT
+        if not normalized.get("status"):
+            normalized["status"] = WORKER_STATUS_QUEUED
+        else:
+            normalized["status"] = short_status(normalized["status"])
+        lifecycle_source = dict(normalized)
+        if not self.has_explicit_lifecycle:
+            lifecycle_source.pop("lifecycle_state", None)
+        lifecycle_record = WorkerRecord.from_worker(lifecycle_source, normalized["id"])
+        normalized.update(lifecycle_record.serialized_public_state())
+        return normalized
+
+    def serialized_public_state(self):
+        return self.public_state_fields(self.lifecycle_state)
+
+    @staticmethod
+    def _infer_lifecycle_state(worker):
+        status = short_status(worker.get("status") if isinstance(worker, dict) else None)
+        if status == WORKER_STATUS_QUEUED:
+            return WORKER_LIFECYCLE_QUEUED
+        if status == WORKER_STATUS_ACTIVE:
+            if worker.get("next_eligible_action") == WORKER_ACTION_RETRY:
+                return WORKER_LIFECYCLE_ACTIVE_RETRY
+            return WORKER_LIFECYCLE_ACTIVE_WAIT
+        if is_blocked_status(status):
+            if worker.get("failure_category") == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(
+                worker.get("blockers") or []
+            ):
+                return WORKER_LIFECYCLE_BLOCKED_TIMEOUT
+            return WORKER_LIFECYCLE_BLOCKED_DEPENDENCY
+        if status == WORKER_STATUS_DONE:
+            return WORKER_LIFECYCLE_DONE_COLLECT
+        if status == WORKER_STATUS_FAILED:
+            if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
+                if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
+                    return WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY
+                return WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL
+            if worker_retry_available(worker):
+                return WORKER_LIFECYCLE_FAILED_RETRY
+            return WORKER_LIFECYCLE_FAILED_TERMINAL
+        if status == WORKER_STATUS_TIMEOUT:
+            if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
+                return WORKER_LIFECYCLE_TIMEOUT_RETRY
+            return WORKER_LIFECYCLE_TIMEOUT_TERMINAL
+        if status == WORKER_STATUS_ABORTED:
+            if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
+                return WORKER_LIFECYCLE_TIMEOUT_ABORTED
+            return WORKER_LIFECYCLE_ABORTED
+        return WORKER_LIFECYCLE_QUEUED
+
+
+@dataclass(frozen=True)
 class WorkerSchedulingState:
     lifecycle_state: Optional[str]
     status: Optional[str]
@@ -73,14 +226,7 @@ class WorkerSchedulingState:
     def from_worker(cls, worker):
         if not isinstance(worker, dict):
             return cls(None, None, "none", False)
-        lifecycle_state = worker_lifecycle_state(worker)
-        public_status, public_action = public_worker_state(lifecycle_state)
-        return cls(
-            lifecycle_state,
-            public_status,
-            public_action,
-            worker_has_prompt(worker),
-        )
+        return WorkerRecord.from_worker(worker).scheduling_state()
 
     def can_execute(self):
         return self.has_prompt and self.next_eligible_action in EXECUTABLE_WORKER_ACTIONS
@@ -90,62 +236,27 @@ class WorkerSchedulingState:
 
 
 def next_eligible_worker_action(worker):
-    return public_worker_state(worker_lifecycle_state(worker))[1]
+    if not isinstance(worker, dict):
+        return WORKER_ACTION_NONE
+    return WorkerRecord.from_worker(worker).next_eligible_action
 
 
 def public_worker_state(lifecycle_state):
-    return PUBLIC_WORKER_STATE_BY_LIFECYCLE.get(lifecycle_state, (None, WORKER_ACTION_NONE))
+    return WorkerRecord.public_state(lifecycle_state)
 
 
 def public_worker_state_fields(lifecycle_state):
-    status, action = public_worker_state(lifecycle_state)
-    return {
-        "lifecycle_state": lifecycle_state,
-        "status": status,
-        "next_eligible_action": action,
-    }
+    return WorkerRecord.public_state_fields(lifecycle_state)
 
 
 def worker_lifecycle_state(worker):
     if not isinstance(worker, dict):
         return None
-    lifecycle_state = worker.get("lifecycle_state")
-    if lifecycle_state in WORKER_LIFECYCLE_STATES:
-        return lifecycle_state
-    return infer_worker_lifecycle_state(worker)
+    return WorkerRecord.from_worker(worker).lifecycle_state
 
 
 def infer_worker_lifecycle_state(worker):
-    status = short_status(worker.get("status") if isinstance(worker, dict) else None)
-    if status == WORKER_STATUS_QUEUED:
-        return WORKER_LIFECYCLE_QUEUED
-    if status == WORKER_STATUS_ACTIVE:
-        if worker.get("next_eligible_action") == WORKER_ACTION_RETRY:
-            return WORKER_LIFECYCLE_ACTIVE_RETRY
-        return WORKER_LIFECYCLE_ACTIVE_WAIT
-    if is_blocked_status(status):
-        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(worker.get("blockers") or []):
-            return WORKER_LIFECYCLE_BLOCKED_TIMEOUT
-        return WORKER_LIFECYCLE_BLOCKED_DEPENDENCY
-    if status == WORKER_STATUS_DONE:
-        return WORKER_LIFECYCLE_DONE_COLLECT
-    if status == WORKER_STATUS_FAILED:
-        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
-            if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
-                return WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY
-            return WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL
-        if worker_retry_available(worker):
-            return WORKER_LIFECYCLE_FAILED_RETRY
-        return WORKER_LIFECYCLE_FAILED_TERMINAL
-    if status == WORKER_STATUS_TIMEOUT:
-        if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
-            return WORKER_LIFECYCLE_TIMEOUT_RETRY
-        return WORKER_LIFECYCLE_TIMEOUT_TERMINAL
-    if status == WORKER_STATUS_ABORTED:
-        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
-            return WORKER_LIFECYCLE_TIMEOUT_ABORTED
-        return WORKER_LIFECYCLE_ABORTED
-    return WORKER_LIFECYCLE_QUEUED
+    return WorkerRecord._infer_lifecycle_state(worker)
 
 
 def worker_retry_available(worker, category=None):
