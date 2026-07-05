@@ -2,6 +2,7 @@ import unittest
 
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
+    WorkerTransition,
     apply_worker_result,
     exit_code_for_run,
     mark_dependency_blocked,
@@ -80,6 +81,31 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("failure_retryable", worker)
         self.assertEqual(worker["last_failure_category"], "api")
         self.assertEqual(worker["last_failure_reason"], "previous failure")
+
+    def test_worker_transition_applies_lifecycle_patch_without_snapshot_whitelist(self):
+        latest_workers = {
+            "review": {
+                "id": "review",
+                "status": "active",
+                "next_eligible_action": "wait",
+                "failure_retryable": False,
+                "prompt_ids": ["msg_previous"],
+            }
+        }
+
+        merged = WorkerTransition.failed(
+            "review",
+            "provider",
+            "provider failed",
+            retryable=True,
+            retry_available=False,
+            prompt_ids=("msg_failed",),
+        ).apply_to(latest_workers)
+
+        self.assertEqual(merged["status"], "failed")
+        self.assertEqual(merged["error"], "provider failed")
+        self.assertEqual(merged["prompt_ids"], ["msg_previous", "msg_failed"])
+        self.assertNotIn("failure_retryable", merged)
 
     def test_mark_dependency_blocked_records_blockers_and_resolution_action(self):
         worker = normalize_worker({}, "review")

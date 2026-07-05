@@ -8,6 +8,7 @@ from opencode_session.disposable_session_lifecycle import cleanup_disposable_ses
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_state import (
+    WorkerTransition,
     apply_worker_result,
     mark_worker_active,
     mark_worker_failed,
@@ -55,6 +56,7 @@ class WorkerAttemptTransition:
     created_session_id: Optional[str] = None
     error: Optional[str] = None
     failure_category: Optional[str] = None
+    worker_transition: Optional[WorkerTransition] = None
 
 
 @dataclass
@@ -157,14 +159,19 @@ def apply_worker_attempt_transition(client, run, worker, attempt, *, now, agent=
     if attempt.failure_category == "api":
         return _apply_retryable_attempt_failure(worker, "api", attempt.reason, error_prefix="api failure")
     if attempt.failure_category == "provider":
-        if attempt.prompt_id is not None:
-            worker["prompt_ids"] = [attempt.prompt_id]
-        return _apply_retryable_attempt_failure(worker, "provider", attempt.reason, error_prefix="provider failure")
-    mark_worker_failed(worker, "unknown", attempt.reason or "worker attempt failed")
+        return _apply_retryable_attempt_failure(
+            worker,
+            "provider",
+            attempt.reason,
+            error_prefix="provider failure",
+            prompt_ids=(attempt.prompt_id,),
+        )
+    failure_transition = mark_worker_failed(worker, "unknown", attempt.reason or "worker attempt failed")
     return WorkerAttemptTransition(
         TERMINAL_FAILURE,
         error=attempt.reason or "worker attempt failed",
         failure_category="unknown",
+        worker_transition=failure_transition,
     )
 
 
@@ -197,14 +204,14 @@ def execute_worker_attempts(
     if session_outcome.created_session_id is not None:
         created_session_ids.append(session_outcome.created_session_id)
     if create_session:
-        _notify_worker_update(on_worker_update)
+        _notify_worker_update(on_worker_update, worker, WorkerTransition.provisioned(worker))
 
     while True:
         attempt = execute_single_worker_attempt(client, worker, prompt, capabilities, executor=executor, now=now)
         transition = apply_worker_attempt_transition(client, run, worker, attempt, now=now, agent=agent, model=model)
         if transition.created_session_id is not None:
             created_session_ids.append(transition.created_session_id)
-        _notify_worker_update(on_worker_update)
+        _notify_worker_update(on_worker_update, worker, transition.worker_transition)
         if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
             continue
         return WorkerExecutionOutcome(
@@ -217,31 +224,34 @@ def execute_worker_attempts(
 
 def _apply_completed_attempt(worker, result):
     prompt_id = result["message_ids"].get("user")
-    if prompt_id is not None:
-        worker["prompt_ids"] = [prompt_id]
-    apply_worker_result(worker, result)
-    return WorkerAttemptTransition(COMPLETED)
+    transition = apply_worker_result(worker, result, prompt_ids=(prompt_id,))
+    return WorkerAttemptTransition(COMPLETED, worker_transition=transition)
 
 
 def _apply_timeout_attempt_failure(client, run, worker, reason, now, *, agent=None, model=None):
     manual_retry_available = worker_retry_available(worker, "timeout")
-    mark_worker_timeout(worker, reason, now)
+    transition = mark_worker_timeout(worker, reason, now, manual_retry_required=manual_retry_available)
     if manual_retry_available:
-        worker["manual_retry_required"] = True
         return WorkerAttemptTransition(
             TERMINAL_FAILURE,
             error=f"{reason}; automatic timeout retry skipped because the timed-out request may still be running",
             failure_category="timeout",
+            worker_transition=transition,
         )
-    worker.pop("manual_retry_required", None)
-    return WorkerAttemptTransition(TERMINAL_FAILURE, error=reason, failure_category="timeout")
+    return WorkerAttemptTransition(TERMINAL_FAILURE, error=reason, failure_category="timeout", worker_transition=transition)
 
 
-def _apply_retryable_attempt_failure(worker, category, reason, *, error_prefix):
-    if schedule_worker_retry(worker, category, reason):
-        return WorkerAttemptTransition(RETRY_SCHEDULED, failure_category=category)
-    mark_worker_failed(worker, category, reason)
-    return WorkerAttemptTransition(TERMINAL_FAILURE, error=f"{error_prefix}: {reason}", failure_category=category)
+def _apply_retryable_attempt_failure(worker, category, reason, *, error_prefix, prompt_ids=()):
+    retry_transition = schedule_worker_retry(worker, category, reason, prompt_ids=prompt_ids)
+    if retry_transition:
+        return WorkerAttemptTransition(RETRY_SCHEDULED, failure_category=category, worker_transition=retry_transition)
+    failure_transition = mark_worker_failed(worker, category, reason, prompt_ids=prompt_ids)
+    return WorkerAttemptTransition(
+        TERMINAL_FAILURE,
+        error=f"{error_prefix}: {reason}",
+        failure_category=category,
+        worker_transition=failure_transition,
+    )
 
 
 def cleanup_created_worker_sessions(client, worker, session_ids):
@@ -310,6 +320,6 @@ def _accepts_keyword(callable_object, name):
     return False
 
 
-def _notify_worker_update(callback):
+def _notify_worker_update(callback, worker, transition):
     if callback is not None:
-        callback()
+        callback(worker, transition)

@@ -6,7 +6,7 @@ from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.run_start_policy import blocking_execution_start_error, mark_orchestration_cleanup_failed
 from opencode_session.worker_execution import cleanup_created_worker_sessions, execute_worker_attempts
-from opencode_session.worker_state import EX_UNAVAILABLE
+from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition
 
 
 @dataclass
@@ -70,7 +70,7 @@ class RunStartCore:
             agent=agent,
             model=model,
             stop_after_retry=stop_after_retry,
-            on_worker_update=lambda: self.persist_worker_update(run, worker),
+            on_worker_update=lambda updated_worker, transition: self.persist_worker_update(run, transition or updated_worker),
         )
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):
@@ -81,12 +81,12 @@ class RunStartCore:
             if not isinstance(worker, dict):
                 continue
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
-            self.persist_worker_update(run, worker)
+            self.persist_worker_update(run, WorkerTransition.cleanup_updated(worker))
             if cleanup_outcome.error is not None:
                 if first_error is None:
                     first_error = cleanup_outcome.error
-                mark_orchestration_cleanup_failed(run, worker, str(cleanup_outcome.error))
-                self.persist_worker_update(run, worker)
+                transition = mark_orchestration_cleanup_failed(run, worker, str(cleanup_outcome.error))
+                self.persist_worker_update(run, transition)
         if first_error is not None:
             self.refresh_run_summary(run)
             return CleanupFailureOutcome(

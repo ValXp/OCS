@@ -235,8 +235,8 @@ class DependencyOrderedSerialRunOrchestrationService:
 
     def _mark_prompted_workers_failed(self, run, error):
         workers = _pending_prompted_workers(run.get("workers", {}))
-        mark_orchestration_start_failed(run, workers, error)
-        self._persist_workers(run, workers)
+        transitions = mark_orchestration_start_failed(run, workers, error)
+        self._persist_transitions(run, transitions)
 
     def _persist_schedule_tick(self, run):
         tick = schedule_dependency_ordered_tick(run.get("workers", {}))
@@ -260,6 +260,15 @@ class DependencyOrderedSerialRunOrchestrationService:
             self.store,
             run,
             [worker],
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
+
+    def _persist_transitions(self, run, transitions):
+        persist_worker_transitions(
+            self.store,
+            run,
+            transitions,
             refresh_run_summary=refresh_orchestration_run_summary,
             now=self.now,
         )

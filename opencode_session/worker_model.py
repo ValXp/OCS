@@ -4,10 +4,29 @@ from typing import Optional
 from opencode_session.status import short_status
 
 
-BLOCKED_WORKER_STATUS = "blocked"
-TERMINAL_WORKER_STATUSES = frozenset({"done", "failed", "aborted", "timeout"})
-FAILED_DEPENDENCY_STATUSES = frozenset({"failed", "aborted", "timeout", BLOCKED_WORKER_STATUS})
-EXECUTABLE_WORKER_ACTIONS = frozenset({"start", "retry"})
+WORKER_STATUS_QUEUED = "queued"
+WORKER_STATUS_ACTIVE = "active"
+WORKER_STATUS_BLOCKED = "blocked"
+WORKER_STATUS_DONE = "done"
+WORKER_STATUS_FAILED = "failed"
+WORKER_STATUS_ABORTED = "aborted"
+WORKER_STATUS_TIMEOUT = "timeout"
+
+WORKER_ACTION_START = "start"
+WORKER_ACTION_WAIT = "wait"
+WORKER_ACTION_RETRY = "retry"
+WORKER_ACTION_RESOLVE_BLOCKER = "resolve_blocker"
+WORKER_ACTION_COLLECT = "collect"
+WORKER_ACTION_NONE = "none"
+
+BLOCKED_WORKER_STATUS = WORKER_STATUS_BLOCKED
+TERMINAL_WORKER_STATUSES = frozenset(
+    {WORKER_STATUS_DONE, WORKER_STATUS_FAILED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT}
+)
+FAILED_DEPENDENCY_STATUSES = frozenset(
+    {WORKER_STATUS_FAILED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT, WORKER_STATUS_BLOCKED}
+)
+EXECUTABLE_WORKER_ACTIONS = frozenset({WORKER_ACTION_START, WORKER_ACTION_RETRY})
 
 
 @dataclass(frozen=True)
@@ -35,19 +54,19 @@ class WorkerSchedulingState:
 
 def next_eligible_worker_action(worker):
     status = short_status(worker.get("status") if isinstance(worker, dict) else None)
-    if status == "queued":
-        return "start"
-    if status == "active":
-        return "retry" if worker.get("next_eligible_action") == "retry" else "wait"
+    if status == WORKER_STATUS_QUEUED:
+        return WORKER_ACTION_START
+    if status == WORKER_STATUS_ACTIVE:
+        return WORKER_ACTION_RETRY if worker.get("next_eligible_action") == WORKER_ACTION_RETRY else WORKER_ACTION_WAIT
     if is_blocked_status(status):
-        return "resolve_blocker"
-    if status == "done":
-        return "collect"
-    if status == "timeout" and worker_retry_available(worker, "timeout"):
-        return "retry"
-    if status == "failed" and worker_retry_available(worker):
-        return "retry"
-    return "none"
+        return WORKER_ACTION_RESOLVE_BLOCKER
+    if status == WORKER_STATUS_DONE:
+        return WORKER_ACTION_COLLECT
+    if status == WORKER_STATUS_TIMEOUT and worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
+        return WORKER_ACTION_RETRY
+    if status == WORKER_STATUS_FAILED and worker_retry_available(worker):
+        return WORKER_ACTION_RETRY
+    return WORKER_ACTION_NONE
 
 
 def worker_retry_available(worker, category=None):
