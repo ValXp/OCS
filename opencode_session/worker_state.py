@@ -20,6 +20,20 @@ from opencode_session.worker_model import (
     WORKER_ACTION_RETRY,
     WORKER_ACTION_START,
     WORKER_ACTION_WAIT,
+    WORKER_LIFECYCLE_ABORTED,
+    WORKER_LIFECYCLE_ACTIVE_RETRY,
+    WORKER_LIFECYCLE_ACTIVE_WAIT,
+    WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+    WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+    WORKER_LIFECYCLE_DONE_COLLECT,
+    WORKER_LIFECYCLE_FAILED_RETRY,
+    WORKER_LIFECYCLE_FAILED_TERMINAL,
+    WORKER_LIFECYCLE_QUEUED,
+    WORKER_LIFECYCLE_TIMEOUT_ABORTED,
+    WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+    WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL,
+    WORKER_LIFECYCLE_TIMEOUT_RETRY,
+    WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
     WORKER_STATUS_ABORTED,
     WORKER_STATUS_ACTIVE,
     WORKER_STATUS_BLOCKED,
@@ -28,6 +42,8 @@ from opencode_session.worker_model import (
     WORKER_STATUS_QUEUED,
     WORKER_STATUS_TIMEOUT,
     next_eligible_worker_action,
+    public_worker_state_fields,
+    worker_lifecycle_state,
     worker_retry_available,
 )
 
@@ -40,28 +56,6 @@ WORKER_LIST_FIELDS = (
     "output_refs",
 )
 
-# Compatibility fallback for callers that still persist a whole worker dict instead of
-# a named WorkerTransition factory. Runtime lifecycle code should pass explicit patches.
-WORKER_SNAPSHOT_STATE_FIELDS = (
-    "status",
-    "retry_count",
-    "timeout_started_at",
-    "timed_out_at",
-    "failure_category",
-    "failure_reason",
-    "last_failure_category",
-    "last_failure_reason",
-    "next_eligible_action",
-    "blockers",
-    "output_refs",
-    "error",
-    "failure_retryable",
-    "manual_retry_required",
-    "result",
-    "cleanup",
-    "abort",
-)
-WORKER_SNAPSHOT_SET_IF_MISSING_FIELDS = ("session_id",)
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 _UNSET = object()
 
@@ -78,46 +72,6 @@ class WorkerTransition:
     preserve_accepted_abort: bool = True
     replace_worker: bool = False
 
-    def __getitem__(self, key):
-        if key == "id":
-            return self.worker_id
-        return self.set_fields[key]
-
-    def get(self, key, default=None):
-        if key == "id":
-            return self.worker_id
-        return self.set_fields.get(key, default)
-
-    @classmethod
-    def from_worker_state_update(cls, worker):
-        return cls.from_worker_snapshot(worker)
-
-    @classmethod
-    def from_worker_snapshot(cls, worker):
-        worker_id = worker["id"]
-        set_fields = {"id": worker_id}
-        for field_name in WORKER_SNAPSHOT_STATE_FIELDS:
-            if field_name in worker:
-                set_fields[field_name] = deepcopy(worker[field_name])
-        merge_unique_fields = {}
-        prompt_ids = worker.get("prompt_ids")
-        if isinstance(prompt_ids, list):
-            merge_unique_fields["prompt_ids"] = tuple(prompt_ids)
-        set_if_missing_fields = {
-            field_name: deepcopy(worker[field_name])
-            for field_name in WORKER_SNAPSHOT_SET_IF_MISSING_FIELDS
-            if worker.get(field_name)
-        }
-        return cls(
-            worker_id,
-            set_fields=set_fields,
-            delete_fields=tuple(
-                field_name for field_name in REMOVABLE_WORKER_TRANSITION_FIELDS if field_name not in worker
-            ),
-            set_if_missing_fields=set_if_missing_fields,
-            merge_unique_fields=merge_unique_fields,
-        )
-
     @classmethod
     def provisioned(cls, worker):
         worker_id = worker["id"]
@@ -132,17 +86,7 @@ class WorkerTransition:
 
     @classmethod
     def active(cls, worker_id, *, timeout_started_at=_UNSET):
-        set_fields, delete_fields = _cleared_current_status_patch()
-        set_fields.update(
-            {
-                "id": worker_id,
-                "status": WORKER_STATUS_ACTIVE,
-                "next_eligible_action": WORKER_ACTION_WAIT,
-            }
-        )
-        if timeout_started_at is not _UNSET:
-            set_fields["timeout_started_at"] = timeout_started_at
-        return cls(worker_id, set_fields=set_fields, delete_fields=delete_fields)
+        return reduce_worker_lifecycle(worker_id, "active", timeout_started_at=timeout_started_at)
 
     @classmethod
     def failed(
@@ -156,74 +100,35 @@ class WorkerTransition:
         timeout_started_at=_UNSET,
         prompt_ids=(),
     ):
-        set_fields = {
-            "id": worker_id,
-            "status": WORKER_STATUS_FAILED,
-            "error": reason,
-            "failure_category": category,
-            "failure_reason": reason,
-            "last_failure_category": category,
-            "last_failure_reason": reason,
-            "next_eligible_action": WORKER_ACTION_RETRY if retryable and retry_available else WORKER_ACTION_NONE,
-        }
-        if timeout_started_at is not _UNSET:
-            set_fields["timeout_started_at"] = timeout_started_at
-        delete_fields = ["manual_retry_required"]
-        if retryable:
-            delete_fields.append("failure_retryable")
-        else:
-            set_fields["failure_retryable"] = False
-        return cls(
+        return reduce_worker_lifecycle(
             worker_id,
-            set_fields=set_fields,
-            delete_fields=tuple(delete_fields),
-            merge_unique_fields=_prompt_ids_merge(prompt_ids),
+            "failed",
+            category=category,
+            reason=reason,
+            retryable=retryable,
+            retry_available=retry_available,
+            timeout_started_at=timeout_started_at,
+            prompt_ids=prompt_ids,
         )
 
     @classmethod
     def dependency_blocked(cls, worker_id, blockers):
-        return cls(
-            worker_id,
-            set_fields={
-                "id": worker_id,
-                "status": WORKER_STATUS_BLOCKED,
-                "blockers": list(blockers),
-                "next_eligible_action": WORKER_ACTION_RESOLVE_BLOCKER,
-            },
-        )
+        return reduce_worker_lifecycle(worker_id, "dependency_blocked", blockers=blockers)
 
     @classmethod
     def aborted(cls, worker_id, abort):
-        set_fields = {"id": worker_id, "abort": deepcopy(abort)}
-        if isinstance(abort, dict) and abort.get("accepted"):
-            set_fields.update(
-                {
-                    "status": WORKER_STATUS_ABORTED,
-                    "next_eligible_action": WORKER_ACTION_NONE,
-                }
-            )
-        return cls(worker_id, set_fields=set_fields)
+        return reduce_worker_lifecycle(worker_id, "aborted", abort=abort)
 
     @classmethod
     def retry_scheduled(cls, worker_id, category, reason, *, retry_count, timeout_started_at=_UNSET, prompt_ids=()):
-        set_fields, delete_fields = _cleared_current_status_patch()
-        set_fields.update(
-            {
-                "id": worker_id,
-                "retry_count": retry_count,
-                "status": WORKER_STATUS_ACTIVE,
-                "last_failure_category": category,
-                "last_failure_reason": reason,
-                "next_eligible_action": WORKER_ACTION_RETRY,
-            }
-        )
-        if timeout_started_at is not _UNSET:
-            set_fields["timeout_started_at"] = timeout_started_at
-        return cls(
+        return reduce_worker_lifecycle(
             worker_id,
-            set_fields=set_fields,
-            delete_fields=delete_fields,
-            merge_unique_fields=_prompt_ids_merge(prompt_ids),
+            "retry_scheduled",
+            category=category,
+            reason=reason,
+            retry_count=retry_count,
+            timeout_started_at=timeout_started_at,
+            prompt_ids=prompt_ids,
         )
 
     @classmethod
@@ -238,58 +143,25 @@ class WorkerTransition:
         manual_retry_required=False,
         timeout_started_at=_UNSET,
     ):
-        set_fields = {
-            "id": worker_id,
-            "status": status,
-            "error": reason,
-            "failure_category": WORKER_STATUS_TIMEOUT,
-            "failure_reason": reason,
-            "last_failure_category": WORKER_STATUS_TIMEOUT,
-            "last_failure_reason": reason,
-            "timed_out_at": timed_out_at,
-            "output_refs": [],
-        }
-        if timeout_started_at is not _UNSET:
-            set_fields["timeout_started_at"] = timeout_started_at
-        if status == WORKER_STATUS_BLOCKED:
-            set_fields["blockers"] = [WORKER_STATUS_TIMEOUT]
-            set_fields["next_eligible_action"] = WORKER_ACTION_RESOLVE_BLOCKER
-        elif status in {WORKER_STATUS_FAILED, WORKER_STATUS_TIMEOUT} and retry_available:
-            set_fields["next_eligible_action"] = WORKER_ACTION_RETRY
-        else:
-            set_fields["next_eligible_action"] = WORKER_ACTION_NONE
-        delete_fields = []
-        if manual_retry_required:
-            set_fields["manual_retry_required"] = True
-        else:
-            delete_fields.append("manual_retry_required")
-        return cls(worker_id, set_fields=set_fields, delete_fields=tuple(delete_fields))
+        return reduce_worker_lifecycle(
+            worker_id,
+            "timed_out",
+            reason=reason,
+            status=status,
+            timed_out_at=timed_out_at,
+            retry_available=retry_available,
+            manual_retry_required=manual_retry_required,
+            timeout_started_at=timeout_started_at,
+        )
 
     @classmethod
     def result_applied(cls, worker_id, result, *, prompt_ids=(), timeout_started_at=_UNSET):
-        status = result["status"]
-        set_fields = {
-            "id": worker_id,
-            "result": deepcopy(result),
-            "status": status,
-            "next_eligible_action": WORKER_ACTION_COLLECT if status == WORKER_STATUS_DONE else WORKER_ACTION_NONE,
-        }
-        if timeout_started_at is not _UNSET:
-            set_fields["timeout_started_at"] = timeout_started_at
-        delete_fields = ()
-        if status == WORKER_STATUS_DONE:
-            clear_fields, delete_fields = _cleared_current_status_patch()
-            set_fields.update(clear_fields)
-            assistant_message_id = result["message_ids"].get("assistant")
-            set_fields["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
-        else:
-            set_fields["failure_category"] = None
-            set_fields["failure_reason"] = None
-        return cls(
+        return reduce_worker_lifecycle(
             worker_id,
-            set_fields=set_fields,
-            delete_fields=delete_fields,
-            merge_unique_fields=_prompt_ids_merge(prompt_ids),
+            "result_applied",
+            result=result,
+            prompt_ids=prompt_ids,
+            timeout_started_at=timeout_started_at,
         )
 
     @classmethod
@@ -345,10 +217,151 @@ class WorkerTransition:
             _merge_unique_list_field(target, source_worker, {field_name: list(values)}, field_name)
 
 
+def reduce_worker_lifecycle(worker_id, event, **data):
+    """Create the only lifecycle patch shape that may set public status/action."""
+    if event == "active":
+        set_fields, delete_fields = _cleared_current_status_patch()
+        set_fields.update(_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_ACTIVE_WAIT))
+        _set_if_not_unset(set_fields, "timeout_started_at", data.get("timeout_started_at", _UNSET))
+        return WorkerTransition(worker_id, set_fields=set_fields, delete_fields=delete_fields)
+
+    if event == "failed":
+        retryable = data.get("retryable", True)
+        retry_available = data.get("retry_available", False)
+        category = data["category"]
+        reason = data["reason"]
+        lifecycle_state = WORKER_LIFECYCLE_FAILED_RETRY if retryable and retry_available else WORKER_LIFECYCLE_FAILED_TERMINAL
+        set_fields = _lifecycle_set_fields(worker_id, lifecycle_state)
+        set_fields.update(
+            {
+                "error": reason,
+                "failure_category": category,
+                "failure_reason": reason,
+                "last_failure_category": category,
+                "last_failure_reason": reason,
+            }
+        )
+        _set_if_not_unset(set_fields, "timeout_started_at", data.get("timeout_started_at", _UNSET))
+        delete_fields = ["manual_retry_required"]
+        if retryable:
+            delete_fields.append("failure_retryable")
+        else:
+            set_fields["failure_retryable"] = False
+        return WorkerTransition(
+            worker_id,
+            set_fields=set_fields,
+            delete_fields=tuple(delete_fields),
+            merge_unique_fields=_prompt_ids_merge(data.get("prompt_ids", ())),
+        )
+
+    if event == "dependency_blocked":
+        set_fields = _lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_BLOCKED_DEPENDENCY)
+        set_fields["blockers"] = list(data["blockers"])
+        return WorkerTransition(worker_id, set_fields=set_fields)
+
+    if event == "aborted":
+        abort = data.get("abort")
+        set_fields = {"id": worker_id, "abort": deepcopy(abort)}
+        if isinstance(abort, dict) and abort.get("accepted"):
+            set_fields.update(public_worker_state_fields(WORKER_LIFECYCLE_ABORTED))
+        return WorkerTransition(worker_id, set_fields=set_fields)
+
+    if event == "retry_scheduled":
+        set_fields, delete_fields = _cleared_current_status_patch()
+        set_fields.update(_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_ACTIVE_RETRY))
+        set_fields.update(
+            {
+                "retry_count": data["retry_count"],
+                "last_failure_category": data["category"],
+                "last_failure_reason": data["reason"],
+            }
+        )
+        _set_if_not_unset(set_fields, "timeout_started_at", data.get("timeout_started_at", _UNSET))
+        return WorkerTransition(
+            worker_id,
+            set_fields=set_fields,
+            delete_fields=delete_fields,
+            merge_unique_fields=_prompt_ids_merge(data.get("prompt_ids", ())),
+        )
+
+    if event == "timed_out":
+        status = data["status"]
+        retry_available = data.get("retry_available", False)
+        lifecycle_state = _timeout_lifecycle_state(status, retry_available)
+        reason = data["reason"]
+        set_fields = _lifecycle_set_fields(worker_id, lifecycle_state)
+        set_fields.update(
+            {
+                "error": reason,
+                "failure_category": WORKER_STATUS_TIMEOUT,
+                "failure_reason": reason,
+                "last_failure_category": WORKER_STATUS_TIMEOUT,
+                "last_failure_reason": reason,
+                "timed_out_at": data["timed_out_at"],
+                "output_refs": [],
+            }
+        )
+        if status == WORKER_STATUS_BLOCKED:
+            set_fields["blockers"] = [WORKER_STATUS_TIMEOUT]
+        _set_if_not_unset(set_fields, "timeout_started_at", data.get("timeout_started_at", _UNSET))
+        delete_fields = []
+        if data.get("manual_retry_required", False):
+            set_fields["manual_retry_required"] = True
+        else:
+            delete_fields.append("manual_retry_required")
+        return WorkerTransition(worker_id, set_fields=set_fields, delete_fields=tuple(delete_fields))
+
+    if event == "result_applied":
+        result = data["result"]
+        status = result["status"]
+        lifecycle_state = WORKER_LIFECYCLE_DONE_COLLECT if status == WORKER_STATUS_DONE else WORKER_LIFECYCLE_FAILED_TERMINAL
+        set_fields = _lifecycle_set_fields(worker_id, lifecycle_state)
+        set_fields["result"] = deepcopy(result)
+        _set_if_not_unset(set_fields, "timeout_started_at", data.get("timeout_started_at", _UNSET))
+        delete_fields = ()
+        if status == WORKER_STATUS_DONE:
+            clear_fields, delete_fields = _cleared_current_status_patch()
+            set_fields.update(clear_fields)
+            assistant_message_id = result["message_ids"].get("assistant")
+            set_fields["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
+        else:
+            set_fields["failure_category"] = None
+            set_fields["failure_reason"] = None
+        return WorkerTransition(
+            worker_id,
+            set_fields=set_fields,
+            delete_fields=delete_fields,
+            merge_unique_fields=_prompt_ids_merge(data.get("prompt_ids", ())),
+        )
+
+    raise ValueError(f"unsupported worker lifecycle event: {event}")
+
+
+def _lifecycle_set_fields(worker_id, lifecycle_state):
+    fields = {"id": worker_id}
+    fields.update(public_worker_state_fields(lifecycle_state))
+    return fields
+
+
+def _set_if_not_unset(fields, name, value):
+    if value is not _UNSET:
+        fields[name] = value
+
+
+def _timeout_lifecycle_state(status, retry_available):
+    if status == WORKER_STATUS_BLOCKED:
+        return WORKER_LIFECYCLE_BLOCKED_TIMEOUT
+    if status == WORKER_STATUS_FAILED:
+        return WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY if retry_available else WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL
+    if status == WORKER_STATUS_ABORTED:
+        return WORKER_LIFECYCLE_TIMEOUT_ABORTED
+    return WORKER_LIFECYCLE_TIMEOUT_RETRY if retry_available else WORKER_LIFECYCLE_TIMEOUT_TERMINAL
+
+
 def _latest_prompt_ids_are_retry_marker(latest_worker):
     return (
         isinstance(latest_worker, dict)
-        and latest_worker.get("next_eligible_action") == WORKER_ACTION_RETRY
+        and worker_lifecycle_state(latest_worker) == WORKER_LIFECYCLE_ACTIVE_RETRY
         and latest_worker.get("last_failure_category") is not None
     )
 
@@ -400,6 +413,7 @@ def default_worker(worker_id):
         "timeout_policy": WORKER_STATUS_TIMEOUT,
         "timeout_started_at": None,
         "timed_out_at": None,
+        "lifecycle_state": WORKER_LIFECYCLE_QUEUED,
         "failure_category": None,
         "failure_reason": None,
         "last_failure_category": None,
@@ -412,6 +426,7 @@ def default_worker(worker_id):
 
 def normalize_worker(worker, worker_id):
     normalized = default_worker(worker_id)
+    has_lifecycle_state = isinstance(worker, dict) and worker.get("lifecycle_state")
     if isinstance(worker, dict):
         normalized.update(worker)
     normalized["id"] = normalized.get("id") or worker_id
@@ -428,7 +443,10 @@ def normalize_worker(worker, worker_id):
         normalized["status"] = WORKER_STATUS_QUEUED
     else:
         normalized["status"] = short_status(normalized["status"])
-    normalized["next_eligible_action"] = next_eligible_action(normalized)
+    lifecycle_source = dict(normalized)
+    if not has_lifecycle_state:
+        lifecycle_source.pop("lifecycle_state", None)
+    normalized.update(public_worker_state_fields(worker_lifecycle_state(lifecycle_source)))
     return normalized
 
 

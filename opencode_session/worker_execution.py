@@ -321,5 +321,5 @@ def _accepts_keyword(callable_object, name):
 
 
 def _notify_worker_update(callback, worker, transition):
-    if callback is not None:
+    if callback is not None and transition is not None:
         callback(worker, transition)

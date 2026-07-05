@@ -2,7 +2,7 @@ import tempfile
 import threading
 import unittest
 
-from opencode_session.run_persistence import persist_worker_update
+from opencode_session.run_persistence import persist_worker_snapshot_update
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_state import mark_worker_aborted, refresh_run_summary
 
@@ -102,7 +102,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
             build_worker["output_refs"] = ["assistant:msg_build"]
-            persist_worker_update(
+            persist_worker_snapshot_update(
                 run_store,
                 run,
                 build_worker,
@@ -136,7 +136,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
             build_worker["output_refs"] = ["assistant:msg_build"]
-            persist_worker_update(
+            persist_worker_snapshot_update(
                 run_store,
                 run,
                 build_worker,
@@ -180,7 +180,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
             build_worker["output_refs"] = ["assistant:msg_build"]
-            persist_worker_update(
+            persist_worker_snapshot_update(
                 run_store,
                 run,
                 build_worker,
@@ -227,7 +227,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
             build_worker["output_refs"] = ["assistant:msg_build"]
-            persist_worker_update(
+            persist_worker_snapshot_update(
                 run_store,
                 run,
                 build_worker,

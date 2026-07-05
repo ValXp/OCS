@@ -19,6 +19,21 @@ WORKER_ACTION_RESOLVE_BLOCKER = "resolve_blocker"
 WORKER_ACTION_COLLECT = "collect"
 WORKER_ACTION_NONE = "none"
 
+WORKER_LIFECYCLE_QUEUED = "queued"
+WORKER_LIFECYCLE_ACTIVE_WAIT = "active_wait"
+WORKER_LIFECYCLE_ACTIVE_RETRY = "active_retry"
+WORKER_LIFECYCLE_BLOCKED_DEPENDENCY = "blocked_dependency"
+WORKER_LIFECYCLE_BLOCKED_TIMEOUT = "blocked_timeout"
+WORKER_LIFECYCLE_DONE_COLLECT = "done_collect"
+WORKER_LIFECYCLE_FAILED_RETRY = "failed_retry"
+WORKER_LIFECYCLE_FAILED_TERMINAL = "failed_terminal"
+WORKER_LIFECYCLE_TIMEOUT_RETRY = "timeout_retry"
+WORKER_LIFECYCLE_TIMEOUT_TERMINAL = "timeout_terminal"
+WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY = "timeout_failed_retry"
+WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL = "timeout_failed_terminal"
+WORKER_LIFECYCLE_TIMEOUT_ABORTED = "timeout_aborted"
+WORKER_LIFECYCLE_ABORTED = "aborted"
+
 BLOCKED_WORKER_STATUS = WORKER_STATUS_BLOCKED
 TERMINAL_WORKER_STATUSES = frozenset(
     {WORKER_STATUS_DONE, WORKER_STATUS_FAILED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT}
@@ -28,9 +43,28 @@ FAILED_DEPENDENCY_STATUSES = frozenset(
 )
 EXECUTABLE_WORKER_ACTIONS = frozenset({WORKER_ACTION_START, WORKER_ACTION_RETRY})
 
+PUBLIC_WORKER_STATE_BY_LIFECYCLE = {
+    WORKER_LIFECYCLE_QUEUED: (WORKER_STATUS_QUEUED, WORKER_ACTION_START),
+    WORKER_LIFECYCLE_ACTIVE_WAIT: (WORKER_STATUS_ACTIVE, WORKER_ACTION_WAIT),
+    WORKER_LIFECYCLE_ACTIVE_RETRY: (WORKER_STATUS_ACTIVE, WORKER_ACTION_RETRY),
+    WORKER_LIFECYCLE_BLOCKED_DEPENDENCY: (WORKER_STATUS_BLOCKED, WORKER_ACTION_RESOLVE_BLOCKER),
+    WORKER_LIFECYCLE_BLOCKED_TIMEOUT: (WORKER_STATUS_BLOCKED, WORKER_ACTION_RESOLVE_BLOCKER),
+    WORKER_LIFECYCLE_DONE_COLLECT: (WORKER_STATUS_DONE, WORKER_ACTION_COLLECT),
+    WORKER_LIFECYCLE_FAILED_RETRY: (WORKER_STATUS_FAILED, WORKER_ACTION_RETRY),
+    WORKER_LIFECYCLE_FAILED_TERMINAL: (WORKER_STATUS_FAILED, WORKER_ACTION_NONE),
+    WORKER_LIFECYCLE_TIMEOUT_RETRY: (WORKER_STATUS_TIMEOUT, WORKER_ACTION_RETRY),
+    WORKER_LIFECYCLE_TIMEOUT_TERMINAL: (WORKER_STATUS_TIMEOUT, WORKER_ACTION_NONE),
+    WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY: (WORKER_STATUS_FAILED, WORKER_ACTION_RETRY),
+    WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL: (WORKER_STATUS_FAILED, WORKER_ACTION_NONE),
+    WORKER_LIFECYCLE_TIMEOUT_ABORTED: (WORKER_STATUS_ABORTED, WORKER_ACTION_NONE),
+    WORKER_LIFECYCLE_ABORTED: (WORKER_STATUS_ABORTED, WORKER_ACTION_NONE),
+}
+WORKER_LIFECYCLE_STATES = frozenset(PUBLIC_WORKER_STATE_BY_LIFECYCLE)
+
 
 @dataclass(frozen=True)
 class WorkerSchedulingState:
+    lifecycle_state: Optional[str]
     status: Optional[str]
     next_eligible_action: str
     has_prompt: bool
@@ -38,10 +72,13 @@ class WorkerSchedulingState:
     @classmethod
     def from_worker(cls, worker):
         if not isinstance(worker, dict):
-            return cls(None, "none", False)
+            return cls(None, None, "none", False)
+        lifecycle_state = worker_lifecycle_state(worker)
+        public_status, public_action = public_worker_state(lifecycle_state)
         return cls(
-            short_status(worker.get("status")),
-            next_eligible_worker_action(worker),
+            lifecycle_state,
+            public_status,
+            public_action,
             worker_has_prompt(worker),
         )
 
@@ -53,20 +90,62 @@ class WorkerSchedulingState:
 
 
 def next_eligible_worker_action(worker):
+    return public_worker_state(worker_lifecycle_state(worker))[1]
+
+
+def public_worker_state(lifecycle_state):
+    return PUBLIC_WORKER_STATE_BY_LIFECYCLE.get(lifecycle_state, (None, WORKER_ACTION_NONE))
+
+
+def public_worker_state_fields(lifecycle_state):
+    status, action = public_worker_state(lifecycle_state)
+    return {
+        "lifecycle_state": lifecycle_state,
+        "status": status,
+        "next_eligible_action": action,
+    }
+
+
+def worker_lifecycle_state(worker):
+    if not isinstance(worker, dict):
+        return None
+    lifecycle_state = worker.get("lifecycle_state")
+    if lifecycle_state in WORKER_LIFECYCLE_STATES:
+        return lifecycle_state
+    return infer_worker_lifecycle_state(worker)
+
+
+def infer_worker_lifecycle_state(worker):
     status = short_status(worker.get("status") if isinstance(worker, dict) else None)
     if status == WORKER_STATUS_QUEUED:
-        return WORKER_ACTION_START
+        return WORKER_LIFECYCLE_QUEUED
     if status == WORKER_STATUS_ACTIVE:
-        return WORKER_ACTION_RETRY if worker.get("next_eligible_action") == WORKER_ACTION_RETRY else WORKER_ACTION_WAIT
+        if worker.get("next_eligible_action") == WORKER_ACTION_RETRY:
+            return WORKER_LIFECYCLE_ACTIVE_RETRY
+        return WORKER_LIFECYCLE_ACTIVE_WAIT
     if is_blocked_status(status):
-        return WORKER_ACTION_RESOLVE_BLOCKER
+        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(worker.get("blockers") or []):
+            return WORKER_LIFECYCLE_BLOCKED_TIMEOUT
+        return WORKER_LIFECYCLE_BLOCKED_DEPENDENCY
     if status == WORKER_STATUS_DONE:
-        return WORKER_ACTION_COLLECT
-    if status == WORKER_STATUS_TIMEOUT and worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
-        return WORKER_ACTION_RETRY
-    if status == WORKER_STATUS_FAILED and worker_retry_available(worker):
-        return WORKER_ACTION_RETRY
-    return WORKER_ACTION_NONE
+        return WORKER_LIFECYCLE_DONE_COLLECT
+    if status == WORKER_STATUS_FAILED:
+        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
+            if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
+                return WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY
+            return WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL
+        if worker_retry_available(worker):
+            return WORKER_LIFECYCLE_FAILED_RETRY
+        return WORKER_LIFECYCLE_FAILED_TERMINAL
+    if status == WORKER_STATUS_TIMEOUT:
+        if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
+            return WORKER_LIFECYCLE_TIMEOUT_RETRY
+        return WORKER_LIFECYCLE_TIMEOUT_TERMINAL
+    if status == WORKER_STATUS_ABORTED:
+        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
+            return WORKER_LIFECYCLE_TIMEOUT_ABORTED
+        return WORKER_LIFECYCLE_ABORTED
+    return WORKER_LIFECYCLE_QUEUED
 
 
 def worker_retry_available(worker, category=None):

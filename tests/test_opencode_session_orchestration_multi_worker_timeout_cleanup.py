@@ -72,7 +72,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
         }
         persisted_worker_ids = []
         core = RunStartCore(
-            persist_worker_update=lambda run, worker: persisted_worker_ids.append(worker["id"]),
+            persist_worker_update=lambda run, worker: persisted_worker_ids.append(worker.worker_id),
             refresh_run_summary=lambda run: None,
             now=lambda: "2026-07-03T00:00:00Z",
         )

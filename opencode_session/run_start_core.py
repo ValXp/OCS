@@ -70,7 +70,7 @@ class RunStartCore:
             agent=agent,
             model=model,
             stop_after_retry=stop_after_retry,
-            on_worker_update=lambda updated_worker, transition: self.persist_worker_update(run, transition or updated_worker),
+            on_worker_update=lambda _updated_worker, transition: self.persist_worker_update(run, transition),
         )
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):

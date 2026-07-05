@@ -46,6 +46,7 @@ def upsert_worker_record(run, worker_id, changes, *, now):
     else:
         worker = normalize_worker(existing, worker_id)
 
+    status_changed = changes.get("status") is not None
     for key in (
         "role",
         "session_id",
@@ -64,7 +65,9 @@ def upsert_worker_record(run, worker_id, changes, *, now):
         if changes.get(key) is not None:
             worker[key] = changes[key]
 
-    workers[worker_id] = worker
+    if status_changed:
+        worker.pop("lifecycle_state", None)
+    workers[worker_id] = normalize_worker(worker, worker_id)
     run["updated_at"] = now
 
 

@@ -35,17 +35,28 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["dependencies"], [])
         self.assertEqual(worker["prompt_ids"], [])
         self.assertEqual(worker["timeout_policy"], "timeout")
+        self.assertEqual(worker["lifecycle_state"], "failed_retry")
         self.assertEqual(worker["next_eligible_action"], "retry")
 
     def test_worker_scheduling_state_derives_canonical_execution_action(self):
         queued = {"id": "build", "prompt": "Build", "status": "queued"}
         waiting = {"id": "review", "prompt": "Review", "status": "active", "next_eligible_action": "wait"}
         retrying = {"id": "test", "prompt": "Test", "status": "active", "next_eligible_action": "retry"}
+        stale_action = {
+            "id": "docs",
+            "prompt": "Docs",
+            "lifecycle_state": "active_wait",
+            "status": "active",
+            "next_eligible_action": "retry",
+        }
 
         self.assertTrue(WorkerSchedulingState.from_worker(queued).can_execute())
         self.assertFalse(WorkerSchedulingState.from_worker(waiting).can_execute())
         self.assertEqual(WorkerSchedulingState.from_worker(waiting).next_eligible_action, "wait")
         self.assertTrue(WorkerSchedulingState.from_worker(retrying).can_execute())
+        self.assertFalse(WorkerSchedulingState.from_worker(stale_action).can_execute())
+        self.assertEqual(WorkerSchedulingState.from_worker(stale_action).lifecycle_state, "active_wait")
+        self.assertEqual(WorkerSchedulingState.from_worker(stale_action).next_eligible_action, "wait")
 
     def test_mark_worker_active_sets_waiting_action_and_timeout_start(self):
         worker = normalize_worker({"timeout_seconds": 30}, "builder")
@@ -53,6 +64,7 @@ class WorkerStateContractTest(unittest.TestCase):
         mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z")
 
         self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["lifecycle_state"], "active_wait")
         self.assertEqual(worker["next_eligible_action"], "wait")
         self.assertEqual(worker["timeout_started_at"], "2026-07-04T00:00:00Z")
 
@@ -177,6 +189,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["last_failure_category"], "api")
         self.assertEqual(worker["last_failure_reason"], "previous failure")
         self.assertEqual(worker["next_eligible_action"], "retry")
+        self.assertEqual(worker["lifecycle_state"], "active_retry")
 
     def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
         worker = normalize_worker({"status": "active", "next_eligible_action": "wait"}, "planner")
