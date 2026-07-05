@@ -3,9 +3,10 @@ import unittest
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService, WorkerExecutionTimeout
+from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
+from opencode_session.worker_execution import WorkerExecutionTimeout
 
 try:
     from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient
@@ -60,6 +61,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 ("create", directory, None, None),
                 ("execute", "ses_initial", "Finish the worker task"),
                 ("delete", "ses_initial"),
+                ("get", "ses_initial"),
             ],
         )
         worker = run["workers"]["worker"]
@@ -131,6 +133,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                         ("create", directory, None, None),
                         ("execute", "ses_new", "Finish the worker task"),
                         ("delete", "ses_new"),
+                        ("get", "ses_new"),
                     ],
                 )
                 self.assertEqual(run["workers"]["worker"]["cleanup"], {"requested": True, "deleted": True})
@@ -185,6 +188,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 ("create", directory, None, None),
                 ("execute", "ses_new", "Finish the worker task"),
                 ("delete", "ses_new"),
+                ("get", "ses_new"),
             ],
         )
         self.assertEqual(run["workers"]["worker"]["cleanup"], {"requested": True, "deleted": True})

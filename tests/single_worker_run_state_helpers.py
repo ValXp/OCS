@@ -1,3 +1,6 @@
+from opencode_session.api_client import OpenCodeApiError
+
+
 CAPABILITIES = {
     "route_availability": {
         "blocking_message": {"path": "/session/{sessionID}/message", "method": "POST", "available": False},
@@ -36,5 +39,13 @@ class FakeClient:
         self.requests.append(("create", directory, agent, model))
         return FakeResponse({"id": self.session_ids.pop(0), "directory": directory})
 
-    def delete_session(self, session_id):
+    def delete_session_response(self, session_id):
         self.requests.append(("delete", session_id))
+
+    def delete_session(self, session_id):
+        response = self.delete_session_response(session_id)
+        return response.data if response is not None else None
+
+    def get_session(self, session_id):
+        self.requests.append(("get", session_id))
+        raise OpenCodeApiError(f"session not found: {session_id}", status=404)

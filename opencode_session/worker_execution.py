@@ -4,6 +4,7 @@ from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
+from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_state import (
@@ -245,19 +246,14 @@ def _apply_retryable_attempt_failure(worker, category, reason, *, error_prefix):
 
 def cleanup_created_worker_sessions(client, worker, session_ids):
     cleanup = worker.setdefault("cleanup", {"requested": True, "deleted": False})
-    deleted_session_ids = []
-    errors = []
-    for session_id in session_ids:
-        try:
-            client.delete_session(session_id)
-        except OpenCodeApiError as error:
-            errors.append(error)
-            continue
-        deleted_session_ids.append(session_id)
+    cleanup_outcome = cleanup_disposable_sessions(client, session_ids)
+    cleanup_record = cleanup_outcome.record
+    deleted_session_ids = list(cleanup_record["deleted"])
+    errors = cleanup_record["errors"]
 
-    cleanup["deleted"] = bool(deleted_session_ids) and not errors
+    cleanup["deleted"] = bool(cleanup_record["verified"]) and not errors
     if errors:
-        cleanup["error"] = str(errors[0])
+        cleanup["error"] = errors[0]["error"]
     else:
         cleanup.pop("error", None)
     if deleted_session_ids:
@@ -267,8 +263,15 @@ def cleanup_created_worker_sessions(client, worker, session_ids):
             cleanup.pop("sessions", None)
     else:
         cleanup.pop("sessions", None)
+    if cleanup_record["verified"]:
+        if len(cleanup_record["verified"]) > 1 or errors:
+            cleanup["verified"] = list(cleanup_record["verified"])
+        else:
+            cleanup.pop("verified", None)
+    else:
+        cleanup.pop("verified", None)
     if errors:
-        return WorkerCleanupOutcome(deleted_session_ids, errors[0])
+        return WorkerCleanupOutcome(deleted_session_ids, cleanup_outcome.first_error)
     return WorkerCleanupOutcome(deleted_session_ids)
 
 

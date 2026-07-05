@@ -11,6 +11,7 @@ from opencode_session.blocking_execution import (
     unsupported_blocking_execution_message,
 )
 from opencode_session.capabilities import capabilities_from_openapi_doc
+from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session
 from opencode_session.session_ids import require_session_id
 from opencode_session.session_lifecycle import is_session_not_found_error
 
@@ -107,8 +108,4 @@ def _print_cleanup_error(print_error, error):
 def _delete_disposable_session(client, session_id):
     if session_id is None:
         return None
-    try:
-        client.delete_session(session_id)
-    except OpenCodeApiError as error:
-        return error
-    return None
+    return delete_and_verify_disposable_session(client, session_id)

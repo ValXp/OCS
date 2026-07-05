@@ -2,6 +2,7 @@ import json
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
+from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
 
 
 class DisposableValidationError(Exception):
@@ -60,7 +61,7 @@ class DisposableValidationHarness:
             self.result["ok"] = True
             self.exit_code = 0
 
-        cleanup = cleanup_created_sessions(self.client, self.session_ids)
+        cleanup = cleanup_disposable_sessions(self.client, self.session_ids).record
         self.result["cleanup"] = cleanup
         self.result["checks"]["cleanup"] = cleanup
         if cleanup["status"] != "done" and self.failure is None:
@@ -87,33 +88,3 @@ class DisposableValidationHarness:
         self.result["status"] = "failed"
         self.result["ok"] = False
         self.result["error"] = str(error)
-
-
-def cleanup_created_sessions(client, session_ids):
-    cleanup = {"status": "done", "deleted": [], "verified": [], "errors": []}
-    if not session_ids:
-        return cleanup
-    for session_id in session_ids:
-        error = delete_and_verify_session(client, session_id)
-        if error is not None:
-            cleanup["errors"].append({"session_id": session_id, "error": str(error)})
-            cleanup["status"] = "failed"
-            continue
-        cleanup["deleted"].append(session_id)
-        cleanup["verified"].append(session_id)
-    return cleanup
-
-
-def delete_and_verify_session(client, session_id):
-    try:
-        client.delete_session_response(session_id)
-    except OpenCodeApiError as error:
-        if error.status != 404:
-            return error
-    try:
-        client.get_session(session_id)
-    except OpenCodeApiError as error:
-        if error.status == 404:
-            return None
-        return error
-    return OpenCodeApiError(f"delete verification failed; session {session_id} is still readable")

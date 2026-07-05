@@ -50,6 +50,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
                 ("create", directory, None, None),
                 ("execute", "ses_alpha", "Run alpha"),
                 ("delete", "ses_alpha"),
+                ("get", "ses_alpha"),
             ],
         )
         self.assertEqual(run["status"], "failed")
@@ -84,7 +85,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
 
         self.assertEqual(outcome.exit_code, 69)
         self.assertEqual(outcome.error, f"api failure: disposable session cleanup failed: {first_error}")
-        self.assertEqual(client.requests, [("delete", "ses_alpha"), ("delete", "ses_beta")])
+        self.assertEqual(client.requests, [("delete", "ses_alpha"), ("delete", "ses_beta"), ("get", "ses_beta")])
         self.assertEqual(
             run["workers"]["alpha"]["cleanup"],
             {"requested": True, "deleted": False, "error": first_error},
@@ -184,6 +185,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
                 ("create", directory, None, None),
                 ("execute", "ses_initial", "Finish the worker task"),
                 ("delete", "ses_initial"),
+                ("get", "ses_initial"),
             ],
         )
         worker = run["workers"]["worker"]

@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session
 from opencode_session.formatting import compact_value
 from opencode_session.records import collection_sessions, session_value
-from opencode_session.validation_harness import delete_and_verify_session
 
 
 def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
@@ -36,7 +36,7 @@ def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
             result["status"] = "failed"
             result["errors"].append({"session_id": None, "error": "session has no id"})
             continue
-        error = delete_and_verify_session(client, session_id)
+        error = delete_and_verify_disposable_session(client, session_id)
         if error is not None:
             result["status"] = "failed"
             result["errors"].append({"session_id": session_id, "error": str(error)})
