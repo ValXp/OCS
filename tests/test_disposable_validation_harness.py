@@ -2,7 +2,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-from opencode_session.validation_harness import DisposableValidationHarness
+from opencode_session.validation_harness import DisposableValidationHarness, ValidationCheck
 
 
 class FakeCleanupClient:
@@ -19,6 +19,42 @@ class FakeCleanupClient:
 
 
 class DisposableValidationHarnessTest(unittest.TestCase):
+    def test_ordered_checks_record_returned_records(self):
+        client = FakeCleanupClient()
+        result = {"status": "active", "ok": False, "checks": {}, "cleanup": {"status": "queued"}}
+        calls = []
+
+        def first_check(_harness):
+            calls.append("first")
+            return {"status": "done", "value": 1}
+
+        def second_check(_harness):
+            calls.append("second")
+            return {"status": "done", "value": 2}
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = DisposableValidationHarness(
+                client,
+                result,
+                default_exit_code=69,
+                cleanup_failure_message="cleanup failed",
+            ).run(
+                (ValidationCheck("first", first_check), ValidationCheck("second", second_check)),
+                failure_types=(RuntimeError,),
+                json_output=False,
+                compact_formatter=lambda result: result["status"],
+                failure_prefix="validation failed",
+                print_error=self._unexpected_error,
+                cleanup_summary_formatter=self._cleanup_summary,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["first", "second"])
+        self.assertEqual(result["checks"]["first"], {"status": "done", "value": 1})
+        self.assertEqual(result["checks"]["second"], {"status": "done", "value": 2})
+        self.assertEqual(stdout.getvalue(), "done\n")
+
     def test_cleanup_verification_failure_fails_validation_and_suppresses_success_output(self):
         client = FakeCleanupClient()
         result = {"status": "active", "ok": False, "checks": {}, "cleanup": {"status": "queued"}}
@@ -64,6 +100,9 @@ class DisposableValidationHarnessTest(unittest.TestCase):
 
     def _unexpected_success_output(self, result):
         raise AssertionError(f"unexpected success output for {result!r}")
+
+    def _unexpected_error(self, message):
+        raise AssertionError(f"unexpected error {message!r}")
 
     def _cleanup_summary(self, cleanup):
         return " ".join(

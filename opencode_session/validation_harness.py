@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
@@ -9,6 +10,12 @@ class DisposableValidationError(Exception):
     def __init__(self, message, *, exit_code):
         super().__init__(message)
         self.exit_code = exit_code
+
+
+@dataclass(frozen=True)
+class ValidationCheck:
+    name: str
+    run: object
 
 
 class DisposableValidationHarness:
@@ -39,6 +46,12 @@ class DisposableValidationHarness:
             self.session_ids.append(session_id)
         return session_id
 
+    def run_checks(self, checks):
+        for check in checks:
+            record = check.run(self)
+            if record is not None:
+                self.result["checks"][check.name] = record
+
     def run(
         self,
         validation_body,
@@ -51,7 +64,10 @@ class DisposableValidationHarness:
         cleanup_summary_formatter,
     ):
         try:
-            validation_body(self)
+            if callable(validation_body):
+                validation_body(self)
+            else:
+                self.run_checks(validation_body)
         except failure_types as error:
             self.record_failure(error)
         except OpenCodeApiError as error:
