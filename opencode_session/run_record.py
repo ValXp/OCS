@@ -15,7 +15,7 @@ SCHEMA_VERSION = 1
 DEFAULT_RUN_STATUS = "queued"
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 _MISSING = object()
-_WORKER_APPEND_ONLY_FIELDS = {"prompt_ids", "output_refs"}
+_WORKER_APPEND_ONLY_FIELDS = {"prompt_ids"}
 _WORKER_STATUS_OWNED_FIELDS = {
     "abort",
     "error",
@@ -227,6 +227,13 @@ def _merge_conflicting_worker(worker_id, baseline, incoming, current):
 def _merge_worker_field(key, baseline, incoming, current, *, merged_status, status_owner):
     if key == "status":
         return merged_status
+    if key == "output_refs":
+        return _merge_worker_output_refs(
+            incoming,
+            current,
+            merged_status=merged_status,
+            status_owner=status_owner,
+        )
     if key in _WORKER_STATUS_OWNED_FIELDS:
         return _merge_worker_status_owned_field(incoming, current, status_owner=status_owner)
     if key in _WORKER_APPEND_ONLY_FIELDS:
@@ -241,6 +248,12 @@ def _merge_worker_status_owned_field(incoming, current, *, status_owner):
     if owner_value is _MISSING:
         return _MISSING
     return deepcopy(owner_value)
+
+
+def _merge_worker_output_refs(incoming, current, *, merged_status, status_owner):
+    if merged_status != "done":
+        return []
+    return _merge_worker_status_owned_field(incoming, current, status_owner=status_owner)
 
 
 def _merge_worker_append_only_field(incoming, current, *, status_owner):

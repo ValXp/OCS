@@ -112,6 +112,44 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(worker["result"]["message_ids"]["assistant"], "msg_done")
         self.assertEqual(worker["output_refs"], ["assistant:msg_done"])
 
+    def test_same_worker_failed_save_does_not_keep_concurrent_done_output_refs(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            first = RunStore(store)
+            first.create_run("demo", directory=directory, server_url="http://opencode.example")
+            first.upsert_worker("demo", "builder", role="build", prompt="Build", status="active")
+            stale_run = first.load_run("demo")
+
+            second = RunStore(store)
+            current_run = second.load_run("demo")
+            current_worker = current_run["workers"]["builder"]
+            current_worker["status"] = "done"
+            current_worker["prompt_ids"] = ["prompt-done"]
+            current_worker["result"] = {
+                "session_id": "ses_builder",
+                "status": "done",
+                "message_ids": {"user": "prompt-done", "assistant": "msg_done"},
+            }
+            current_worker["output_refs"] = ["assistant:msg_done"]
+            second.save_run(current_run)
+
+            stale_worker = stale_run["workers"]["builder"]
+            stale_worker["status"] = "failed"
+            stale_worker["prompt_ids"] = ["prompt-failed"]
+            stale_worker["error"] = "provider failed"
+            stale_worker["failure_category"] = "provider"
+            stale_worker["failure_reason"] = "provider failed"
+            first.save_run(stale_run)
+
+            run = RunStore(store).load_run("demo")
+
+        worker = run["workers"]["builder"]
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["output_refs"], [])
+        self.assertEqual(worker["status"], "failed")
+        self.assertEqual(worker["prompt_ids"], ["prompt-done", "prompt-failed"])
+        self.assertNotIn("result", worker)
+        self.assertEqual(worker["output_refs"], [])
+
     def test_stale_worker_done_saves_keep_run_output_refs_in_dependency_order(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             first = RunStore(store)
