@@ -3,6 +3,7 @@ import threading
 import unittest
 from unittest import mock
 
+from opencode_session.api_client import OpenCodeApiError
 from opencode_session.multi_worker_orchestration import MultiWorkerRunOrchestrationService, MultiWorkerRunStartRequest
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
@@ -26,6 +27,17 @@ CAPABILITIES = {
     "legacy_fallback_available": True,
 }
 
+UNSUPPORTED_CAPABILITIES = {
+    "route_availability": {
+        "blocking_message": {"path": "/session/{sessionID}/message", "method": "POST", "available": False},
+        "legacy_run": {"path": "/session/{sessionID}/run", "method": "POST", "available": False},
+        "legacy_reply": {"path": "/session/{sessionID}/reply", "method": "POST", "available": False},
+    },
+    "blocking_message_available": False,
+    "blocking_execution_available": False,
+    "legacy_fallback_available": False,
+}
+
 
 class FakeResponse:
     def __init__(self, data):
@@ -46,6 +58,76 @@ class FakeClient:
 
 
 class MultiWorkerOrchestrationCliTest(unittest.TestCase):
+    def test_start_unsupported_blocking_execution_is_not_retryable(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "worker",
+                role="worker",
+                prompt="Finish the worker task",
+                retry_limit=1,
+                retryable_failures=["api"],
+            )
+            client = FakeClient([])
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: UNSUPPORTED_CAPABILITIES,
+                executor=lambda *args, **kwargs: self.fail("unsupported server should not execute worker"),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 70)
+        self.assertIn("unsupported route behavior", outcome.error)
+        worker = run["workers"]["worker"]
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(worker["status"], "failed")
+        self.assertEqual(worker["failure_category"], "api")
+        self.assertEqual(worker["retryable_failures"], ["api"])
+        self.assertEqual(worker["next_eligible_action"], "none")
+
+    def test_start_api_setup_failure_is_not_retryable(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "worker",
+                role="worker",
+                prompt="Finish the worker task",
+                retry_limit=1,
+                retryable_failures=["api"],
+            )
+            client = FakeClient([])
+
+            def detect_capabilities(client):
+                raise OpenCodeApiError("capability probe failed")
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=detect_capabilities,
+                executor=lambda *args, **kwargs: self.fail("failed setup should not execute worker"),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(outcome.error, "api failure: capability probe failed")
+        worker = run["workers"]["worker"]
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(worker["status"], "failed")
+        self.assertEqual(worker["failure_category"], "api")
+        self.assertEqual(worker["retryable_failures"], ["api"])
+        self.assertEqual(worker["next_eligible_action"], "none")
+
     def test_start_executes_each_ready_worker_through_blocking_executor(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:

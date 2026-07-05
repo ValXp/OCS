@@ -94,6 +94,7 @@ def ensure_worker(run, worker_id, *, role):
 
 def mark_worker_active(worker, *, now=None):
     worker["status"] = "active"
+    worker.pop("failure_retryable", None)
     worker["next_eligible_action"] = "wait"
     if now is not None:
         worker["timeout_started_at"] = now() if worker.get("timeout_seconds") else None
@@ -106,6 +107,10 @@ def mark_worker_failed(worker, category, reason, *, retryable=True):
     worker["failure_reason"] = reason
     worker["last_failure_category"] = category
     worker["last_failure_reason"] = reason
+    if retryable:
+        worker.pop("failure_retryable", None)
+    else:
+        worker["failure_retryable"] = False
     worker["next_eligible_action"] = "retry" if retryable and worker_retry_available(worker, category) else "none"
 
 
@@ -136,6 +141,8 @@ def schedule_worker_retry(worker, category, reason):
 
 
 def worker_retry_available(worker, category=None):
+    if worker.get("failure_retryable") is False:
+        return False
     retryable = set(worker.get("retryable_failures") or [])
     if not retryable:
         return False

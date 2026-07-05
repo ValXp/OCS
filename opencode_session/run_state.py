@@ -4,13 +4,13 @@ from pathlib import Path
 from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
-from opencode_session.blocking_execution import (
-    blocking_execution_strategy,
-    execute_blocking_prompt,
-    unsupported_blocking_execution_message,
-)
+from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.run_record import DEFAULT_SERVER_URL
+from opencode_session.run_start_policy import (
+    blocking_execution_start_error,
+    mark_orchestration_start_failed,
+)
 from opencode_session.run_store import RunStoreError
 from opencode_session.worker_execution import (
     WorkerExecutionTimeout,
@@ -78,10 +78,9 @@ class SingleWorkerRunStateService:
         try:
             client = self.client_factory(run["server_url"])
             capabilities = self.capability_detector(client)
-            if blocking_execution_strategy(capabilities) is None:
-                message = unsupported_blocking_execution_message()
-                _mark_orchestration_failed(worker, message)
-                run["status"] = "failed"
+            message = blocking_execution_start_error(capabilities)
+            if message is not None:
+                mark_orchestration_start_failed(run, [worker], message)
                 self._save(run)
                 return SingleWorkerRunStartOutcome(run, EX_UNSUPPORTED, message)
 
@@ -100,8 +99,7 @@ class SingleWorkerRunStateService:
                 on_worker_update=lambda: self._save(run),
             )
         except OpenCodeApiError as error:
-            run["status"] = "failed"
-            _mark_orchestration_failed(worker, str(error))
+            mark_orchestration_start_failed(run, [worker], str(error))
             self._save(run)
             return SingleWorkerRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
         created_session_ids.extend(outcome.created_session_ids)
@@ -114,7 +112,7 @@ class SingleWorkerRunStateService:
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, created_session_ids)
             if cleanup_outcome.error is not None:
                 run["status"] = "failed"
-                _mark_orchestration_failed(worker, str(cleanup_outcome.error))
+                _mark_worker_failed(worker, "api", str(cleanup_outcome.error), retryable=False)
                 self._save(run)
                 return SingleWorkerRunStartOutcome(
                     run,
@@ -145,10 +143,6 @@ class SingleWorkerRunStateService:
     def _save(self, run):
         run["updated_at"] = self.now()
         self.store.save_run(run)
-
-
-def _mark_orchestration_failed(worker, error):
-    _mark_worker_failed(worker, "api", error, retryable=False)
 
 
 def _server_default():

@@ -15,6 +15,7 @@ _WORKER_STATUS_OWNED_FIELDS = {
     "error",
     "failure_category",
     "failure_reason",
+    "failure_retryable",
     "last_failure_category",
     "last_failure_reason",
     "result",

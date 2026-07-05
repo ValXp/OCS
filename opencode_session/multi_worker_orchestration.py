@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
-from opencode_session.blocking_execution import (
-    blocking_execution_strategy,
-    execute_blocking_prompt,
-    unsupported_blocking_execution_message,
-)
+from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
+from opencode_session.run_start_policy import (
+    blocking_execution_start_error,
+    mark_orchestration_start_failed,
+)
 from opencode_session.run_store import RunStoreError
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_execution import (
@@ -96,8 +96,8 @@ class MultiWorkerRunOrchestrationService:
         try:
             client = self.client_factory(run["server_url"])
             capabilities = self.capability_detector(client)
-            if blocking_execution_strategy(capabilities) is None:
-                message = unsupported_blocking_execution_message()
+            message = blocking_execution_start_error(capabilities)
+            if message is not None:
                 self._mark_prompted_workers_failed(run, message)
                 return MultiWorkerRunStartOutcome(run, EX_UNSUPPORTED, message)
 
@@ -207,10 +207,7 @@ class MultiWorkerRunOrchestrationService:
         return None
 
     def _mark_prompted_workers_failed(self, run, error):
-        run["status"] = "failed"
-        for worker in run.get("workers", {}).values():
-            if isinstance(worker, dict) and _worker_prompt(worker) and worker.get("status") not in {"done", "failed"}:
-                _mark_worker_failed(worker, "api", error)
+        mark_orchestration_start_failed(run, _prompted_unfinished_workers(run), error)
         self._save(run)
 
     def _save(self, run):
@@ -239,6 +236,14 @@ def _pending_prompted_workers(workers):
         if isinstance(worker, dict)
         and _worker_prompt(worker)
         and is_runnable_status(worker.get("status"))
+    ]
+
+
+def _prompted_unfinished_workers(run):
+    return [
+        worker
+        for worker in run.get("workers", {}).values()
+        if isinstance(worker, dict) and _worker_prompt(worker) and worker.get("status") not in {"done", "failed"}
     ]
 
 
