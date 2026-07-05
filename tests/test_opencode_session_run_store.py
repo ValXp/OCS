@@ -149,6 +149,62 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(persisted["workers"]["build"]["prompt_ids"], ["prompt-steer", "prompt-build"])
         self.assertEqual(persisted["workers"]["build"]["status"], "done")
 
+    def test_worker_patch_preserves_concurrent_worker_configuration_edits_on_same_worker(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active")
+            run = run_store.load_run("demo")
+
+            run_store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Build with new instructions",
+                dependencies=["docs"],
+                retry_limit=3,
+                retryable_failures=["api"],
+                timeout_seconds=45,
+                timeout_policy="blocked",
+                session_id="ses_user",
+                agent="plan",
+                model="openai/gpt-5.5",
+            )
+            build_worker = run["workers"]["build"]
+            build_worker["status"] = "done"
+            build_worker["session_id"] = "ses_created_from_stale_snapshot"
+            build_worker["prompt_ids"] = ["prompt-build"]
+            build_worker["result"] = {
+                "session_id": "ses_created_from_stale_snapshot",
+                "status": "done",
+                "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
+            }
+            build_worker["output_refs"] = ["assistant:msg_build"]
+            persist_worker_update(
+                run_store,
+                run,
+                build_worker,
+                refresh_run_summary=refresh_run_summary,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            persisted = RunStore(store).load_run("demo")
+
+        build = persisted["workers"]["build"]
+        self.assertEqual(build["status"], "done")
+        self.assertEqual(build["prompt"], "Build with new instructions")
+        self.assertEqual(build["dependencies"], ["docs"])
+        self.assertEqual(build["retry_limit"], 3)
+        self.assertEqual(build["retryable_failures"], ["api"])
+        self.assertEqual(build["timeout_seconds"], 45)
+        self.assertEqual(build["timeout_policy"], "blocked")
+        self.assertEqual(build["session_id"], "ses_user")
+        self.assertEqual(build["agent"], "plan")
+        self.assertEqual(build["model"], "openai/gpt-5.5")
+        self.assertEqual(build["prompt_ids"], ["prompt-build"])
+        self.assertEqual(build["output_refs"], ["assistant:msg_build"])
+        self.assertEqual(persisted["output_refs"], ["build:msg_build"])
+
     def test_worker_patch_does_not_overwrite_concurrent_abort(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)

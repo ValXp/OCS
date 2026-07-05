@@ -24,17 +24,27 @@ WORKER_LIST_FIELDS = (
     "output_refs",
 )
 
+WORKER_STATE_TRANSITION_FIELDS = (
+    "status",
+    "retry_count",
+    "timeout_started_at",
+    "timed_out_at",
+    "failure_category",
+    "failure_reason",
+    "last_failure_category",
+    "last_failure_reason",
+    "next_eligible_action",
+    "blockers",
+    "output_refs",
+    "error",
+    "failure_retryable",
+    "manual_retry_required",
+    "result",
+    "cleanup",
+    "abort",
+)
+WORKER_SET_IF_MISSING_TRANSITION_FIELDS = ("session_id",)
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
-
-
-@dataclass(frozen=True)
-class WorkerRecord:
-    worker_id: str
-    fields: dict
-
-    @classmethod
-    def from_worker(cls, worker):
-        return cls(worker["id"], deepcopy(worker))
 
 
 @dataclass(frozen=True)
@@ -42,27 +52,46 @@ class WorkerTransition:
     worker_id: str
     set_fields: dict = field(default_factory=dict)
     delete_fields: tuple = ()
+    set_if_missing_fields: dict = field(default_factory=dict)
     merge_unique_fields: dict = field(default_factory=dict)
     preserve_accepted_abort: bool = True
 
     @classmethod
-    def replace_with_worker(cls, worker):
-        return cls.replace_with_record(WorkerRecord.from_worker(worker))
-
-    @classmethod
-    def replace_with_record(cls, record):
-        set_fields = deepcopy(record.fields)
+    def from_worker_state_update(cls, worker):
+        worker_id = worker["id"]
+        set_fields = {"id": worker_id}
+        for field_name in WORKER_STATE_TRANSITION_FIELDS:
+            if field_name in worker:
+                set_fields[field_name] = deepcopy(worker[field_name])
         merge_unique_fields = {}
-        prompt_ids = set_fields.pop("prompt_ids", None)
+        prompt_ids = worker.get("prompt_ids")
         if isinstance(prompt_ids, list):
             merge_unique_fields["prompt_ids"] = tuple(prompt_ids)
+        set_if_missing_fields = {
+            field_name: deepcopy(worker[field_name])
+            for field_name in WORKER_SET_IF_MISSING_TRANSITION_FIELDS
+            if worker.get(field_name)
+        }
         return cls(
-            record.worker_id,
+            worker_id,
             set_fields=set_fields,
             delete_fields=tuple(
-                field_name for field_name in REMOVABLE_WORKER_TRANSITION_FIELDS if field_name not in record.fields
+                field_name for field_name in REMOVABLE_WORKER_TRANSITION_FIELDS if field_name not in worker
             ),
+            set_if_missing_fields=set_if_missing_fields,
             merge_unique_fields=merge_unique_fields,
+        )
+
+    @classmethod
+    def dependency_blocked(cls, worker_id, blockers):
+        return cls(
+            worker_id,
+            set_fields={
+                "id": worker_id,
+                "status": "blocked",
+                "blockers": list(blockers),
+                "next_eligible_action": "resolve_blocker",
+            },
         )
 
     def apply_to(self, latest_workers):
@@ -80,6 +109,7 @@ class WorkerTransition:
         for field_name in self.delete_fields:
             merged.pop(field_name, None)
         self._merge_unique_fields(merged, latest_worker)
+        self._set_missing_fields(merged)
         if "abort" not in self.set_fields and isinstance(latest_worker, dict) and "abort" in latest_worker:
             merged["abort"] = deepcopy(latest_worker["abort"])
         return merged
@@ -90,6 +120,11 @@ class WorkerTransition:
         if "cleanup" in self.set_fields:
             merged["cleanup"] = deepcopy(self.set_fields["cleanup"])
         return merged
+
+    def _set_missing_fields(self, target):
+        for field_name, value in self.set_if_missing_fields.items():
+            if not target.get(field_name):
+                target[field_name] = deepcopy(value)
 
     def _merge_unique_fields(self, target, latest_worker):
         for field_name, values in self.merge_unique_fields.items():

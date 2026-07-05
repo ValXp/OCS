@@ -1,4 +1,3 @@
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +28,6 @@ from opencode_session.worker_state import (
     WorkerTransition,
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
-    mark_dependency_blocked as _mark_dependency_blocked,
     refresh_run_summary as _refresh_worker_run_summary,
     worker_prompt as _worker_prompt,
     workers_in_dependency_order as _workers_in_dependency_order,
@@ -331,9 +329,7 @@ def _pending_prompted_worker_ids(workers, *, blocked_worker_ids=()):
 
 
 def _dependency_blocked_transition(worker, blockers):
-    blocked_worker = deepcopy(worker)
-    _mark_dependency_blocked(blocked_worker, blockers)
-    return WorkerTransition.replace_with_worker(blocked_worker)
+    return WorkerTransition.dependency_blocked(worker["id"], blockers)
 
 
 def _normalize_execution_policy(policy):

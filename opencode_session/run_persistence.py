@@ -21,7 +21,7 @@ def persist_worker_update(store, run, worker, *, refresh_run_summary, now):
 
 def persist_worker_updates(store, run, workers, *, refresh_run_summary, now):
     transitions = [
-        WorkerTransition.replace_with_worker(worker)
+        WorkerTransition.from_worker_state_update(worker)
         for worker in workers
         if isinstance(worker, dict) and worker.get("id")
     ]
