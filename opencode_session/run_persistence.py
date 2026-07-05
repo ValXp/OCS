@@ -45,7 +45,7 @@ def merge_worker_transition(latest_worker, worker_record):
     merged = deepcopy(latest_worker)
     merged.update(deepcopy(worker_record))
     _delete_removed_transition_fields(merged, worker_record)
-    _merge_unique_list_field(merged, latest_worker, worker_record, "prompt_ids")
+    _merge_prompt_ids(merged, latest_worker, worker_record)
     if "abort" not in worker_record and "abort" in latest_worker:
         merged["abort"] = deepcopy(latest_worker["abort"])
     return merged
@@ -59,10 +59,21 @@ def _delete_removed_transition_fields(target, worker_record):
 
 def _merge_into_aborted_worker(latest_worker, worker_record):
     merged = deepcopy(latest_worker)
-    _merge_unique_list_field(merged, latest_worker, worker_record, "prompt_ids")
+    _merge_prompt_ids(merged, latest_worker, worker_record)
     if "cleanup" in worker_record:
         merged["cleanup"] = deepcopy(worker_record["cleanup"])
     return merged
+
+
+def _merge_prompt_ids(target, latest_worker, worker_record):
+    if _latest_prompt_ids_are_retry_marker(latest_worker):
+        _merge_unique_list_field(target, {}, worker_record, "prompt_ids")
+        return
+    _merge_unique_list_field(target, latest_worker, worker_record, "prompt_ids")
+
+
+def _latest_prompt_ids_are_retry_marker(latest_worker):
+    return latest_worker.get("next_eligible_action") == "retry" and latest_worker.get("last_failure_category") is not None
 
 
 def _accepted_abort(worker):
