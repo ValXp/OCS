@@ -27,4 +27,6 @@ class TimeoutDeadline:
 
     def run(self, callback):
         self.require_time()
-        return callback()
+        result = callback(self)
+        self.require_time()
+        return result

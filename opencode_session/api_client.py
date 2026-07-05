@@ -31,23 +31,23 @@ class OpenCodeApiClient:
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
 
-    def get_health(self):
+    def get_health(self, *, deadline=None):
         errors = []
         for path in ("global/health", "api/health", "health"):
             try:
-                return self.get_json(path)
+                return self.get_json(path, deadline=deadline)
             except OpenCodeApiError as error:
                 errors.append(str(error))
         raise OpenCodeApiError("; ".join(errors))
 
-    def get_openapi_doc(self):
+    def get_openapi_doc(self, *, deadline=None):
         try:
-            return self.get_json("doc")
+            return self.get_json("doc", deadline=deadline)
         except OpenCodeApiError:
             return {"paths": {}}
 
-    def require_openapi_doc(self):
-        return self.get_json("doc")
+    def require_openapi_doc(self, *, deadline=None):
+        return self.get_json("doc", deadline=deadline)
 
     def get_json(self, path, *, timeout=None, deadline=None):
         return self.get_response(path, timeout=timeout, deadline=deadline).data

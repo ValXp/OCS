@@ -7,9 +7,9 @@ LEGACY_RUN_PATH = "/session/{sessionID}/run"
 LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 
 
-def detect_capabilities(client):
-    health = client.get_health()
-    doc = client.get_openapi_doc()
+def detect_capabilities(client, *, deadline=None):
+    health = client.get_health(deadline=deadline)
+    doc = client.get_openapi_doc(deadline=deadline)
     return capabilities_from_openapi_doc(doc, health=health)
 
 

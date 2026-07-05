@@ -73,7 +73,7 @@ def _watch_session(args, client, *, print_error, unavailable_exit, unsupported_e
 
     try:
         try:
-            capabilities = deadline.run(lambda: detect_capabilities(client))
+            capabilities = deadline.run(lambda current_deadline: detect_capabilities(client, deadline=current_deadline))
         except OpenCodeApiError as error:
             print_error(str(error))
             return unavailable_exit
