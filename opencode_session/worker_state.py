@@ -40,6 +40,28 @@ WORKER_LIST_FIELDS = (
     "output_refs",
 )
 
+# Compatibility fallback for callers that still persist a whole worker dict instead of
+# a named WorkerTransition factory. Runtime lifecycle code should pass explicit patches.
+WORKER_SNAPSHOT_STATE_FIELDS = (
+    "status",
+    "retry_count",
+    "timeout_started_at",
+    "timed_out_at",
+    "failure_category",
+    "failure_reason",
+    "last_failure_category",
+    "last_failure_reason",
+    "next_eligible_action",
+    "blockers",
+    "output_refs",
+    "error",
+    "failure_retryable",
+    "manual_retry_required",
+    "result",
+    "cleanup",
+    "abort",
+)
+WORKER_SNAPSHOT_SET_IF_MISSING_FIELDS = ("session_id",)
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 _UNSET = object()
 
@@ -73,7 +95,28 @@ class WorkerTransition:
     @classmethod
     def from_worker_snapshot(cls, worker):
         worker_id = worker["id"]
-        return cls(worker_id, set_fields=normalize_worker(worker, worker_id), replace_worker=True)
+        set_fields = {"id": worker_id}
+        for field_name in WORKER_SNAPSHOT_STATE_FIELDS:
+            if field_name in worker:
+                set_fields[field_name] = deepcopy(worker[field_name])
+        merge_unique_fields = {}
+        prompt_ids = worker.get("prompt_ids")
+        if isinstance(prompt_ids, list):
+            merge_unique_fields["prompt_ids"] = tuple(prompt_ids)
+        set_if_missing_fields = {
+            field_name: deepcopy(worker[field_name])
+            for field_name in WORKER_SNAPSHOT_SET_IF_MISSING_FIELDS
+            if worker.get(field_name)
+        }
+        return cls(
+            worker_id,
+            set_fields=set_fields,
+            delete_fields=tuple(
+                field_name for field_name in REMOVABLE_WORKER_TRANSITION_FIELDS if field_name not in worker
+            ),
+            set_if_missing_fields=set_if_missing_fields,
+            merge_unique_fields=merge_unique_fields,
+        )
 
     @classmethod
     def provisioned(cls, worker):
