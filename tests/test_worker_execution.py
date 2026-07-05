@@ -158,6 +158,35 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertNotIn("timeout_retry_sessions", worker)
         self.assertNotIn("result", worker)
 
+    def test_execute_worker_attempts_persists_active_transition_before_blocking_executor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            client = FakeClient(["ses_initial"])
+            persisted_statuses = []
+
+            def persist_worker_update(_updated_worker, transition):
+                persisted_statuses.append(transition.set_fields.get("status"))
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                self.assertIn("active", persisted_statuses)
+                return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
+
+            outcome = execute_worker_attempts(
+                client,
+                run,
+                worker,
+                "Finish the worker task",
+                CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+                on_worker_update=persist_worker_update,
+            )
+
+        self.assertEqual(outcome.kind, "completed")
+        self.assertEqual(persisted_statuses, [None, "active", "done"])
+
     def test_execute_worker_attempts_does_not_start_retry_session_after_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}

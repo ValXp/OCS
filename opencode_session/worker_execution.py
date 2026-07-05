@@ -122,8 +122,9 @@ def provision_worker_session(
     return WorkerSessionOutcome(worker.get("session_id"))
 
 
-def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor, now):
-    mark_worker_active(worker, now=now)
+def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor, now, on_worker_update=None):
+    active_transition = mark_worker_active(worker, now=now)
+    _notify_worker_update(on_worker_update, worker, active_transition)
     attempt_session_id = worker["session_id"]
     try:
         result = _call_worker_with_deadline(
@@ -207,7 +208,15 @@ def execute_worker_attempts(
         _notify_worker_update(on_worker_update, worker, WorkerTransition.provisioned(worker))
 
     while True:
-        attempt = execute_single_worker_attempt(client, worker, prompt, capabilities, executor=executor, now=now)
+        attempt = execute_single_worker_attempt(
+            client,
+            worker,
+            prompt,
+            capabilities,
+            executor=executor,
+            now=now,
+            on_worker_update=on_worker_update,
+        )
         transition = apply_worker_attempt_transition(client, run, worker, attempt, now=now, agent=agent, model=model)
         if transition.created_session_id is not None:
             created_session_ids.append(transition.created_session_id)
