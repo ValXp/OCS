@@ -38,6 +38,16 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(session["createdAt"], "2026-07-01T00:00:00Z")
         self.assertEqual(session["updatedAt"], "2026-07-01T00:00:03Z")
 
+    def test_session_route_adapter_is_selected_from_route_path(self):
+        payload = {"sessions": [{"sessionID": "ses_legacy", "name": "Legacy"}]}
+
+        api_session = normalize_session_payload(payload, route_path="/api/session")["sessions"][0]
+        legacy_session = normalize_session_payload(payload, route_path="/session")["sessions"][0]
+
+        self.assertEqual(api_session["schema_status"], "unknown")
+        self.assertEqual(legacy_session["schema_status"], "known")
+        self.assertEqual(legacy_session["id"], "ses_legacy")
+
     def test_normalizes_message_evidence_aliases(self):
         payload = {
             "messages": [
@@ -160,6 +170,20 @@ class SchemaNormalizationTest(unittest.TestCase):
             },
         )
         self.assertIsNone(normalize_event(event, "ses_target"))
+
+    def test_event_route_adapter_is_selected_from_route_path(self):
+        event = {
+            "event": "session.status",
+            "payload": {"sessionID": "ses_1", "status": "completed"},
+        }
+
+        api_event = normalize_event_record(event, "ses_1", route_path="/api/event")
+        legacy_event = normalize_event_record(event, "ses_1", route_path="/event")
+
+        self.assertEqual(api_event["kind"], "ignored")
+        self.assertEqual(legacy_event["kind"], "status")
+        self.assertEqual(legacy_event["session_id"], "ses_1")
+        self.assertEqual(legacy_event["status"], "done")
 
     def test_unknown_event_shapes_are_not_classified_by_substrings(self):
         event = {

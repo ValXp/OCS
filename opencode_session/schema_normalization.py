@@ -14,7 +14,13 @@ from opencode_session.schema_common import (
     normalized_tokens,
     tokens_total,
 )
-from opencode_session.schema_event_adapter import ABORT_STATUSES, EVENT_ADAPTER, SUCCESS_STATUSES, normalize_event_record
+from opencode_session.schema_event_adapter import (
+    ABORT_STATUSES,
+    EVENT_ADAPTER,
+    SUCCESS_STATUSES,
+    event_adapter_for_route,
+    normalize_event_record,
+)
 from opencode_session.schema_message_adapter import (
     MESSAGE_ADAPTER,
     iter_message_records,
@@ -29,6 +35,7 @@ from opencode_session.schema_session_adapter import (
     SESSION_ADAPTER,
     normalize_session_payload,
     normalize_session_record,
+    session_adapter_for_route,
     session_record,
     session_value,
 )
@@ -52,6 +59,7 @@ __all__ = [
     "first_present_in",
     "iter_message_records",
     "iter_normalized_message_records",
+    "event_adapter_for_route",
     "JsonObject",
     "JsonValue",
     "message_record",
@@ -64,6 +72,7 @@ __all__ = [
     "normalize_session_payload",
     "normalize_session_record",
     "normalized_tokens",
+    "session_adapter_for_route",
     "session_record",
     "session_value",
     "tokens_total",

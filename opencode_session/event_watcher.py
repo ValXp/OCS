@@ -29,7 +29,7 @@ class SessionEventWatcher:
 
     def iter_events(self, *, deadline=None, on_open=None):
         for raw_event in self.client.stream_events(self.event_path, on_open=on_open, deadline=deadline):
-            event = normalize_event(raw_event, self.session_id)
+            event = normalize_event(raw_event, self.session_id, route_path=self.event_path)
             if event is not None:
                 yield event
 

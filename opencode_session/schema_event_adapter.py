@@ -29,18 +29,18 @@ ERROR_EVENT_TYPES = frozenset({"message.error", "session.error", "tool.execute.e
 @dataclass(frozen=True)
 class EventRouteAdapter:
     route: str = "event"
-    version: str = "opencode-compatible"
+    version: str = "compatible"
 
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
         if not isinstance(event, dict):
             return unknown_event_record(event)
-        properties = mapping_value(event, "properties") or mapping_value(event, "payload") or mapping_value(event, "data")
-        info = mapping_value(event, "info") or mapping_value(properties, "info")
-        part = mapping_value(event, "part") or mapping_value(properties, "part")
-        message = mapping_value(event, "message") or mapping_value(properties, "message")
-        tool = mapping_value(event, "tool") or mapping_value(properties, "tool")
-        error = mapping_value(event, "error") or mapping_value(properties, "error")
-        sources = [event, properties, info, part, message, tool]
+        properties = self.properties(event)
+        info = self.info(event, properties)
+        part = self.part(event, properties)
+        message = self.message(event, properties)
+        tool = self.tool(event, properties)
+        error = self.error(event, properties)
+        sources = self.sources(event, properties, info, part, message, tool)
 
         session_id = _event_session_id(sources)
         event_type = first_present_in(sources, "type", "event", "name", "kind")
@@ -79,6 +79,49 @@ class EventRouteAdapter:
             set_if_present(normalized, "question", string_value(first_present_in(sources, "question", "prompt", "title")))
         set_if_present(normalized, "error", error_text)
         return normalized
+
+    def properties(self, event):
+        return mapping_value(event, "properties") or mapping_value(event, "payload") or mapping_value(event, "data")
+
+    def info(self, event, properties):
+        return mapping_value(event, "info") or mapping_value(properties, "info")
+
+    def part(self, event, properties):
+        return mapping_value(event, "part") or mapping_value(properties, "part")
+
+    def message(self, event, properties):
+        return mapping_value(event, "message") or mapping_value(properties, "message")
+
+    def tool(self, event, properties):
+        return mapping_value(event, "tool") or mapping_value(properties, "tool")
+
+    def error(self, event, properties):
+        return mapping_value(event, "error") or mapping_value(properties, "error")
+
+    def sources(self, event, properties, info, part, message, tool):
+        return [event, properties, info, part, message, tool]
+
+
+@dataclass(frozen=True)
+class OpenApiEventRouteAdapter(EventRouteAdapter):
+    version: str = "api-v1"
+
+    def properties(self, event):
+        return mapping_value(event, "properties")
+
+    def info(self, event, properties):
+        return None
+
+    def sources(self, event, properties, info, part, message, tool):
+        return [event, properties, part, message, tool]
+
+
+@dataclass(frozen=True)
+class LegacyEventRouteAdapter(EventRouteAdapter):
+    version: str = "legacy"
+
+    def properties(self, event):
+        return mapping_value(event, "payload") or mapping_value(event, "data") or mapping_value(event, "properties")
 
 
 def _event_kind(event_type, text, tool_name, call_id, error_text, sources):
@@ -213,6 +256,18 @@ def _error_text(error):
     return None
 
 
-EVENT_ADAPTER = EventRouteAdapter()
+def event_adapter_for_route(route_path=None):
+    normalized_path = str(route_path or "").split("?", 1)[0].rstrip("/")
+    if normalized_path == "/api/event":
+        return OPENAPI_EVENT_ADAPTER
+    if normalized_path in {"/event", "/global/event"}:
+        return LEGACY_EVENT_ADAPTER
+    return EVENT_ADAPTER
 
-normalize_event_record = EVENT_ADAPTER.normalize_record
+
+EVENT_ADAPTER = EventRouteAdapter()
+OPENAPI_EVENT_ADAPTER = OpenApiEventRouteAdapter()
+LEGACY_EVENT_ADAPTER = LegacyEventRouteAdapter()
+
+def normalize_event_record(event, target_session_id=None, *, route_path=None):
+    return event_adapter_for_route(route_path).normalize_record(event, target_session_id)

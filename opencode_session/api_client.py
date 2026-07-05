@@ -185,19 +185,19 @@ class OpenCodeApiClient:
             payload["title"] = title
         if metadata is not None:
             payload["metadata"] = metadata
-        return _with_session_payload(self.post_response(self._route_path("session_collection"), payload))
+        return _with_session_payload(self.post_response(self._route_path("session_collection"), payload), self.route_plan)
 
     def list_sessions(self):
         return self.list_sessions_response().data
 
     def list_sessions_response(self):
-        return _with_session_payload(self.get_response(self._route_path("session_collection")))
+        return _with_session_payload(self.get_response(self._route_path("session_collection")), self.route_plan)
 
     def get_session(self, session_id):
         return self.get_session_response(session_id).data
 
     def get_session_response(self, session_id):
-        return _with_session_payload(self.get_response(self._route_path("session_item", session_id=session_id)))
+        return _with_session_payload(self.get_response(self._route_path("session_item", session_id=session_id)), self.route_plan)
 
     def delete_session(self, session_id):
         return self.delete_session_response(session_id).data
@@ -215,7 +215,7 @@ class OpenCodeApiClient:
         return self.post_response(f"session/{quote(session_id, safe='')}/fork", payload)
 
     def list_child_sessions_response(self, session_id):
-        return _with_session_payload(self.get_response(f"session/{quote(session_id, safe='')}/children"))
+        return _with_session_payload(self.get_response(f"session/{quote(session_id, safe='')}/children"), route_path="/session")
 
     def run_session_response(self, session_id, message, *, timeout=None, deadline=None):
         return self.post_response(
@@ -295,8 +295,8 @@ def _session_prompt_path(prompt_path, session_id):
     return path
 
 
-def _with_session_payload(response):
-    return OpenCodeApiResponse(normalize_session_payload(response.data), response.body)
+def _with_session_payload(response, route_plan=None, *, route_path=None):
+    return OpenCodeApiResponse(normalize_session_payload(response.data, route_plan=route_plan, route_path=route_path), response.body)
 
 
 def _validate_base_url(base_url):

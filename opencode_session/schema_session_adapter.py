@@ -16,7 +16,7 @@ SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "token
 @dataclass(frozen=True)
 class SessionRouteAdapter:
     route: str = "session"
-    version: str = "opencode-compatible"
+    version: str = "compatible"
 
     def normalize_payload(self, payload):
         if isinstance(payload, list):
@@ -53,18 +53,18 @@ class SessionRouteAdapter:
 
         normalized = dict(record)
         normalized["schema_status"] = "known"
-        set_missing(normalized, "id", self.value(record, "id", "sessionID", "sessionId", "session_id"))
-        set_missing(normalized, "directory", self.value(record, "directory", "cwd"))
-        set_missing(normalized, "title", self.value(record, "title", "name"))
-        set_missing(normalized, "agent", self.value(record, "agent", "agentID", "agentId", "agent_id"))
-        set_missing(normalized, "model", self.value(record, "model", "modelID", "modelId", "model_id"))
+        set_missing(normalized, "id", self.value(record, *self.id_fields))
+        set_missing(normalized, "directory", self.value(record, *self.directory_fields))
+        set_missing(normalized, "title", self.value(record, *self.title_fields))
+        set_missing(normalized, "agent", self.value(record, *self.agent_fields))
+        set_missing(normalized, "model", self.value(record, *self.model_fields))
         set_missing(
             normalized,
             "tokens",
-            normalized_tokens(self.value(record, "tokens", "token", "tokenUsage", "token_usage", "usage")),
+            normalized_tokens(self.value(record, *self.token_fields)),
         )
-        set_missing(normalized, "createdAt", self.value(record, "createdAt", "created_at", "created"))
-        set_missing(normalized, "updatedAt", self.value(record, "updatedAt", "updated_at", "updated"))
+        set_missing(normalized, "createdAt", self.value(record, *self.created_fields))
+        set_missing(normalized, "updatedAt", self.value(record, *self.updated_fields))
         require_session_canonical_fields(normalized)
         return normalized
 
@@ -99,17 +99,118 @@ class SessionRouteAdapter:
     def is_known_record(self, session):
         return any(
             self.value(session, *names) is not None
-            for names in (
-                ("id", "sessionID", "sessionId", "session_id"),
-                ("directory", "cwd"),
-                ("title", "name"),
-                ("agent", "agentID", "agentId", "agent_id"),
-                ("model", "modelID", "modelId", "model_id"),
-                ("tokens", "token", "tokenUsage", "token_usage", "usage"),
-                ("createdAt", "created_at", "created"),
-                ("updatedAt", "updated_at", "updated"),
-            )
+            for names in self.known_field_groups
         )
+
+    @property
+    def id_fields(self):
+        return ("id", "sessionID", "sessionId", "session_id")
+
+    @property
+    def directory_fields(self):
+        return ("directory", "cwd")
+
+    @property
+    def title_fields(self):
+        return ("title", "name")
+
+    @property
+    def agent_fields(self):
+        return ("agent", "agentID", "agentId", "agent_id")
+
+    @property
+    def model_fields(self):
+        return ("model", "modelID", "modelId", "model_id")
+
+    @property
+    def token_fields(self):
+        return ("tokens", "token", "tokenUsage", "token_usage", "usage")
+
+    @property
+    def created_fields(self):
+        return ("createdAt", "created_at", "created")
+
+    @property
+    def updated_fields(self):
+        return ("updatedAt", "updated_at", "updated")
+
+    @property
+    def known_field_groups(self):
+        return (
+            self.id_fields,
+            self.directory_fields,
+            self.title_fields,
+            self.agent_fields,
+            self.model_fields,
+            self.token_fields,
+            self.created_fields,
+            self.updated_fields,
+        )
+
+
+@dataclass(frozen=True)
+class OpenApiSessionRouteAdapter(SessionRouteAdapter):
+    version: str = "api-v1"
+
+    @property
+    def id_fields(self):
+        return ("id",)
+
+    @property
+    def directory_fields(self):
+        return ("directory", "cwd")
+
+    @property
+    def title_fields(self):
+        return ("title",)
+
+    @property
+    def agent_fields(self):
+        return ("agent",)
+
+    @property
+    def model_fields(self):
+        return ("model",)
+
+    @property
+    def token_fields(self):
+        return ("tokens", "tokenUsage", "usage")
+
+    @property
+    def created_fields(self):
+        return ("createdAt", "created")
+
+    @property
+    def updated_fields(self):
+        return ("updatedAt", "updated")
+
+
+@dataclass(frozen=True)
+class LegacySessionRouteAdapter(SessionRouteAdapter):
+    version: str = "legacy"
+
+    def value(self, session, *names):
+        session = self.record(session)
+        value = first_present(session, *names)
+        if value is not None:
+            return value
+        info = session.get("info")
+        value = first_present(info, *names)
+        if value is not None:
+            return value
+        location = session.get("location")
+        if isinstance(location, dict):
+            for name in names:
+                if name in {"directory", "cwd"} and location.get("directory") is not None:
+                    return location.get("directory")
+        time = session.get("time")
+        if isinstance(time, dict):
+            for name in names:
+                if name in {"createdAt", "created_at"} and time.get("created") is not None:
+                    return time.get("created")
+                if name in {"updatedAt", "updated_at"} and time.get("updated") is not None:
+                    return time.get("updated")
+        return None
 
 
 def unknown_session_record(raw) -> NormalizedSessionRecord:
@@ -124,13 +225,33 @@ def require_session_canonical_fields(record):
         record.setdefault(field_name, None)
 
 
+def session_adapter_for_route(route_path=None, route_plan=None):
+    path = route_path
+    if path is None and isinstance(route_plan, dict):
+        path = route_plan.get("session_collection")
+    normalized_path = str(path or "").split("?", 1)[0].rstrip("/")
+    if normalized_path == "/api/session":
+        return OPENAPI_SESSION_ADAPTER
+    if normalized_path == "/session":
+        return LEGACY_SESSION_ADAPTER
+    return SESSION_ADAPTER
+
+
 def collection_sessions(collection):
     return collection_records(collection, "sessions", "children", "data")
 
 
 SESSION_ADAPTER = SessionRouteAdapter()
+OPENAPI_SESSION_ADAPTER = OpenApiSessionRouteAdapter()
+LEGACY_SESSION_ADAPTER = LegacySessionRouteAdapter()
 
-normalize_session_payload = SESSION_ADAPTER.normalize_payload
-normalize_session_record = SESSION_ADAPTER.normalize_record
+def normalize_session_payload(payload, *, route_path=None, route_plan=None):
+    return session_adapter_for_route(route_path, route_plan).normalize_payload(payload)
+
+
+def normalize_session_record(record, *, route_path=None, route_plan=None):
+    return session_adapter_for_route(route_path, route_plan).normalize_record(record)
+
+
 session_record = SESSION_ADAPTER.record
 session_value = SESSION_ADAPTER.value
