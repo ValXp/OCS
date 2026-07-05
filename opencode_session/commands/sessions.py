@@ -1,8 +1,6 @@
-import json
-
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.commands.rendering import render_command_result
 from opencode_session.formatting import compact_value as _compact_value
-from opencode_session.formatting import write_raw as _write_raw
 from opencode_session.session_formatting import format_fork_compact, format_session_compact, format_session_table
 from opencode_session.session_lifecycle import format_abort_compact
 from opencode_session.session_services import (
@@ -74,20 +72,9 @@ def handle_session_command(args, *, print_error, unavailable_exit, client_factor
         return unavailable_exit
 
     try:
-        if args.command == "create":
-            return _handle_create(args, service)
-        if args.command == "list":
-            return _handle_list(args, service)
-        if args.command in ("inspect", "get"):
-            return _handle_inspect(args, service)
-        if args.command == "delete":
-            return _handle_delete(args, service)
-        if args.command == "abort":
-            return _handle_abort(args, service)
-        if args.command == "fork":
-            return _handle_fork(args, service)
-        if args.command == "children":
-            return _handle_children(args, service)
+        handler = _SESSION_HANDLERS.get(args.command)
+        if handler is not None:
+            return handler(args, service)
     except SessionCommandError as error:
         print_error(str(error))
         return unavailable_exit
@@ -96,14 +83,7 @@ def handle_session_command(args, *, print_error, unavailable_exit, client_factor
 
 def _handle_create(args, service):
     result = service.create(args.directory, agent=args.agent, model=args.model)
-    if args.raw:
-        _write_raw(result.raw_body)
-        return 0
-    if args.json:
-        print(json.dumps(result.session, sort_keys=True))
-        return 0
-    print(format_session_compact(result.session))
-    return 0
+    return render_command_result(args, result.session, raw_body=result.raw_body, compact=format_session_compact(result.session))
 
 
 def _handle_list(args, service):
@@ -114,14 +94,12 @@ def _handle_list(args, service):
         include_blockers=args.blockers,
     )
     if args.raw:
-        _write_raw(result.raw_body)
-        return 0
+        return render_command_result(args, raw_body=result.raw_body)
     sessions = result.sessions
     if args.json:
         if result.blocker_counts is not None:
             sessions = [session_with_blocker_counts(session, result.blocker_counts) for session in sessions]
-        print(json.dumps(sessions, sort_keys=True))
-        return 0
+        return render_command_result(args, sessions)
     if sessions:
         if len(sessions) > 1:
             print(format_session_table(sessions, result.blocker_counts))
@@ -133,74 +111,65 @@ def _handle_list(args, service):
 def _handle_inspect(args, service):
     result = service.inspect(args.session_id, include_blockers=args.blockers)
     if args.raw:
-        _write_raw(result.raw_body)
-        return 0
+        return render_command_result(args, raw_body=result.raw_body)
     session = result.session
     if args.json:
         if result.blocker_counts is not None:
             session = session_with_blocker_counts(session, result.blocker_counts)
-        print(json.dumps(session, sort_keys=True))
-        return 0
-    print(format_session_compact(session, counts_for_session(result.blocker_counts, session)))
-    return 0
+    return render_command_result(
+        args,
+        session,
+        compact=format_session_compact(session, counts_for_session(result.blocker_counts, session)),
+    )
 
 
 def _handle_delete(args, service):
     result = service.delete(args.session_id)
-    if args.raw:
-        _write_raw(result.raw_body)
-        return 0
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "deleted": True,
-                    "id": result.session_id,
-                    "response": result.response,
-                    "verified": result.verified,
-                },
-                sort_keys=True,
-            )
-        )
-        return 0
-    print(f"deleted id={_compact_value(result.session_id)} verified={result.verified}")
-    return 0
+    data = {
+        "deleted": True,
+        "id": result.session_id,
+        "response": result.response,
+        "verified": result.verified,
+    }
+    return render_command_result(
+        args,
+        data,
+        raw_body=result.raw_body,
+        compact=f"deleted id={_compact_value(result.session_id)} verified={result.verified}",
+    )
 
 
 def _handle_abort(args, service):
     result = service.abort(args.session_id)
-    if args.raw:
-        _write_raw(result.raw_body)
-        return 0
-    if args.json:
-        print(json.dumps(result.abort, sort_keys=True))
-    else:
-        print(format_abort_compact(result.abort))
-    return 0
+    return render_command_result(args, result.abort, raw_body=result.raw_body, compact=format_abort_compact(result.abort))
 
 
 def _handle_fork(args, service):
     result = service.fork(args.session_id, message_id=args.message_id)
-    if args.raw:
-        _write_raw(result.raw_body)
-        return 0
-    if args.json:
-        print(json.dumps(result.fork, sort_keys=True))
-    else:
-        print(format_fork_compact(result.fork))
-    return 0
+    return render_command_result(args, result.fork, raw_body=result.raw_body, compact=format_fork_compact(result.fork))
 
 
 def _handle_children(args, service):
     result = service.children(args.session_id, directory=args.directory)
     if args.raw:
-        _write_raw(result.raw_body)
-        return 0
+        return render_command_result(args, raw_body=result.raw_body)
     if args.json:
-        print(json.dumps(result.children, sort_keys=True))
+        return render_command_result(args, result.children)
     elif result.children:
         if len(result.children) > 1:
             print(format_session_table(result.children))
         else:
             print(format_session_compact(result.children[0]))
     return 0
+
+
+_SESSION_HANDLERS = {
+    "create": _handle_create,
+    "list": _handle_list,
+    "inspect": _handle_inspect,
+    "get": _handle_inspect,
+    "delete": _handle_delete,
+    "abort": _handle_abort,
+    "fork": _handle_fork,
+    "children": _handle_children,
+}

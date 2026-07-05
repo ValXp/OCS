@@ -1,8 +1,7 @@
-import json
-
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import format_blocking_execution_compact as _format_run_compact
 from opencode_session.cli_policy import server_default
+from opencode_session.commands.rendering import render_command_result
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.prompt_admission import (
     PromptAdmissionFailure,
@@ -24,53 +23,15 @@ def handle_run_command(args, *, print_error, noinput_exit, dataerr_exit, unavail
     store = RunStore(args.store)
     service = RunCommandService(store)
     try:
-        if args.run_command == "start":
-            return _start_orchestration_run(args, service, print_error=print_error)
-        if args.run_command == "init":
-            run = service.create_run(args.name, directory=args.directory, server_url=args.server)
-            print(format_run_compact(run))
-            return 0
-        if args.run_command == "status":
-            run = service.load_run(args.name)
-            if args.json:
-                print(json.dumps(run, sort_keys=True))
-                return 0
-            print(format_run_compact(run))
-            return 0
-        if args.run_command == "collect":
-            return _collect_run_results(args, service)
-        if args.run_command == "worker":
-            run = service.upsert_worker(
-                args.name,
-                args.worker_id,
-                role=args.role,
-                session_id=args.session_id,
-                agent=args.agent,
-                model=args.model,
-                prompt=args.prompt,
-                dependencies=args.dependencies,
-                prompt_ids=args.prompt_ids,
-                status=args.status,
-                retry_count=args.retry_count,
-                retry_limit=args.retry_limit,
-                retryable_failures=args.retryable_failures,
-                timeout_seconds=args.timeout_seconds,
-                timeout_policy=args.timeout_policy,
-                blockers=args.blockers,
-                output_refs=args.output_refs,
-            )
-            print(format_run_compact(run))
-            return 0
-        if args.run_command == "steer":
-            return _steer_run_worker(
+        handler = _RUN_HANDLERS.get(args.run_command)
+        if handler is not None:
+            return handler(
                 args,
                 service,
                 print_error=print_error,
                 unavailable_exit=unavailable_exit,
                 unsupported_exit=unsupported_exit,
             )
-        if args.run_command == "abort":
-            return _abort_run_worker(args, service, print_error=print_error, unavailable_exit=unavailable_exit)
     except RunStoreError as error:
         print_error(str(error))
         if error.kind == "missing":
@@ -164,7 +125,7 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     run_abort_parser.add_argument("--json", action="store_true", help="print run-scoped abort JSON")
 
 
-def _start_orchestration_run(args, service, *, print_error):
+def _start_orchestration_run(args, service, *, print_error, **_context):
     outcome = service.start_run(
         RunStartRequest(
             name=args.name,
@@ -188,32 +149,58 @@ def _start_orchestration_run(args, service, *, print_error):
     return outcome.exit_code
 
 
-def _collect_run_results(args, service):
+def _init_run(args, service, **_context):
+    run = service.create_run(args.name, directory=args.directory, server_url=args.server)
+    return render_command_result(args, run, compact=format_run_compact(run))
+
+
+def _status_run(args, service, **_context):
+    run = service.load_run(args.name)
+    return render_command_result(args, run, compact=format_run_compact(run))
+
+
+def _upsert_run_worker(args, service, **_context):
+    run = service.upsert_worker(
+        args.name,
+        args.worker_id,
+        role=args.role,
+        session_id=args.session_id,
+        agent=args.agent,
+        model=args.model,
+        prompt=args.prompt,
+        dependencies=args.dependencies,
+        prompt_ids=args.prompt_ids,
+        status=args.status,
+        retry_count=args.retry_count,
+        retry_limit=args.retry_limit,
+        retryable_failures=args.retryable_failures,
+        timeout_seconds=args.timeout_seconds,
+        timeout_policy=args.timeout_policy,
+        blockers=args.blockers,
+        output_refs=args.output_refs,
+    )
+    return render_command_result(args, run, compact=format_run_compact(run))
+
+
+def _collect_run_results(args, service, **_context):
     collection = service.collect_results(args.name, worker_id=args.worker)
     if collection.worker is not None:
         return _print_single_worker_result(args, collection.worker)
     if args.json:
-        print(
-            json.dumps(
-                [
-                    {"worker": worker.get("id"), "role": worker.get("role"), "result": worker.get("result")}
-                    for worker in collection.workers
-                ],
-                sort_keys=True,
-            )
+        return render_command_result(
+            args,
+            [
+                {"worker": worker.get("id"), "role": worker.get("role"), "result": worker.get("result")}
+                for worker in collection.workers
+            ],
         )
-        return 0
     print("\n".join(format_worker_result_compact(worker) for worker in collection.workers))
     return 0
 
 
 def _print_single_worker_result(args, worker):
     result = worker.get("result")
-    if args.json:
-        print(json.dumps(result, sort_keys=True))
-        return 0
-    print(_format_run_compact(result))
-    return 0
+    return render_command_result(args, result, compact=_format_run_compact(result))
 
 
 def _steer_run_worker(args, service, *, print_error, unavailable_exit, unsupported_exit):
@@ -238,14 +225,14 @@ def _steer_run_worker(args, service, *, print_error, unavailable_exit, unsupport
     run = result.run
     worker = result.worker
     admission = result.admission
-    if args.json:
-        print(json.dumps({"run": run["name"], "worker": worker["id"], "admission": admission}, sort_keys=True))
-    else:
-        print(f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {format_admission_compact(admission)}")
-    return 0
+    return render_command_result(
+        args,
+        {"run": run["name"], "worker": worker["id"], "admission": admission},
+        compact=f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {format_admission_compact(admission)}",
+    )
 
 
-def _abort_run_worker(args, service, *, print_error, unavailable_exit):
+def _abort_run_worker(args, service, *, print_error, unavailable_exit, **_context):
     try:
         result = service.abort_worker(args.name, args.worker_id)
     except RunWorkerSessionNotFound as error:
@@ -257,11 +244,11 @@ def _abort_run_worker(args, service, *, print_error, unavailable_exit):
     run = result.run
     worker = result.worker
     abort = result.abort
-    if args.json:
-        print(json.dumps({"run": run["name"], "worker": worker["id"], "abort": abort}, sort_keys=True))
-    else:
-        print(f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {format_abort_compact(abort)}")
-    return 0
+    return render_command_result(
+        args,
+        {"run": run["name"], "worker": worker["id"], "abort": abort},
+        compact=f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {format_abort_compact(abort)}",
+    )
 
 
 def _positive_timeout_seconds(value, positive_float):
@@ -269,3 +256,14 @@ def _positive_timeout_seconds(value, positive_float):
     if timeout.is_integer():
         return int(timeout)
     return timeout
+
+
+_RUN_HANDLERS = {
+    "start": _start_orchestration_run,
+    "init": _init_run,
+    "status": _status_run,
+    "collect": _collect_run_results,
+    "worker": _upsert_run_worker,
+    "steer": _steer_run_worker,
+    "abort": _abort_run_worker,
+}

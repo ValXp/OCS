@@ -1,5 +1,6 @@
 import argparse
 import sys
+from dataclasses import dataclass
 from functools import partial
 
 from opencode_session.cli_policy import (
@@ -22,6 +23,15 @@ from opencode_session.commands.steer import add_steer_parser, handle_steer_comma
 from opencode_session.commands.validation import add_validation_parsers, handle_validation_command
 from opencode_session.commands.watch import add_watch_parser, handle_watch_command
 
+
+@dataclass(frozen=True)
+class CommandSpec:
+    add_parser: object
+    handler: object
+    parser_kwargs: dict
+    handler_kwargs: dict
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
@@ -31,104 +41,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog=CLI_NAME, description="Agent-friendly OpenCode session CLI.")
     subparsers = parser.add_subparsers(dest="command")
 
-    add_capabilities_parser(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        handler=partial(
-            handle_capabilities,
-            print_error=_print_error,
-            unavailable_exit=EX_UNAVAILABLE,
-            unsupported_exit=EX_UNSUPPORTED,
-        ),
-    )
-
-    add_session_parsers(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        add_output_arguments=_add_output_arguments,
-        handler=partial(
-            handle_session_command,
-            print_error=_print_error,
-            unavailable_exit=EX_UNAVAILABLE,
-        ),
-    )
-
-    add_watch_parser(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        positive_float=_positive_float,
-        handler=partial(
-            handle_watch_command,
-            print_error=_print_error,
-            unavailable_exit=EX_UNAVAILABLE,
-            unsupported_exit=EX_UNSUPPORTED,
-            dataerr_exit=EX_DATAERR,
-            timeout_exit=EX_TIMEOUT,
-            aborted_exit=EX_ABORTED,
-        ),
-    )
-
-    add_run_parser(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        positive_float=_positive_float,
-        handler=partial(
-            handle_run_command,
-            print_error=_print_error,
-            noinput_exit=EX_NOINPUT,
-            dataerr_exit=EX_DATAERR,
-            unavailable_exit=EX_UNAVAILABLE,
-            unsupported_exit=EX_UNSUPPORTED,
-        ),
-    )
-
-    add_run_blocking_parser(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        handler=partial(
-            handle_run_blocking_command,
-            print_error=_print_error,
-            unavailable_exit=EX_UNAVAILABLE,
-            unsupported_exit=EX_UNSUPPORTED,
-        ),
-    )
-
-    add_steer_parser(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        add_output_arguments=_add_output_arguments,
-        handler=partial(
-            handle_steer_command,
-            print_error=_print_error,
-            unavailable_exit=EX_UNAVAILABLE,
-            unsupported_exit=EX_UNSUPPORTED,
-        ),
-    )
-
-    add_validation_parsers(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        handler=partial(
-            handle_validation_command,
-            print_error=_print_error,
-            unavailable_exit=EX_UNAVAILABLE,
-            unsupported_exit=EX_UNSUPPORTED,
-            dataerr_exit=EX_DATAERR,
-        ),
-    )
-
-    add_blocker_parsers(
-        subparsers,
-        add_server_argument=_add_server_argument,
-        add_output_arguments=_add_output_arguments,
-        handler=partial(
-            handle_blocker_command,
-            print_error=_print_error,
-            unavailable_exit=EX_UNAVAILABLE,
-            noinput_exit=EX_NOINPUT,
-            dataerr_exit=EX_DATAERR,
-        ),
-    )
+    for command in _command_specs():
+        command.add_parser(
+            subparsers,
+            **command.parser_kwargs,
+            handler=partial(command.handler, print_error=_print_error, **command.handler_kwargs),
+        )
 
     args = parser.parse_args(argv)
     command_handler = getattr(args, "command_handler", None)
@@ -140,6 +58,74 @@ def main(argv=None):
 
 def _print_error(message):
     print(f"{CLI_NAME}: {message}", file=sys.stderr)
+
+
+def _command_specs():
+    return (
+        CommandSpec(
+            add_capabilities_parser,
+            handle_capabilities,
+            {"add_server_argument": _add_server_argument},
+            {"unavailable_exit": EX_UNAVAILABLE, "unsupported_exit": EX_UNSUPPORTED},
+        ),
+        CommandSpec(
+            add_session_parsers,
+            handle_session_command,
+            {"add_server_argument": _add_server_argument, "add_output_arguments": _add_output_arguments},
+            {"unavailable_exit": EX_UNAVAILABLE},
+        ),
+        CommandSpec(
+            add_watch_parser,
+            handle_watch_command,
+            {"add_server_argument": _add_server_argument, "positive_float": _positive_float},
+            {
+                "unavailable_exit": EX_UNAVAILABLE,
+                "unsupported_exit": EX_UNSUPPORTED,
+                "dataerr_exit": EX_DATAERR,
+                "timeout_exit": EX_TIMEOUT,
+                "aborted_exit": EX_ABORTED,
+            },
+        ),
+        CommandSpec(
+            add_run_parser,
+            handle_run_command,
+            {"add_server_argument": _add_server_argument, "positive_float": _positive_float},
+            {
+                "noinput_exit": EX_NOINPUT,
+                "dataerr_exit": EX_DATAERR,
+                "unavailable_exit": EX_UNAVAILABLE,
+                "unsupported_exit": EX_UNSUPPORTED,
+            },
+        ),
+        CommandSpec(
+            add_run_blocking_parser,
+            handle_run_blocking_command,
+            {"add_server_argument": _add_server_argument},
+            {"unavailable_exit": EX_UNAVAILABLE, "unsupported_exit": EX_UNSUPPORTED},
+        ),
+        CommandSpec(
+            add_steer_parser,
+            handle_steer_command,
+            {"add_server_argument": _add_server_argument, "add_output_arguments": _add_output_arguments},
+            {"unavailable_exit": EX_UNAVAILABLE, "unsupported_exit": EX_UNSUPPORTED},
+        ),
+        CommandSpec(
+            add_validation_parsers,
+            handle_validation_command,
+            {"add_server_argument": _add_server_argument},
+            {
+                "unavailable_exit": EX_UNAVAILABLE,
+                "unsupported_exit": EX_UNSUPPORTED,
+                "dataerr_exit": EX_DATAERR,
+            },
+        ),
+        CommandSpec(
+            add_blocker_parsers,
+            handle_blocker_command,
+            {"add_server_argument": _add_server_argument, "add_output_arguments": _add_output_arguments},
+            {"unavailable_exit": EX_UNAVAILABLE, "noinput_exit": EX_NOINPUT, "dataerr_exit": EX_DATAERR},
+        ),
+    )
 
 
 def _add_server_argument(parser):
