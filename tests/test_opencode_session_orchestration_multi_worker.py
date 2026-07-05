@@ -7,6 +7,7 @@ from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
 )
+from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 
@@ -89,6 +90,32 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
 
 class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
+    def test_command_service_start_passes_injected_dependencies_to_orchestration(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker("demo", "worker", role="worker", prompt="Finish the worker task")
+            client = FakeClient([])
+            detected_clients = []
+
+            def detect_capabilities(detected_client):
+                detected_clients.append(detected_client)
+                return UNSUPPORTED_CAPABILITIES
+
+            service = RunCommandService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=detect_capabilities,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start_run(RunStartRequest(name="demo", worker_id="worker", role="worker"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 70)
+        self.assertEqual(detected_clients, [client])
+        self.assertEqual(run["updated_at"], "2026-07-03T00:00:00Z")
+
     def test_start_unsupported_blocking_execution_is_not_retryable(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)

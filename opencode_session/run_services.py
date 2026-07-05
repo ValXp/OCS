@@ -82,7 +82,12 @@ class RunCommandService:
     def start_run(self, request):
         if request.prompt is not None:
             self._ensure_prompt_worker(request)
-        return DependencyOrderedSerialRunOrchestrationService(self.store).start(
+        return DependencyOrderedSerialRunOrchestrationService(
+            self.store,
+            client_factory=self.client_factory,
+            capability_detector=self.capability_detector,
+            now=self.now,
+        ).start(
             DependencyOrderedSerialRunStartRequest(
                 name=request.name,
                 worker_id=request.worker_id,
