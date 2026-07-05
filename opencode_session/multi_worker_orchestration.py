@@ -14,7 +14,6 @@ from opencode_session.run_store import RunStoreError
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_execution import (
     cleanup_created_worker_sessions,
-    ensure_worker_session,
     execute_worker_attempts,
 )
 from opencode_session.worker_status import is_runnable_status
@@ -28,7 +27,6 @@ from opencode_session.worker_state import (
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
     mark_dependency_blocked as _mark_dependency_blocked,
-    mark_worker_active as _mark_worker_active,
     mark_worker_failed as _mark_worker_failed,
     refresh_run_summary as _refresh_worker_run_summary,
     worker_prompt as _worker_prompt,
@@ -88,6 +86,7 @@ class MultiWorkerRunOrchestrationService:
 
     def _start_prompted_workers(self, run, *, cleanup=False):
         created_session_ids_by_worker = {}
+        client = None
         if _mark_invalid_dependency_graph_workers(run):
             refresh_orchestration_run_summary(run)
             self._save(run)
@@ -112,30 +111,12 @@ class MultiWorkerRunOrchestrationService:
                     self._save(run)
                     break
 
-                for worker in ready_workers:
-                    _mark_worker_active(worker)
-                self._save(run)
-
-                for worker in ready_workers:
-                    session_outcome = ensure_worker_session(
-                        client,
-                        run,
-                        worker,
-                        agent=worker.get("agent"),
-                        model=worker.get("model"),
-                        treat_falsey_session_as_missing=True,
-                    )
-                    if cleanup and session_outcome.created_session_id:
-                        worker["cleanup"] = {"requested": True, "deleted": False}
-                        _created_session_ids(created_session_ids_by_worker, worker).append(
-                            session_outcome.created_session_id
-                        )
-                self._save(run)
-
                 attempt_workers = list(ready_workers)
                 while attempt_workers:
                     retry_workers = []
                     for worker in attempt_workers:
+                        if not worker.get("session_id"):
+                            worker["session_id"] = None
                         outcome = execute_worker_attempts(
                             client,
                             run,
@@ -144,8 +125,11 @@ class MultiWorkerRunOrchestrationService:
                             capabilities,
                             executor=self.executor,
                             now=self.now,
-                            create_session=False,
+                            agent=worker.get("agent"),
+                            model=worker.get("model"),
+                            create_session=True,
                             stop_after_retry=True,
+                            on_worker_update=lambda: self._save(run),
                         )
                         if cleanup:
                             for created_session_id in outcome.created_session_ids:
@@ -158,6 +142,13 @@ class MultiWorkerRunOrchestrationService:
                             _mark_dependency_blocked_workers(run)
                             refresh_orchestration_run_summary(run)
                             self._save(run)
+                            cleanup_error = (
+                                self._cleanup_created_workers(client, run, created_session_ids_by_worker)
+                                if cleanup
+                                else None
+                            )
+                            if cleanup_error is not None:
+                                return cleanup_error
                             return MultiWorkerRunStartOutcome(
                                 run,
                                 _exit_code_for_orchestration_run(run),
@@ -180,6 +171,13 @@ class MultiWorkerRunOrchestrationService:
                         break
         except OpenCodeApiError as error:
             self._mark_prompted_workers_failed(run, str(error))
+            cleanup_error = (
+                self._cleanup_created_workers(client, run, created_session_ids_by_worker)
+                if cleanup and client is not None and created_session_ids_by_worker
+                else None
+            )
+            if cleanup_error is not None:
+                return cleanup_error
             return MultiWorkerRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
 
         cleanup_error = self._cleanup_created_workers(client, run, created_session_ids_by_worker) if cleanup else None

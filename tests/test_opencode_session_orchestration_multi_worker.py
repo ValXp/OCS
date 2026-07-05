@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import MultiWorkerRunOrchestrationService, MultiWorkerRunStartRequest
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
@@ -188,9 +189,9 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
             request_paths(requests)[2:],
             [
                 ("POST", "/api/session"),
-                ("POST", "/api/session"),
                 ("POST", "/session/ses_docs/run"),
                 ("POST", "/session/ses_docs/reply"),
+                ("POST", "/api/session"),
                 ("POST", "/session/ses_plan/run"),
                 ("POST", "/session/ses_plan/reply"),
             ],
@@ -273,6 +274,48 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["planner"]["cleanup"], {"requested": True, "deleted": True})
         self.assertEqual(payloads_for(requests, "DELETE", "/api/session/ses_docs"), [None])
         self.assertEqual(payloads_for(requests, "DELETE", "/api/session/ses_plan"), [None])
+
+    def test_start_with_cleanup_after_first_ready_worker_failure_does_not_precreate_later_worker_session(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker("demo", "alpha", role="build", prompt="Run alpha")
+            store.upsert_worker("demo", "beta", role="review", prompt="Run beta")
+            client = FakeClient(["ses_alpha", "ses_beta"])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                raise BlockingProviderFailure("alpha failed")
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(
+                MultiWorkerRunStartRequest(name="demo", worker_id="alpha", role="build", cleanup=True)
+            )
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(outcome.error, "provider failure: alpha failed")
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("execute", "ses_alpha", "Run alpha"),
+                ("delete", "ses_alpha"),
+            ],
+        )
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["workers"]["alpha"]["status"], "failed")
+        self.assertEqual(run["workers"]["alpha"]["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(run["workers"]["beta"]["status"], "queued")
+        self.assertIsNone(run["workers"]["beta"]["session_id"])
+        self.assertNotIn("cleanup", run["workers"]["beta"])
 
     def test_start_with_cleanup_does_not_delete_preexisting_worker_sessions(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
