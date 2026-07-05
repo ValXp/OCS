@@ -103,6 +103,12 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     run_start_parser.add_argument("--session", dest="session_id", help="existing OpenCode session ID to attach")
     run_start_parser.add_argument("--agent", help="agent name when creating a worker session")
     run_start_parser.add_argument("--model", help="model name when creating a worker session")
+    run_start_parser.add_argument(
+        "--execution-policy",
+        choices=("fail-fast", "continue"),
+        default="fail-fast",
+        help="whether independent ready workers stop on the first failure or continue serially",
+    )
     run_start_parser.add_argument("--cleanup", action="store_true", help="delete a session created by this start after it reaches done")
 
     run_status_parser = run_subparsers.add_parser("status")
@@ -174,6 +180,7 @@ def _start_orchestration_run(args, service, *, print_error):
             session_id=args.session_id,
             agent=args.agent,
             model=args.model,
+            execution_policy=args.execution_policy,
             cleanup=args.cleanup,
             default_server_url=_server_default(),
         )

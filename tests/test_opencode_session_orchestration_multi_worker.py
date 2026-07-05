@@ -2,6 +2,7 @@ import tempfile
 import unittest
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
@@ -387,6 +388,66 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(run["workers"]["review"]["status"], "blocked")
         self.assertEqual(run["workers"]["review"]["blockers"], ["dependency:build"])
         self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+
+    def test_continue_policy_runs_independent_ready_worker_after_failure(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker("demo", "alpha", role="build", prompt="Run alpha")
+            store.upsert_worker("demo", "beta", role="write", prompt="Run beta")
+            client = FakeClient(["ses_alpha", "ses_beta"])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                if session_id == "ses_alpha":
+                    raise BlockingProviderFailure("alpha failed", prompt_id="msg_alpha_user")
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": "msg_beta_user", "assistant": "msg_beta_assistant"},
+                    "status": "done",
+                    "raw_status": "completed",
+                    "terminal_state": "done",
+                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
+                    "execution_strategy": "legacy_run_reply",
+                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
+                    "cost": 0.02,
+                    "tokens": {"total": 12},
+                    "text": "Beta finished.",
+                }
+
+            service = DependencyOrderedSerialRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(
+                DependencyOrderedSerialRunStartRequest(
+                    name="demo",
+                    worker_id="alpha",
+                    role="build",
+                    execution_policy="continue",
+                )
+            )
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(outcome.error, "provider failure: alpha failed")
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("execute", "ses_alpha", "Run alpha"),
+                ("create", directory, None, None),
+                ("execute", "ses_beta", "Run beta"),
+            ],
+        )
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["workers"]["alpha"]["status"], "failed")
+        self.assertEqual(run["workers"]["beta"]["status"], "done")
+        self.assertEqual(run["workers"]["beta"]["output_refs"], ["assistant:msg_beta_assistant"])
 
     def test_start_does_not_probe_capabilities_when_partially_completed_cycle_blocks_worker(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:

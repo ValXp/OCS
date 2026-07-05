@@ -29,6 +29,7 @@ class RunStartRequest:
     session_id: Optional[str] = None
     agent: Optional[str] = None
     model: Optional[str] = None
+    execution_policy: str = "fail_fast"
     cleanup: bool = False
     default_server_url: Optional[str] = None
 
@@ -91,6 +92,7 @@ class RunCommandService:
                 session_id=request.session_id,
                 agent=request.agent,
                 model=request.model,
+                execution_policy=request.execution_policy,
                 cleanup=request.cleanup,
             )
         )

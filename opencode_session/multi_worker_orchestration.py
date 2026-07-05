@@ -31,6 +31,10 @@ from opencode_session.worker_state import (
 
 workers_in_dependency_order = _workers_in_dependency_order
 
+EXECUTION_POLICY_FAIL_FAST = "fail_fast"
+EXECUTION_POLICY_CONTINUE = "continue"
+EXECUTION_POLICIES = {EXECUTION_POLICY_FAIL_FAST, EXECUTION_POLICY_CONTINUE}
+
 
 @dataclass
 class DependencyOrderedSerialRunStartRequest:
@@ -42,6 +46,7 @@ class DependencyOrderedSerialRunStartRequest:
     session_id: Optional[str] = None
     agent: Optional[str] = None
     model: Optional[str] = None
+    execution_policy: str = EXECUTION_POLICY_FAIL_FAST
     cleanup: bool = False
 
 
@@ -80,6 +85,7 @@ class DependencyOrderedSerialRunOrchestrationService:
 
     def start(self, request):
         run = self.store.load_run(request.name)
+        execution_policy = _normalize_execution_policy(request.execution_policy)
 
         def prepare(latest_run):
             if request.directory is not None:
@@ -98,11 +104,12 @@ class DependencyOrderedSerialRunOrchestrationService:
         run = self._persist_mutation(run, prepare)
         if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):
             raise RunStoreError(f"run '{request.name}' has no worker prompts; pass --prompt or add workers with --prompt")
-        return self._start_prompted_workers(run, cleanup=request.cleanup)
+        return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
 
-    def _start_prompted_workers(self, run, *, cleanup=False):
+    def _start_prompted_workers(self, run, *, cleanup=False, execution_policy=EXECUTION_POLICY_FAIL_FAST):
         created_session_ids_by_worker = {}
         client = None
+        first_error_outcome = None
         dependency_analysis = self._mark_and_persist_dependency_blocked_workers(run)
         if dependency_analysis.blockers_by_worker_id or not dependency_analysis.ready_worker_ids:
             if not dependency_analysis.ready_worker_ids:
@@ -130,19 +137,23 @@ class DependencyOrderedSerialRunOrchestrationService:
                     probe.capabilities,
                     cleanup=cleanup,
                     created_session_ids_by_worker=created_session_ids_by_worker,
+                    execution_policy=execution_policy,
                 )
                 if outcome is not None:
+                    if first_error_outcome is None:
+                        first_error_outcome = outcome
                     self._mark_and_persist_dependency_blocked_workers(run)
-                    cleanup_error = (
-                        self._cleanup_created_workers(client, run, created_session_ids_by_worker) if cleanup else None
-                    )
-                    if cleanup_error is not None:
-                        return cleanup_error
-                    return DependencyOrderedSerialRunStartOutcome(
-                        run,
-                        _exit_code_for_orchestration_run(run),
-                        outcome.error,
-                    )
+                    if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                        cleanup_error = (
+                            self._cleanup_created_workers(client, run, created_session_ids_by_worker) if cleanup else None
+                        )
+                        if cleanup_error is not None:
+                            return cleanup_error
+                        return DependencyOrderedSerialRunStartOutcome(
+                            run,
+                            _exit_code_for_orchestration_run(run),
+                            outcome.error,
+                        )
 
                 if not _ready_prompted_workers(run.get("workers", {})):
                     self._mark_and_persist_dependency_blocked_workers(run)
@@ -162,7 +173,11 @@ class DependencyOrderedSerialRunOrchestrationService:
         cleanup_error = self._cleanup_created_workers(client, run, created_session_ids_by_worker) if cleanup else None
         if cleanup_error is not None:
             return cleanup_error
-        return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+        return DependencyOrderedSerialRunStartOutcome(
+            run,
+            _exit_code_for_orchestration_run(run),
+            first_error_outcome.error if first_error_outcome is not None else None,
+        )
 
     def _execute_ready_workers_serially(
         self,
@@ -173,7 +188,9 @@ class DependencyOrderedSerialRunOrchestrationService:
         *,
         cleanup,
         created_session_ids_by_worker,
+        execution_policy,
     ):
+        first_error_outcome = None
         attempt_workers = list(ready_workers)
         while attempt_workers:
             retry_workers = []
@@ -198,10 +215,13 @@ class DependencyOrderedSerialRunOrchestrationService:
                     retry_workers.append(worker)
                     continue
                 if outcome.error is not None:
-                    return outcome
+                    if first_error_outcome is None:
+                        first_error_outcome = outcome
+                    if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                        return outcome
             self._persist_summary(run)
             attempt_workers = retry_workers
-        return None
+        return first_error_outcome
 
     def _cleanup_created_workers(self, client, run, created_session_ids_by_worker):
         cleanup_failure = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
@@ -288,6 +308,13 @@ def _mark_dependency_blocked_workers(run):
         if isinstance(worker, dict):
             _mark_dependency_blocked(worker, analysis.blockers_by_worker_id[worker_id])
     return analysis
+
+
+def _normalize_execution_policy(policy):
+    normalized = (policy or EXECUTION_POLICY_FAIL_FAST).replace("-", "_")
+    if normalized not in EXECUTION_POLICIES:
+        raise RunStoreError(f"unsupported execution policy '{policy}'")
+    return normalized
 
 
 def _utc_now():
