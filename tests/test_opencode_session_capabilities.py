@@ -181,6 +181,33 @@ class CapabilityProbeCliTest(unittest.TestCase):
             ],
         )
 
+    def test_configured_route_plan_drives_client_blocking_execution_routes(self):
+        with FakeOpenCodeServer() as server:
+            server.json("POST", "/custom/ses_1/message", {"id": "msg_assistant", "status": "completed"})
+            server.json("POST", "/custom/ses_1/run", {"id": "msg_user", "status": "submitted"})
+            server.json("POST", "/custom/ses_1/reply", {"id": "msg_assistant", "status": "completed"})
+            client = OpenCodeApiClient(server.url).configure_route_plan(
+                {
+                    "blocking_message": "/custom/{sessionID}/message",
+                    "legacy_run": "/custom/{sessionID}/run",
+                    "legacy_reply": "/custom/{sessionID}/reply",
+                }
+            )
+
+            client.message_session_response("ses_1", "Finish the worker task")
+            client.run_session_response("ses_1", "Finish the worker task")
+            client.reply_session_response("ses_1")
+            requests = list(server.requests)
+
+        self.assertEqual(
+            [(method, path) for method, path, _payload in requests],
+            [
+                ("POST", "/custom/ses_1/message"),
+                ("POST", "/custom/ses_1/run"),
+                ("POST", "/custom/ses_1/reply"),
+            ],
+        )
+
     def test_delete_session_does_not_fallback_on_invalid_json(self):
         with FakeOpenCodeServer() as server:
             server.route("DELETE", "/api/session/ses_1", lambda handler, _request: handler._write_text("deleted"))

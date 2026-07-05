@@ -125,6 +125,26 @@ class BlockingExecutionServiceTest(unittest.TestCase):
         self.assertTrue(all(request[4] for request in client.requests))
         self.assertTrue(all(0 < request[3] <= 5 for request in client.requests))
 
+    def test_reports_route_plan_paths_for_legacy_execution(self):
+        from opencode_session.blocking_execution import execute_blocking_prompt
+
+        capabilities = {
+            "route_availability": {},
+            "legacy_fallback_available": True,
+            "route_plan": {
+                "legacy_run": "/custom/{sessionID}/run",
+                "legacy_reply": "/custom/{sessionID}/reply",
+            },
+        }
+        client = _BlockingExecutionClient()
+
+        result = execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertEqual(
+            result["api_path"],
+            {"run": "/custom/{sessionID}/run", "reply": "/custom/{sessionID}/reply"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

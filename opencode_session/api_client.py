@@ -28,6 +28,9 @@ class OpenCodeApiResponse:
 DEFAULT_ROUTE_PLAN = {
     "session_collection": "/api/session",
     "session_item": "/api/session/{sessionID}",
+    "blocking_message": "/session/{sessionID}/message",
+    "legacy_run": "/session/{sessionID}/run",
+    "legacy_reply": "/session/{sessionID}/reply",
 }
 
 
@@ -216,21 +219,26 @@ class OpenCodeApiClient:
 
     def run_session_response(self, session_id, message, *, timeout=None, deadline=None):
         return self.post_response(
-            f"session/{quote(session_id, safe='')}/run",
+            self._route_path("legacy_run", session_id=session_id),
             {"message": message},
             timeout=timeout,
             deadline=deadline,
         )
 
     def reply_session_response(self, session_id, *, timeout=None, deadline=None):
-        return self.post_response(f"session/{quote(session_id, safe='')}/reply", {}, timeout=timeout, deadline=deadline)
+        return self.post_response(
+            self._route_path("legacy_reply", session_id=session_id),
+            {},
+            timeout=timeout,
+            deadline=deadline,
+        )
 
     def message_session_response(self, session_id, message, *, message_id=None, timeout=None, deadline=None):
         payload = {"parts": [{"type": "text", "text": message}]}
         if message_id is not None:
             payload["messageID"] = message_id
         return self.post_response(
-            f"session/{quote(session_id, safe='')}/message",
+            self._route_path("blocking_message", session_id=session_id),
             payload,
             timeout=timeout,
             deadline=deadline,

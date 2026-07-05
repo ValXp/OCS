@@ -52,11 +52,11 @@ def execute_blocking_prompt(
     if strategy == "session_message":
         return _execute_session_message_prompt(client, session_id, prompt, capabilities, timeout, deadline)
     if strategy == "legacy_run_reply":
-        return _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout, deadline)
+        return _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, timeout, deadline)
     raise OpenCodeApiError(unsupported_blocking_execution_message())
 
 
-def legacy_run_reply_result(session_id, run_message, reply_message):
+def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=None):
     raw_status = message_value(reply_message, "status") or "completed"
     status = short_status(raw_status)
     return {
@@ -68,7 +68,7 @@ def legacy_run_reply_result(session_id, run_message, reply_message):
         "status": status,
         "raw_status": raw_status,
         "terminal_state": status,
-        "api_path": {"run": LEGACY_RUN_PATH, "reply": LEGACY_REPLY_PATH},
+        "api_path": api_path or {"run": LEGACY_RUN_PATH, "reply": LEGACY_REPLY_PATH},
         "execution_strategy": "legacy_run_reply",
         "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
         "cost": message_value(reply_message, "cost"),
@@ -78,14 +78,13 @@ def legacy_run_reply_result(session_id, run_message, reply_message):
 
 
 def skipped_blocking_execution_result(session_id, capabilities, *, reason="no-live-model"):
-    routes = capabilities["route_availability"]
     return {
         "session_id": session_id,
         "status": "skipped",
         "reason": reason,
         "raw_status": "skipped",
         "terminal_state": "skipped",
-        "api_path": {"run": routes["legacy_run"]["path"], "reply": routes["legacy_reply"]["path"]},
+        "api_path": _legacy_api_path(capabilities),
         "fallback": {
             "available": capabilities["legacy_fallback_available"],
             "strategy": "legacy_run_reply",
@@ -133,7 +132,7 @@ def _execute_session_message_prompt(client, session_id, prompt, capabilities, ti
     return _session_message_result(session_id, message_id, response.data, capabilities)
 
 
-def _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout, deadline):
+def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, timeout, deadline):
     run_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         run_kwargs["deadline"] = deadline
@@ -154,7 +153,12 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, timeout, deadli
             error,
             prompt_id=message_value(run_response.data, "id", "messageID", "messageId"),
         )
-    return legacy_run_reply_result(session_id, run_response.data, reply_response.data)
+    return legacy_run_reply_result(
+        session_id,
+        run_response.data,
+        reply_response.data,
+        api_path=_legacy_api_path(capabilities),
+    )
 
 
 def _request_timeout(client, timeout, deadline=None):
@@ -178,7 +182,7 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
         "status": status,
         "raw_status": raw_status,
         "terminal_state": status,
-        "api_path": {"message": SESSION_MESSAGE_PATH},
+        "api_path": {"message": _route_plan_path(capabilities, "blocking_message", SESSION_MESSAGE_PATH)},
         "execution_strategy": "session_message",
         "fallback": {
             "available": capabilities.get("legacy_fallback_available", False),
@@ -189,3 +193,17 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
         "tokens": message_tokens(assistant_message),
         "text": message_text(assistant_message),
     }
+
+
+def _legacy_api_path(capabilities):
+    return {
+        "run": _route_plan_path(capabilities, "legacy_run", LEGACY_RUN_PATH),
+        "reply": _route_plan_path(capabilities, "legacy_reply", LEGACY_REPLY_PATH),
+    }
+
+
+def _route_plan_path(capabilities, name, fallback):
+    route_plan = capabilities.get("route_plan") if isinstance(capabilities, dict) else None
+    if isinstance(route_plan, dict) and route_plan.get(name):
+        return route_plan[name]
+    return fallback
