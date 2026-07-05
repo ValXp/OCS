@@ -1,5 +1,6 @@
 from opencode_session.status import short_status
 from opencode_session.worker_dependencies import analyze_worker_dependencies
+from opencode_session.worker_status import is_blocked_status
 
 
 EX_UNAVAILABLE = 69
@@ -72,7 +73,7 @@ def next_eligible_action(worker):
         return "start"
     if status == "active":
         return "retry" if worker.get("next_eligible_action") == "retry" else "wait"
-    if status == "blocked":
+    if is_blocked_status(status):
         return "resolve_blocker"
     if status == "done":
         return "collect"

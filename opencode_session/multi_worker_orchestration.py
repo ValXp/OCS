@@ -17,6 +17,7 @@ from opencode_session.worker_execution import (
     ensure_worker_session,
     execute_worker_attempts,
 )
+from opencode_session.worker_status import is_runnable_status
 from opencode_session.worker_state import (
     EX_ABORTED,
     EX_BLOCKED,
@@ -237,7 +238,7 @@ def _pending_prompted_workers(workers):
         for worker in workers.values()
         if isinstance(worker, dict)
         and _worker_prompt(worker)
-        and worker.get("status") not in {"done", "failed", "aborted", "timeout", "blocked"}
+        and is_runnable_status(worker.get("status"))
     ]
 
 

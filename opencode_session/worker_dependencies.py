@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 
-
-_BLOCKABLE_TERMINAL_STATUSES = {"done", "failed", "aborted", "timeout"}
-_FAILED_DEPENDENCY_STATUSES = {"failed", "aborted", "timeout", "blocked"}
-_NON_RUNNABLE_TERMINAL_STATUSES = {"done", "failed", "aborted", "timeout", "blocked"}
+from opencode_session.worker_status import (
+    is_dependency_blockable_status,
+    is_failed_dependency_status,
+    is_runnable_status,
+)
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ def _ready_worker_ids(workers):
     ready = []
     for worker_id in sorted(workers):
         worker = workers[worker_id]
-        if not _blockable_prompted_worker(worker):
+        if not _runnable_prompted_worker(worker):
             continue
         if _dependencies_done(worker, workers):
             ready.append(worker_id)
@@ -77,7 +78,7 @@ def _invalid_graph_blockers(workers, cycles):
         blocker = f"dependency-cycle:{'->'.join(cycle)}"
         for worker_id in set(cycle[:-1]):
             worker = workers.get(worker_id)
-            if _blockable_prompted_worker(worker):
+            if _dependency_blockable_prompted_worker(worker):
                 _add_blocker(blockers_by_worker_id, worker_id, blocker)
                 invalid_worker_ids.add(worker_id)
 
@@ -85,7 +86,7 @@ def _invalid_graph_blockers(workers, cycles):
         if worker_id in invalid_worker_ids:
             continue
         worker = workers.get(worker_id)
-        if not _blockable_prompted_worker(worker):
+        if not _dependency_blockable_prompted_worker(worker):
             continue
         blockers = [
             f"dependency-not-runnable:{dependency}"
@@ -102,7 +103,7 @@ def _invalid_graph_blockers(workers, cycles):
             if worker_id in invalid_worker_ids:
                 continue
             worker = workers.get(worker_id)
-            if not _blockable_prompted_worker(worker):
+            if not _dependency_blockable_prompted_worker(worker):
                 continue
             blockers = [
                 f"dependency:{dependency}"
@@ -123,12 +124,12 @@ def _dependency_blockers(workers):
     blockers_by_worker_id = {}
     for worker_id in sorted(workers):
         worker = workers.get(worker_id)
-        if not _blockable_prompted_worker(worker):
+        if not _dependency_blockable_prompted_worker(worker):
             continue
         blockers = []
         for dependency in _worker_dependencies(worker):
             dependency_worker = workers.get(dependency)
-            if not isinstance(dependency_worker, dict) or dependency_worker.get("status") in _FAILED_DEPENDENCY_STATUSES:
+            if not isinstance(dependency_worker, dict) or is_failed_dependency_status(dependency_worker.get("status")):
                 blockers.append(f"dependency:{dependency}")
         if blockers:
             blockers_by_worker_id[worker_id] = tuple(blockers)
@@ -158,16 +159,24 @@ def _dependencies_done(worker, workers):
 def _non_runnable_dependency(worker):
     if not isinstance(worker, dict):
         return False
-    if worker.get("status") in _NON_RUNNABLE_TERMINAL_STATUSES:
+    if not is_runnable_status(worker.get("status")):
         return False
     return not _worker_has_prompt(worker)
 
 
-def _blockable_prompted_worker(worker):
+def _runnable_prompted_worker(worker):
     return (
         isinstance(worker, dict)
         and _worker_has_prompt(worker)
-        and worker.get("status") not in _BLOCKABLE_TERMINAL_STATUSES
+        and is_runnable_status(worker.get("status"))
+    )
+
+
+def _dependency_blockable_prompted_worker(worker):
+    return (
+        isinstance(worker, dict)
+        and _worker_has_prompt(worker)
+        and is_dependency_blockable_status(worker.get("status"))
     )
 
 

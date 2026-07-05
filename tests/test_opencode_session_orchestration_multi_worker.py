@@ -464,6 +464,67 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(run["workers"]["review"]["blockers"], ["dependency:build"])
         self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
+    def test_start_does_not_execute_blocked_worker_after_dependency_succeeds(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Run the implementation",
+            )
+            client = FakeClient(["ses_build"])
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append((session_id, prompt))
+                if prompt == "Review the implementation":
+                    self.fail("blocked worker should not execute without requeue")
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": "msg_build_user", "assistant": "msg_build_assistant"},
+                    "status": "done",
+                }
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            first_outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="build", role="build"))
+            requests_after_first_start = list(client.requests)
+            executions_after_first_start = list(executions)
+            store.upsert_worker(
+                "demo",
+                "review",
+                role="review",
+                prompt="Review the implementation",
+                session_id="ses_review",
+                dependencies=["build"],
+                status="blocked",
+                blockers=["manual:blocker"],
+            )
+
+            second_outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            run = store.load_run("demo")
+
+        self.assertEqual(first_outcome.exit_code, 0)
+        self.assertEqual(second_outcome.exit_code, 75)
+        self.assertEqual(requests_after_first_start, [("create", directory, None, None)])
+        self.assertEqual(executions_after_first_start, [("ses_build", "Run the implementation")])
+        self.assertEqual(client.requests, requests_after_first_start)
+        self.assertEqual(executions, executions_after_first_start)
+        self.assertEqual(run["status"], "blocked")
+        self.assertEqual(run["output_refs"], ["build:msg_build_assistant"])
+        self.assertEqual(run["workers"]["build"]["status"], "done")
+        self.assertEqual(run["workers"]["review"]["status"], "blocked")
+        self.assertEqual(run["workers"]["review"]["blockers"], ["manual:blocker"])
+        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+
     def test_start_blocks_workers_in_dependency_cycle(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:
