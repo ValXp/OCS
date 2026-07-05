@@ -8,22 +8,17 @@ from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.run_record import DEFAULT_SERVER_URL
 from opencode_session.run_start_policy import (
-    blocking_execution_start_error,
     mark_orchestration_start_failed,
 )
+from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
 from opencode_session.run_store import RunStoreError
-from opencode_session.worker_execution import (
-    WorkerExecutionTimeout,
-    cleanup_created_worker_sessions,
-    execute_worker_attempts,
-)
+from opencode_session.worker_execution import WorkerExecutionTimeout
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,
     ensure_worker as _ensure_worker,
     exit_code_for_run as _exit_code_for_run,
     mark_worker_active as _mark_worker_active,
-    mark_worker_failed as _mark_worker_failed,
     refresh_run_summary as _refresh_run_summary,
 )
 
@@ -65,6 +60,14 @@ class SingleWorkerRunStateService:
         self.capability_detector = capability_detector
         self.executor = executor
         self.now = now or _utc_now
+        self.core = RunStartCore(
+            save_run=self._save,
+            refresh_run_summary=_refresh_run_summary,
+            client_factory=self.client_factory,
+            capability_detector=self.capability_detector,
+            executor=self.executor,
+            now=self.now,
+        )
 
     def start(self, request):
         run = self._load_or_create_run(request)
@@ -74,51 +77,39 @@ class SingleWorkerRunStateService:
         _mark_worker_active(worker)
         self._save(run)
 
-        created_session_ids = []
+        created_session_ids_by_worker = {}
         try:
-            client = self.client_factory(run["server_url"])
-            capabilities = self.capability_detector(client)
-            message = blocking_execution_start_error(capabilities)
-            if message is not None:
-                mark_orchestration_start_failed(run, [worker], message)
+            probe = self.core.probe_capabilities(run)
+            client = probe.client
+            if probe.start_error is not None:
+                mark_orchestration_start_failed(run, [worker], probe.start_error)
                 self._save(run)
-                return SingleWorkerRunStartOutcome(run, EX_UNSUPPORTED, message)
+                return SingleWorkerRunStartOutcome(run, EX_UNSUPPORTED, probe.start_error)
 
             session_id = request.session_id or worker.get("session_id")
-            outcome = execute_worker_attempts(
+            outcome = self.core.execute_worker(
                 client,
                 run,
                 worker,
                 request.prompt,
-                capabilities,
-                executor=self.executor,
-                now=self.now,
+                probe.capabilities,
                 session_id=session_id,
                 agent=request.agent,
                 model=request.model,
-                on_worker_update=lambda: self._save(run),
             )
         except OpenCodeApiError as error:
             mark_orchestration_start_failed(run, [worker], str(error))
             self._save(run)
             return SingleWorkerRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
-        created_session_ids.extend(outcome.created_session_ids)
         _refresh_run_summary(run)
         if outcome.error is not None:
             self._save(run)
             return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run), outcome.error)
         if request.cleanup:
-            worker["cleanup"] = {"requested": True, "deleted": False}
-            cleanup_outcome = cleanup_created_worker_sessions(client, worker, created_session_ids)
-            if cleanup_outcome.error is not None:
-                run["status"] = "failed"
-                _mark_worker_failed(worker, "api", str(cleanup_outcome.error), retryable=False)
-                self._save(run)
-                return SingleWorkerRunStartOutcome(
-                    run,
-                    EX_UNAVAILABLE,
-                    f"api failure: disposable session cleanup failed: {cleanup_outcome.error}",
-                )
+            remember_created_worker_sessions(created_session_ids_by_worker, worker, outcome.created_session_ids)
+            cleanup_failure = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
+            if cleanup_failure is not None:
+                return SingleWorkerRunStartOutcome(run, cleanup_failure.exit_code, cleanup_failure.error)
         self._save(run)
         return SingleWorkerRunStartOutcome(run, _exit_code_for_run(run))
 

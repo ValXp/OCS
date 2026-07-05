@@ -6,16 +6,10 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.run_start_policy import (
-    blocking_execution_start_error,
-    mark_orchestration_start_failed,
-)
+from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
+from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_execution import (
-    cleanup_created_worker_sessions,
-    execute_worker_attempts,
-)
 from opencode_session.worker_status import is_runnable_status
 from opencode_session.worker_state import (
     EX_ABORTED,
@@ -27,7 +21,6 @@ from opencode_session.worker_state import (
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
     mark_dependency_blocked as _mark_dependency_blocked,
-    mark_worker_failed as _mark_worker_failed,
     refresh_run_summary as _refresh_worker_run_summary,
     worker_prompt as _worker_prompt,
     workers_in_dependency_order as _workers_in_dependency_order,
@@ -70,6 +63,14 @@ class MultiWorkerRunOrchestrationService:
         self.capability_detector = capability_detector
         self.executor = executor
         self.now = now or _utc_now
+        self.core = RunStartCore(
+            save_run=self._save,
+            refresh_run_summary=refresh_orchestration_run_summary,
+            client_factory=self.client_factory,
+            capability_detector=self.capability_detector,
+            executor=self.executor,
+            now=self.now,
+        )
 
     def start(self, request):
         run = self.store.load_run(request.name)
@@ -95,12 +96,11 @@ class MultiWorkerRunOrchestrationService:
                 return MultiWorkerRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
         try:
-            client = self.client_factory(run["server_url"])
-            capabilities = self.capability_detector(client)
-            message = blocking_execution_start_error(capabilities)
-            if message is not None:
-                self._mark_prompted_workers_failed(run, message)
-                return MultiWorkerRunStartOutcome(run, EX_UNSUPPORTED, message)
+            probe = self.core.probe_capabilities(run)
+            client = probe.client
+            if probe.start_error is not None:
+                self._mark_prompted_workers_failed(run, probe.start_error)
+                return MultiWorkerRunStartOutcome(run, EX_UNSUPPORTED, probe.start_error)
 
             run["status"] = "active"
             self._save(run)
@@ -119,24 +119,22 @@ class MultiWorkerRunOrchestrationService:
                     for worker in attempt_workers:
                         if not worker.get("session_id"):
                             worker["session_id"] = None
-                        outcome = execute_worker_attempts(
+                        outcome = self.core.execute_worker(
                             client,
                             run,
                             worker,
                             _worker_prompt(worker),
-                            capabilities,
-                            executor=self.executor,
-                            now=self.now,
+                            probe.capabilities,
                             agent=worker.get("agent"),
                             model=worker.get("model"),
-                            create_session=True,
                             stop_after_retry=True,
-                            on_worker_update=lambda: self._save(run),
                         )
                         if cleanup:
-                            for created_session_id in outcome.created_session_ids:
-                                worker.setdefault("cleanup", {"requested": True, "deleted": False})
-                                _created_session_ids(created_session_ids_by_worker, worker).append(created_session_id)
+                            remember_created_worker_sessions(
+                                created_session_ids_by_worker,
+                                worker,
+                                outcome.created_session_ids,
+                            )
                         if outcome.kind == "retry":
                             retry_workers.append(worker)
                             continue
@@ -188,22 +186,9 @@ class MultiWorkerRunOrchestrationService:
         return MultiWorkerRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
     def _cleanup_created_workers(self, client, run, created_session_ids_by_worker):
-        workers = run.get("workers", {})
-        for worker_id, session_ids in created_session_ids_by_worker.items():
-            worker = workers.get(worker_id)
-            if not isinstance(worker, dict):
-                continue
-            cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
-            if cleanup_outcome.error is not None:
-                _mark_worker_failed(worker, "api", f"disposable session cleanup failed: {cleanup_outcome.error}")
-                refresh_orchestration_run_summary(run)
-                self._save(run)
-                return MultiWorkerRunStartOutcome(
-                    run,
-                    EX_UNAVAILABLE,
-                    f"api failure: disposable session cleanup failed: {cleanup_outcome.error}",
-                )
-        self._save(run)
+        cleanup_failure = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
+        if cleanup_failure is not None:
+            return MultiWorkerRunStartOutcome(run, cleanup_failure.exit_code, cleanup_failure.error)
         return None
 
     def _mark_prompted_workers_failed(self, run, error):
@@ -247,10 +232,6 @@ def _mark_dependency_blocked_workers(run):
         if isinstance(worker, dict):
             _mark_dependency_blocked(worker, analysis.blockers_by_worker_id[worker_id])
     return analysis
-
-
-def _created_session_ids(created_session_ids_by_worker, worker):
-    return created_session_ids_by_worker.setdefault(worker.get("id"), [])
 
 
 def _utc_now():
