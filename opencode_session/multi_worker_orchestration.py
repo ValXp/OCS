@@ -1,7 +1,7 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
@@ -66,22 +66,6 @@ class DependencyScheduleTick:
     blockers_by_worker_id: dict
 
 
-@dataclass
-class OrchestrationExecutionState:
-    client: Any
-    capabilities: DomainRecord
-    created_session_ids_by_worker: DomainRecord = field(default_factory=dict)
-    first_error_outcome: Any = None
-
-
-@dataclass(frozen=True)
-class WorkerBatchExecutionResult:
-    run: DomainRecord
-    retry_workers: tuple
-    first_error_outcome: Any = None
-    fail_fast_outcome: Any = None
-
-
 class DependencySchedulePlanner:
     def plan(self, workers):
         workers = workers if isinstance(workers, dict) else {}
@@ -126,155 +110,6 @@ class DurableDependencyScheduler:
         return run, tick
 
 
-class WorkerExecutionCoordinator:
-    def __init__(self, core, scheduler, *, persist_summary):
-        self.core = core
-        self.scheduler = scheduler
-        self.persist_summary = persist_summary
-
-    def execute_scheduled_workers(self, run, schedule_tick, execution_state, *, cleanup, execution_policy):
-        while schedule_tick.ready_worker_ids:
-            run, outcome = self._execute_schedule_tick(
-                run,
-                schedule_tick,
-                execution_state,
-                cleanup=cleanup,
-                execution_policy=execution_policy,
-            )
-            run, schedule_tick = self.scheduler.persist_next_tick(run)
-            if outcome is not None:
-                if execution_state.first_error_outcome is None:
-                    execution_state.first_error_outcome = outcome
-                if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                    return run, outcome
-        return run, None
-
-    def cleanup_after_execution(self, run, execution_state, *, cleanup):
-        if not cleanup or execution_state is None or not execution_state.created_session_ids_by_worker:
-            return run, None
-        return self._cleanup_created_workers(
-            execution_state.client,
-            run,
-            execution_state.created_session_ids_by_worker,
-        )
-
-    def _execute_schedule_tick(self, run, schedule_tick, execution_state, *, cleanup, execution_policy):
-        ready_workers = _workers_by_ids(run.get("workers", {}), schedule_tick.ready_worker_ids)
-        return self._execute_ready_workers_serially(
-            execution_state.client,
-            run,
-            ready_workers,
-            execution_state.capabilities,
-            cleanup=cleanup,
-            created_session_ids_by_worker=execution_state.created_session_ids_by_worker,
-            execution_policy=execution_policy,
-        )
-
-    def _execute_ready_workers_serially(
-        self,
-        client,
-        run,
-        ready_workers,
-        capabilities,
-        *,
-        cleanup,
-        created_session_ids_by_worker,
-        execution_policy,
-    ):
-        first_error_outcome = None
-        attempt_workers = list(ready_workers)
-        while attempt_workers:
-            batch_result = self._execute_worker_attempt_batch(
-                client,
-                run,
-                attempt_workers,
-                capabilities,
-                cleanup=cleanup,
-                created_session_ids_by_worker=created_session_ids_by_worker,
-                execution_policy=execution_policy,
-            )
-            if first_error_outcome is None:
-                first_error_outcome = batch_result.first_error_outcome
-            if batch_result.fail_fast_outcome is not None:
-                return batch_result.run, batch_result.fail_fast_outcome
-            run = self.persist_summary(batch_result.run)
-            attempt_workers = list(batch_result.retry_workers)
-        return run, first_error_outcome
-
-    def _execute_worker_attempt_batch(
-        self,
-        client,
-        run,
-        attempt_workers,
-        capabilities,
-        *,
-        cleanup,
-        created_session_ids_by_worker,
-        execution_policy,
-    ):
-        retry_workers = []
-        first_error_outcome = None
-        for worker in attempt_workers:
-            outcome = self._execute_single_ready_worker(
-                client,
-                run,
-                worker,
-                capabilities,
-                cleanup=cleanup,
-                created_session_ids_by_worker=created_session_ids_by_worker,
-            )
-            run = outcome.run or run
-            current_worker = run.get("workers", {}).get(worker.get("id"), worker)
-            if outcome.kind == RETRY_SCHEDULED:
-                retry_workers.append(current_worker)
-                continue
-            if outcome.error is not None:
-                if first_error_outcome is None:
-                    first_error_outcome = outcome
-                if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                    return WorkerBatchExecutionResult(run, tuple(retry_workers), first_error_outcome, outcome)
-        return WorkerBatchExecutionResult(run, tuple(retry_workers), first_error_outcome)
-
-    def _execute_single_ready_worker(
-        self,
-        client,
-        run,
-        worker,
-        capabilities,
-        *,
-        cleanup,
-        created_session_ids_by_worker,
-    ):
-        outcome = self.core.execute_worker(
-            client,
-            run,
-            worker,
-            _worker_prompt(worker),
-            capabilities,
-            agent=worker.get("agent"),
-            model=worker.get("model"),
-            stop_after_retry=True,
-        )
-        if cleanup:
-            current_worker = (outcome.run or run).get("workers", {}).get(worker.get("id"), worker)
-            remember_created_worker_sessions(
-                created_session_ids_by_worker,
-                current_worker,
-                outcome.created_session_ids,
-            )
-        return outcome
-
-    def _cleanup_created_workers(self, client, run, created_session_ids_by_worker):
-        cleanup_result = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
-        if cleanup_result.error is not None:
-            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
-                cleanup_result.run,
-                cleanup_result.exit_code,
-                cleanup_result.error,
-            )
-        return cleanup_result.run, None
-
-
 class DependencyOrderedSerialRunOrchestrationService:
     """Run prompted workers one at a time after their dependencies are satisfied."""
 
@@ -300,11 +135,6 @@ class DependencyOrderedSerialRunOrchestrationService:
             capability_detector=self.capability_detector,
             executor=self.executor,
             now=self.now,
-        )
-        self.execution = WorkerExecutionCoordinator(
-            self.core,
-            self.scheduler,
-            persist_summary=self._persist_summary,
         )
 
     def start(self, request):
@@ -336,34 +166,162 @@ class DependencyOrderedSerialRunOrchestrationService:
         if early_outcome is not None:
             return early_outcome
 
-        execution_state = None
+        client = None
+        created_session_ids_by_worker = {}
+        first_error_outcome = None
 
         try:
             probe_outcome = self._probe_execution(run)
             if probe_outcome.start_error is not None:
                 return self._unsupported_probe_outcome(run, probe_outcome)
 
-            execution_state = OrchestrationExecutionState(probe_outcome.client, probe_outcome.capabilities)
+            client = probe_outcome.client
             run = self._activate_run(run)
-            run, fail_fast_outcome = self.execution.execute_scheduled_workers(
+            run, first_error_outcome, fail_fast_outcome = self._execute_scheduled_workers(
                 run,
                 schedule_tick,
-                execution_state,
+                client,
+                probe_outcome.capabilities,
+                created_session_ids_by_worker,
                 cleanup=cleanup,
                 execution_policy=execution_policy,
             )
             if fail_fast_outcome is not None:
-                run, cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+                run, cleanup_error = self._cleanup_after_execution(
+                    run,
+                    client,
+                    created_session_ids_by_worker,
+                    cleanup=cleanup,
+                )
                 return cleanup_error or self._execution_outcome(run, fail_fast_outcome)
         except OpenCodeApiError as error:
             run = self._mark_prompted_workers_failed(run, str(error))
-            run, cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+            run, cleanup_error = self._cleanup_after_execution(
+                run,
+                client,
+                created_session_ids_by_worker,
+                cleanup=cleanup,
+            )
             if cleanup_error:
                 return cleanup_error
             return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
 
-        run, cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
-        return cleanup_error or self._execution_outcome(run, execution_state.first_error_outcome)
+        run, cleanup_error = self._cleanup_after_execution(
+            run,
+            client,
+            created_session_ids_by_worker,
+            cleanup=cleanup,
+        )
+        return cleanup_error or self._execution_outcome(run, first_error_outcome)
+
+    def _execute_scheduled_workers(
+        self,
+        run,
+        schedule_tick,
+        client,
+        capabilities,
+        created_session_ids_by_worker,
+        *,
+        cleanup,
+        execution_policy,
+    ):
+        first_error_outcome = None
+        while schedule_tick.ready_worker_ids:
+            ready_workers = _workers_by_ids(run.get("workers", {}), schedule_tick.ready_worker_ids)
+            run, tick_error_outcome, fail_fast_outcome = self._execute_ready_workers_serially(
+                client,
+                run,
+                ready_workers,
+                capabilities,
+                cleanup=cleanup,
+                created_session_ids_by_worker=created_session_ids_by_worker,
+                execution_policy=execution_policy,
+            )
+            run, schedule_tick = self.scheduler.persist_next_tick(run)
+            if first_error_outcome is None:
+                first_error_outcome = tick_error_outcome
+            if fail_fast_outcome is not None:
+                return run, first_error_outcome, fail_fast_outcome
+        return run, first_error_outcome, None
+
+    def _execute_ready_workers_serially(
+        self,
+        client,
+        run,
+        ready_workers,
+        capabilities,
+        *,
+        cleanup,
+        created_session_ids_by_worker,
+        execution_policy,
+    ):
+        first_error_outcome = None
+        attempt_workers = list(ready_workers)
+        while attempt_workers:
+            retry_workers = []
+            for worker in attempt_workers:
+                outcome = self._execute_single_ready_worker(
+                    client,
+                    run,
+                    worker,
+                    capabilities,
+                    cleanup=cleanup,
+                    created_session_ids_by_worker=created_session_ids_by_worker,
+                )
+                run = outcome.run or run
+                current_worker = run.get("workers", {}).get(worker.get("id"), worker)
+                if outcome.kind == RETRY_SCHEDULED:
+                    retry_workers.append(current_worker)
+                    continue
+                if outcome.error is not None:
+                    if first_error_outcome is None:
+                        first_error_outcome = outcome
+                    if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                        return run, first_error_outcome, outcome
+            run = self._persist_summary(run)
+            attempt_workers = retry_workers
+        return run, first_error_outcome, None
+
+    def _execute_single_ready_worker(
+        self,
+        client,
+        run,
+        worker,
+        capabilities,
+        *,
+        cleanup,
+        created_session_ids_by_worker,
+    ):
+        outcome = self.core.execute_worker(
+            client,
+            run,
+            worker,
+            _worker_prompt(worker),
+            capabilities,
+            agent=worker.get("agent"),
+            model=worker.get("model"),
+            stop_after_retry=True,
+        )
+        if cleanup:
+            current_worker = (outcome.run or run).get("workers", {}).get(worker.get("id"), worker)
+            remember_created_worker_sessions(
+                created_session_ids_by_worker,
+                current_worker,
+                outcome.created_session_ids,
+            )
+        return outcome
+
+    def _cleanup_after_execution(self, run, client, created_session_ids_by_worker, *, cleanup):
+        if not cleanup or client is None or not created_session_ids_by_worker:
+            return run, None
+        cleanup_result = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
+        if cleanup_result.error is not None:
+            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
+                cleanup_result.run,
+                cleanup_result.exit_code,
+                cleanup_result.error,
+            )
+        return cleanup_result.run, None
 
     def _outcome_if_no_ready_workers(self, run, schedule_tick):
         if schedule_tick.ready_worker_ids:
