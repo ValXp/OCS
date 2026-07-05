@@ -271,6 +271,75 @@ class RunStoreCliTest(unittest.TestCase):
         )
         self.assertNotIn("transcript", payload)
 
+    def test_worker_timeout_seconds_accepts_positive_fractional_seconds(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            init = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                directory,
+                "--server",
+                "http://opencode.example",
+            )
+            worker = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "builder",
+                "--role",
+                "build",
+                "--timeout-seconds",
+                "0.05",
+            )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["workers"]["builder"]["timeout_seconds"], 0.05)
+
+    def test_worker_timeout_seconds_rejects_non_positive_values(self):
+        for timeout in ("0", "-1"):
+            with self.subTest(timeout=timeout):
+                with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+                    init = self.run_cli(
+                        "run",
+                        "--store",
+                        store,
+                        "init",
+                        "demo",
+                        "--directory",
+                        directory,
+                        "--server",
+                        "http://opencode.example",
+                    )
+                    worker = self.run_cli(
+                        "run",
+                        "--store",
+                        store,
+                        "worker",
+                        "demo",
+                        "builder",
+                        "--role",
+                        "build",
+                        "--timeout-seconds",
+                        timeout,
+                    )
+                    status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+                self.assertEqual(init.returncode, 0, init.stderr)
+                self.assertEqual(worker.returncode, 2)
+                self.assertEqual(worker.stdout, "")
+                self.assertIn("argument --timeout-seconds: must be greater than zero", worker.stderr)
+                self.assertEqual(status.returncode, 0, status.stderr)
+                self.assertEqual(json.loads(status.stdout)["workers"], {})
+
     def test_status_json_defaults_legacy_run_records(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             store_path = Path(store)

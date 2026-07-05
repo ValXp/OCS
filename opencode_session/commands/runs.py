@@ -30,9 +30,9 @@ from opencode_session.worker_state import mark_worker_aborted as _mark_worker_ab
 DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
 
 
-def add_run_parser(subparsers, *, add_server_argument, handler):
+def add_run_parser(subparsers, *, add_server_argument, positive_float, handler):
     parser = subparsers.add_parser("run", help="manage local orchestration runs")
-    _add_run_store_arguments(parser, add_server_argument=add_server_argument)
+    _add_run_store_arguments(parser, add_server_argument=add_server_argument, positive_float=positive_float)
     parser.set_defaults(command_handler=handler)
 
 
@@ -94,7 +94,7 @@ def handle_run_command(args, *, print_error, noinput_exit, dataerr_exit, unavail
     return 64
 
 
-def _add_run_store_arguments(parser, *, add_server_argument):
+def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     parser.add_argument("--store", default=default_store_root(), help="local orchestration run store directory")
     run_subparsers = parser.add_subparsers(dest="run_command")
     run_subparsers.required = True
@@ -146,7 +146,11 @@ def _add_run_store_arguments(parser, *, add_server_argument):
         choices=("api", "provider", "timeout", "all"),
         help="failure category eligible for automatic retry; repeat for multiple categories",
     )
-    run_worker_parser.add_argument("--timeout-seconds", type=int, help="worker timeout in seconds")
+    run_worker_parser.add_argument(
+        "--timeout-seconds",
+        type=lambda value: _positive_timeout_seconds(value, positive_float),
+        help="worker timeout in seconds",
+    )
     run_worker_parser.add_argument(
         "--timeout-policy",
         choices=("timeout", "blocked", "failed", "aborted"),
@@ -365,3 +369,10 @@ def _format_worker_result_compact(worker):
 
 def _server_default():
     return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL
+
+
+def _positive_timeout_seconds(value, positive_float):
+    timeout = positive_float(value)
+    if timeout.is_integer():
+        return int(timeout)
+    return timeout

@@ -72,6 +72,7 @@ def main(argv=None):
     add_run_parser(
         subparsers,
         add_server_argument=_add_server_argument,
+        positive_float=_positive_float,
         handler=partial(
             handle_run_command,
             print_error=_print_error,

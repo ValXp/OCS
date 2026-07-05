@@ -266,7 +266,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
                     server,
                     session_ids=["ses_retry", "ses_retry_isolated"],
                     run_payloads=[
-                        ("sleep", 2, {"id": "msg_user_late", "status": "submitted"}),
+                        ("sleep", 0.2, {"id": "msg_user_late", "status": "submitted"}),
                         {"id": "msg_user_retry", "status": "submitted"},
                     ],
                 )
@@ -293,7 +293,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
                     "--prompt",
                     "Finish the worker task",
                     "--timeout-seconds",
-                    "1",
+                    "0.05",
                     "--retry-limit",
                     "1",
                     "--retryable",
@@ -324,7 +324,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(retry_worker["retry_limit"], 1)
         self.assertEqual(retry_worker["retryable_failures"], ["timeout"])
         self.assertEqual(retry_worker["last_failure_category"], "timeout")
-        self.assertEqual(retry_worker["last_failure_reason"], "worker timed out after 1s")
+        self.assertEqual(retry_worker["last_failure_reason"], "worker timed out after 0.05s")
         self.assertEqual(retry_worker["next_eligible_action"], "collect")
         self.assertEqual(retry_worker["result"]["message_ids"], {"user": "msg_user_retry", "assistant": "msg_assistant_1"})
         self.assertEqual(retry_worker["result"]["session_id"], "ses_retry_isolated")
@@ -332,7 +332,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(len(timeout_retry_sessions), 1)
         self.assertEqual(timeout_retry_sessions[0]["timed_out_session_id"], "ses_retry")
         self.assertEqual(timeout_retry_sessions[0]["retry_session_id"], "ses_retry_isolated")
-        self.assertEqual(timeout_retry_sessions[0]["reason"], "worker timed out after 1s")
+        self.assertEqual(timeout_retry_sessions[0]["reason"], "worker timed out after 0.05s")
         self.assertIsNotNone(timeout_retry_sessions[0]["created_at"])
 
     def test_start_times_out_stuck_worker_and_records_timeout_metadata(self):
@@ -340,7 +340,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
             with FakeOpenCodeServer() as server:
                 configure_retry_server(
                     server,
-                    run_payloads=[("sleep", 2, {"id": "msg_user_late", "status": "submitted"})],
+                    run_payloads=[("sleep", 0.2, {"id": "msg_user_late", "status": "submitted"})],
                 )
                 init = run_ocs(
                     "run",
@@ -365,7 +365,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
                     "--prompt",
                     "Finish the worker task",
                     "--timeout-seconds",
-                    "1",
+                    "0.05",
                 )
                 start = run_ocs("run", "--store", store, "start", "demo")
                 requests = list(server.requests)
@@ -375,7 +375,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(worker.returncode, 0, format_completed_process(worker))
         self.assertEqual(start.returncode, 124)
         self.assertEqual(start.stdout, "")
-        self.assertIn("timed out after 1s", start.stderr)
+        self.assertIn("timed out after 0.05s", start.stderr)
         self.assertEqual(status.returncode, 0, format_completed_process(status))
         self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/run"), [{"message": "Finish the worker task"}])
         self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/reply"), [])
@@ -383,12 +383,12 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["status"], "timeout")
         timeout_worker = payload["workers"]["worker"]
         self.assertEqual(timeout_worker["status"], "timeout")
-        self.assertEqual(timeout_worker["timeout_seconds"], 1)
+        self.assertEqual(timeout_worker["timeout_seconds"], 0.05)
         self.assertEqual(timeout_worker["timeout_policy"], "timeout")
         self.assertIsNotNone(timeout_worker["timeout_started_at"])
         self.assertIsNotNone(timeout_worker["timed_out_at"])
         self.assertEqual(timeout_worker["failure_category"], "timeout")
-        self.assertEqual(timeout_worker["failure_reason"], "worker timed out after 1s")
+        self.assertEqual(timeout_worker["failure_reason"], "worker timed out after 0.05s")
         self.assertEqual(timeout_worker["next_eligible_action"], "none")
         self.assertNotIn("result", timeout_worker)
 
@@ -404,7 +404,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
                     with FakeOpenCodeServer() as server:
                         configure_retry_server(
                             server,
-                            run_payloads=[("sleep", 2, {"id": "msg_user_late", "status": "submitted"})],
+                            run_payloads=[("sleep", 0.2, {"id": "msg_user_late", "status": "submitted"})],
                         )
                         init = run_ocs(
                             "run",
@@ -429,7 +429,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
                             "--prompt",
                             "Finish the worker task",
                             "--timeout-seconds",
-                            "1",
+                            "0.05",
                             "--timeout-policy",
                             policy,
                         )
@@ -446,7 +446,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
                 self.assertEqual(timeout_worker["status"], expected_status)
                 self.assertEqual(timeout_worker["timeout_policy"], policy)
                 self.assertEqual(timeout_worker["failure_category"], "timeout")
-                self.assertEqual(timeout_worker["failure_reason"], "worker timed out after 1s")
+                self.assertEqual(timeout_worker["failure_reason"], "worker timed out after 0.05s")
                 self.assertEqual(timeout_worker["next_eligible_action"], next_action)
                 self.assertEqual(timeout_worker["blockers"], blockers)
 
