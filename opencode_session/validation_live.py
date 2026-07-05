@@ -5,6 +5,7 @@ from pathlib import Path
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
 from opencode_session.capabilities import unsupported_reasons
+from opencode_session.cli_policy import EX_UNAVAILABLE, EX_UNSUPPORTED
 from opencode_session.event_watcher import SessionEventWatcher
 from opencode_session.events import is_terminal_event
 from opencode_session.formatting import compact_bool, compact_value
@@ -21,8 +22,6 @@ LIVE_VALIDATE_ENV = "OCS_LIVE_VALIDATE"
 LIVE_SESSION_PREFIX = "ocs-live-"
 LIVE_VALIDATE_PROMPT = "Reply exactly PONG."
 LIVE_EVENT_OBSERVATION_TIMEOUT = 1.0
-EX_UNAVAILABLE = 69
-EX_UNSUPPORTED = 70
 
 
 class LiveValidationFailure(Exception):

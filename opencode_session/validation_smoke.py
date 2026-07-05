@@ -9,6 +9,7 @@ from opencode_session.blocking_execution import (
     skipped_blocking_execution_result,
 )
 from opencode_session.capabilities import unsupported_reasons
+from opencode_session.cli_policy import EX_UNAVAILABLE, EX_UNSUPPORTED
 from opencode_session.event_watcher import (
     BackgroundSessionEventWatcher,
     EventWatchEmpty,
@@ -24,8 +25,6 @@ from opencode_session.validation_harness import DisposableValidationHarness
 
 SMOKE_SESSION_PREFIX = "ocs-smoke-"
 SMOKE_EVENT_TIMEOUT_SECONDS = 10.0
-EX_UNAVAILABLE = 69
-EX_UNSUPPORTED = 70
 
 
 class SmokeFailure(Exception):

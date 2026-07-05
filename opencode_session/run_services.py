@@ -1,10 +1,10 @@
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
+from opencode_session.cli_policy import server_default
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
@@ -12,7 +12,6 @@ from opencode_session.multi_worker_orchestration import (
     workers_in_dependency_order,
 )
 from opencode_session.prompt_admission import admit_prompt
-from opencode_session.run_record import DEFAULT_SERVER_URL
 from opencode_session.run_store import RunStoreError
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 from opencode_session.worker_state import mark_worker_aborted
@@ -171,7 +170,7 @@ class RunCommandService:
             self.store.create_run(
                 request.name,
                 directory=request.directory or ".",
-                server_url=request.server_url or request.default_server_url or _server_default(),
+                server_url=request.server_url or request.default_server_url or server_default(),
             )
         self.store.upsert_worker(
             request.name,
@@ -212,7 +211,3 @@ def _run_worker_with_session(run, worker_id):
 
 def _utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _server_default():
-    return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL

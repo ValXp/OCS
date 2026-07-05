@@ -1,8 +1,8 @@
 import json
-import os
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import format_blocking_execution_compact as _format_run_compact
+from opencode_session.cli_policy import server_default
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.prompt_admission import (
     PromptAdmissionFailure,
@@ -13,10 +13,6 @@ from opencode_session.run_formatting import format_run_compact, format_worker_re
 from opencode_session.run_services import RunCommandService, RunStartRequest, RunWorkerSessionNotFound
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root
 from opencode_session.session_lifecycle import format_abort_compact
-
-
-DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
-
 
 def add_run_parser(subparsers, *, add_server_argument, positive_float, handler):
     parser = subparsers.add_parser("run", help="manage local orchestration runs")
@@ -182,7 +178,7 @@ def _start_orchestration_run(args, service, *, print_error):
             model=args.model,
             execution_policy=args.execution_policy,
             cleanup=args.cleanup,
-            default_server_url=_server_default(),
+            default_server_url=server_default(),
         )
     )
     if outcome.error is not None:
@@ -266,10 +262,6 @@ def _abort_run_worker(args, service, *, print_error, unavailable_exit):
     else:
         print(f"run={_compact_value(run['name'])} worker={_compact_value(worker['id'])} {format_abort_compact(abort)}")
     return 0
-
-
-def _server_default():
-    return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL
 
 
 def _positive_timeout_seconds(value, positive_float):

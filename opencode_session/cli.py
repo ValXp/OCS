@@ -1,8 +1,18 @@
 import argparse
-import os
 import sys
 from functools import partial
 
+from opencode_session.cli_policy import (
+    CLI_NAME,
+    EX_ABORTED,
+    EX_DATAERR,
+    EX_NOINPUT,
+    EX_TIMEOUT,
+    EX_UNAVAILABLE,
+    EX_UNSUPPORTED,
+    EX_USAGE,
+    server_default,
+)
 from opencode_session.commands.blockers import add_blocker_parsers, handle_blocker_command
 from opencode_session.commands.capabilities import add_capabilities_parser, handle_capabilities
 from opencode_session.commands.run_blocking import add_run_blocking_parser, handle_run_blocking_command
@@ -11,17 +21,6 @@ from opencode_session.commands.sessions import add_session_parsers, handle_sessi
 from opencode_session.commands.steer import add_steer_parser, handle_steer_command
 from opencode_session.commands.validation import add_validation_parsers, handle_validation_command
 from opencode_session.commands.watch import add_watch_parser, handle_watch_command
-
-
-DEFAULT_SERVER_URL = "http://127.0.0.1:4096"
-CLI_NAME = "ocs"
-EX_UNAVAILABLE = 69
-EX_UNSUPPORTED = 70
-EX_DATAERR = 65
-EX_NOINPUT = 66
-EX_TIMEOUT = 124
-EX_ABORTED = 130
-
 
 def main(argv=None):
     if argv is None:
@@ -135,7 +134,7 @@ def main(argv=None):
     command_handler = getattr(args, "command_handler", None)
     if command_handler is None:
         parser.print_help(sys.stderr)
-        return 64
+        return EX_USAGE
     return command_handler(args)
 
 
@@ -146,7 +145,7 @@ def _print_error(message):
 def _add_server_argument(parser):
     parser.add_argument(
         "--server",
-        default=_server_default(),
+        default=server_default(),
         help="OpenCode server URL",
     )
 
@@ -155,10 +154,6 @@ def _add_output_arguments(parser):
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="print JSON data")
     output.add_argument("--raw", action="store_true", help="print raw API response body")
-
-
-def _server_default():
-    return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL
 
 
 def _positive_float(value):

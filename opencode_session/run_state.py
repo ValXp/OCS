@@ -1,16 +1,15 @@
-import os
 from dataclasses import dataclass
 from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
+from opencode_session.cli_policy import server_default
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartOutcome,
     DependencyOrderedSerialRunStartRequest,
 )
-from opencode_session.run_record import DEFAULT_SERVER_URL
 from opencode_session.run_store import RunStoreError
 from opencode_session.worker_execution import WorkerExecutionTimeout
 
@@ -79,7 +78,7 @@ class SingleWorkerRunStateService:
             self.store.create_run(
                 request.name,
                 directory=request.directory or ".",
-                server_url=request.server_url or request.default_server_url or _server_default(),
+                server_url=request.server_url or request.default_server_url or server_default(),
             )
         self.store.upsert_worker(
             request.name,
@@ -91,7 +90,3 @@ class SingleWorkerRunStateService:
             agent=request.agent,
             model=request.model,
         )
-
-
-def _server_default():
-    return os.environ.get("OPENCODE_SERVER_URL") or os.environ.get("OPENCODE_SERVER") or DEFAULT_SERVER_URL
