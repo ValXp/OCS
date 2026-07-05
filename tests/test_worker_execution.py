@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 
+from opencode_session.api_client import OpenCodeApiError
 from opencode_session.worker_execution import WorkerExecutionTimeout, execute_worker_attempts
 from opencode_session.worker_state import ensure_worker
 
@@ -33,6 +34,87 @@ class FakeClient:
 
 
 class WorkerExecutionTest(unittest.TestCase):
+    def test_execute_worker_attempts_rejects_create_response_without_session_id_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            client = FakeClient([None])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                self.fail(f"worker executed with malformed session id {session_id!r}")
+
+            with self.assertRaisesRegex(
+                OpenCodeApiError,
+                "session creation returned malformed response: missing session id",
+            ):
+                execute_worker_attempts(
+                    client,
+                    run,
+                    worker,
+                    "Finish the worker task",
+                    CAPABILITIES,
+                    executor=execute_prompt,
+                    now=lambda: "2026-07-03T00:00:00Z",
+                    agent="build",
+                    model="openai/gpt-5.5",
+                )
+
+        self.assertEqual(client.requests, [("create", directory, "build", "openai/gpt-5.5")])
+        self.assertIsNone(worker["session_id"])
+        self.assertIsNone(worker["agent"])
+        self.assertIsNone(worker["model"])
+        self.assertNotIn("result", worker)
+
+    def test_execute_worker_attempts_rejects_timeout_retry_create_response_without_session_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            worker["timeout_seconds"] = 0.05
+            worker["retry_limit"] = 1
+            worker["retryable_failures"] = ["timeout"]
+            client = FakeClient(["ses_initial", None])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                if session_id is None:
+                    self.fail("worker executed timeout retry with malformed session id")
+                raise WorkerExecutionTimeout()
+
+            outcome = execute_worker_attempts(
+                client,
+                run,
+                worker,
+                "Finish the worker task",
+                CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+        self.assertEqual(outcome.kind, "failed")
+        self.assertEqual(outcome.failure_category, "api")
+        self.assertEqual(
+            outcome.error,
+            "api failure: timeout retry session creation failed: "
+            "timeout retry session creation returned malformed response: missing session id",
+        )
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("execute", "ses_initial", "Finish the worker task"),
+                ("create", directory, None, None),
+            ],
+        )
+        self.assertEqual(worker["session_id"], "ses_initial")
+        self.assertEqual(worker["status"], "failed")
+        self.assertEqual(
+            worker["failure_reason"],
+            "timeout retry session creation failed: "
+            "timeout retry session creation returned malformed response: missing session id",
+        )
+        self.assertNotIn("timeout_retry_sessions", worker)
+        self.assertNotIn("result", worker)
+
     def test_execute_worker_attempts_retries_timeout_in_isolated_session_and_applies_result(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}

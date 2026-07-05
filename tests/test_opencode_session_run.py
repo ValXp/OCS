@@ -20,6 +20,7 @@ class RunOpenCodeServer:
         doc_paths=None,
         doc_body=None,
         doc_status=200,
+        create_payload=None,
         run_payload=None,
         reply_payload=None,
         message_payload=None,
@@ -30,6 +31,7 @@ class RunOpenCodeServer:
         }
         self.doc_body = doc_body
         self.doc_status = doc_status
+        self.create_payload = create_payload
         self.run_payload = run_payload or {"id": "msg_user_1", "status": "submitted"}
         self.reply_payload = reply_payload or {
             "id": "msg_assistant_1",
@@ -82,7 +84,10 @@ class RunOpenCodeServer:
                 payload = json.loads(body or "{}")
                 parent.requests.append(("POST", self.path, payload))
                 if self.path == "/api/session":
-                    self._write_json({"id": "ses_new", "directory": _payload_directory(payload)})
+                    if parent.create_payload is not None:
+                        self._write_json(parent.create_payload)
+                    else:
+                        self._write_json({"id": "ses_new", "directory": _payload_directory(payload)})
                     return
                 if self.path in ("/session/ses_existing/run", "/session/ses_new/run"):
                     self._write_json(parent.run_payload)
@@ -255,6 +260,29 @@ class RunCliTest(unittest.TestCase):
                 ("POST", "/session/ses_new/run", {"message": "Run in a disposable session"}),
                 ("POST", "/session/ses_new/reply", {}),
                 ("DELETE", "/api/session/ses_new", None),
+            ],
+        )
+
+    def test_run_without_session_rejects_create_response_without_session_id_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory, RunOpenCodeServer(create_payload={"directory": directory}) as server:
+            result = self.run_cli(
+                "run_blocking",
+                "--directory",
+                directory,
+                "--server",
+                server.url,
+                "Run in a disposable session",
+            )
+
+        self.assertEqual(result.returncode, 69)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("api failure", result.stderr)
+        self.assertIn("session creation returned malformed response: missing session id", result.stderr)
+        self.assertEqual(
+            server.requests,
+            [
+                ("GET", "/doc", None),
+                ("POST", "/api/session", {"location": {"directory": directory}}),
             ],
         )
 

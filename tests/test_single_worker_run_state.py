@@ -191,6 +191,49 @@ class SingleWorkerRunStateServiceTest(unittest.TestCase):
         self.assertEqual(worker["next_eligible_action"], "collect")
         self.assertEqual(worker["result"]["text"], "Worker finished.")
 
+    def test_start_rejects_create_response_without_session_id_before_execution(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            client = FakeClient(session_ids=[None])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                self.fail(f"worker executed with malformed session id {session_id!r}")
+
+            service = SingleWorkerRunStateService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(
+                SingleWorkerRunStartRequest(
+                    name="demo",
+                    worker_id="worker",
+                    role="worker",
+                    prompt="Finish the worker task",
+                    directory=directory,
+                    server_url="http://opencode.example",
+                )
+            )
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(
+            outcome.error,
+            "api failure: session creation returned malformed response: missing session id",
+        )
+        self.assertEqual(client.requests, [("create", directory, None, None)])
+        self.assertEqual(run["status"], "failed")
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker["status"], "failed")
+        self.assertIsNone(worker["session_id"])
+        self.assertEqual(worker["failure_category"], "api")
+        self.assertEqual(worker["failure_reason"], "session creation returned malformed response: missing session id")
+        self.assertEqual(worker["next_eligible_action"], "none")
+        self.assertNotIn("result", worker)
+
     def test_start_retries_retryable_provider_failure_and_persists_success_metadata(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)

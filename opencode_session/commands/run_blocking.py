@@ -11,7 +11,7 @@ from opencode_session.blocking_execution import (
     unsupported_blocking_execution_message,
 )
 from opencode_session.capabilities import capabilities_from_openapi_doc
-from opencode_session.records import session_value
+from opencode_session.session_ids import require_session_id
 from opencode_session.session_lifecycle import is_session_not_found_error
 
 
@@ -60,7 +60,7 @@ def handle_run_blocking_command(
                 agent=args.agent,
                 model=args.model,
             )
-            session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
+            session_id = require_session_id(create_response)
             created_session_id = session_id
         result = execute_blocking_prompt(client, session_id, prompt, capabilities)
     except BlockingProviderFailure as error:

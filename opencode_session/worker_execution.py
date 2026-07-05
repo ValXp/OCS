@@ -3,7 +3,7 @@ from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
-from opencode_session.records import session_value
+from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_state import (
     apply_worker_result,
@@ -54,7 +54,7 @@ def ensure_worker_session(
     missing_session = not worker_session_id if treat_falsey_session_as_missing else worker_session_id is None
     if missing_session:
         create_response = client.create_session_response(run["directory"], agent=agent, model=model)
-        worker_session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
+        worker_session_id = require_session_id(create_response)
         created_session_id = worker_session_id
     worker["session_id"] = worker_session_id
     if agent is not None:
@@ -69,9 +69,7 @@ def create_isolated_timeout_retry_session(client, run, worker, reason, created_a
     retry_agent = agent if agent is not None else worker.get("agent")
     retry_model = model if model is not None else worker.get("model")
     create_response = client.create_session_response(run["directory"], agent=retry_agent, model=retry_model)
-    retry_session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
-    if not retry_session_id:
-        raise OpenCodeApiError("timeout retry session creation did not return a session id")
+    retry_session_id = require_session_id(create_response, "timeout retry session creation")
     if retry_session_id == timed_out_session_id:
         raise OpenCodeApiError(f"timeout retry session creation returned original in-flight session '{timed_out_session_id}'")
     worker["session_id"] = retry_session_id
