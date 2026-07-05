@@ -4,7 +4,6 @@ from typing import Optional, Sequence
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.cli_policy import server_default
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
@@ -12,6 +11,7 @@ from opencode_session.multi_worker_orchestration import (
     workers_in_dependency_order,
 )
 from opencode_session.prompt_admission import admit_prompt
+from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_store import RunStoreError
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 from opencode_session.worker_state import mark_worker_aborted
@@ -80,7 +80,7 @@ class RunCommandService:
 
     def start_run(self, request):
         if request.prompt is not None:
-            self._ensure_prompt_worker(request)
+            ensure_prompt_worker(self.store, request)
         return DependencyOrderedSerialRunOrchestrationService(
             self.store,
             client_factory=self.client_factory,
@@ -160,29 +160,6 @@ class RunCommandService:
             run["updated_at"] = self.now()
 
         return self.store.update_run(name, update)
-
-    def _ensure_prompt_worker(self, request):
-        try:
-            self.store.load_run(request.name)
-        except RunStoreError as error:
-            if error.kind != "missing":
-                raise
-            self.store.create_run(
-                request.name,
-                directory=request.directory or ".",
-                server_url=request.server_url or request.default_server_url or server_default(),
-            )
-        self.store.upsert_worker(
-            request.name,
-            request.worker_id,
-            role=request.role,
-            prompt=request.prompt,
-            status="queued",
-            session_id=request.session_id,
-            agent=request.agent,
-            model=request.model,
-        )
-
 
 class RunWorkerSessionNotFound(Exception):
     def __init__(self, session_id):

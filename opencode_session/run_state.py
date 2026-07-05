@@ -4,14 +4,12 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.cli_policy import server_default
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartOutcome,
     DependencyOrderedSerialRunStartRequest,
 )
-from opencode_session.run_store import RunStoreError
-from opencode_session.worker_execution import WorkerExecutionTimeout
+from opencode_session.run_prompt_worker import ensure_prompt_worker
 
 
 @dataclass
@@ -54,7 +52,7 @@ class SingleWorkerRunStateService:
         )
 
     def start(self, request):
-        self._ensure_prompted_worker(request)
+        ensure_prompt_worker(self.store, request)
         return self.orchestration.start(
             DependencyOrderedSerialRunStartRequest(
                 name=request.name,
@@ -67,26 +65,4 @@ class SingleWorkerRunStateService:
                 model=request.model,
                 cleanup=request.cleanup,
             )
-        )
-
-    def _ensure_prompted_worker(self, request):
-        try:
-            self.store.load_run(request.name)
-        except RunStoreError as error:
-            if error.kind != "missing":
-                raise
-            self.store.create_run(
-                request.name,
-                directory=request.directory or ".",
-                server_url=request.server_url or request.default_server_url or server_default(),
-            )
-        self.store.upsert_worker(
-            request.name,
-            request.worker_id,
-            role=request.role,
-            prompt=request.prompt,
-            status="queued",
-            session_id=request.session_id,
-            agent=request.agent,
-            model=request.model,
         )
