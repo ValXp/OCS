@@ -416,6 +416,54 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency:build"])
         self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
+    def test_start_blocks_only_failed_dependency_when_another_dependency_is_done(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "docs",
+                role="write",
+                prompt="Draft the release notes",
+                status="done",
+                output_refs=["assistant:msg_docs_assistant"],
+            )
+            store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Run the implementation",
+                status="failed",
+            )
+            store.upsert_worker(
+                "demo",
+                "review",
+                role="review",
+                prompt="Review the implementation",
+                dependencies=["docs", "build"],
+            )
+            client = FakeClient([])
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=lambda *args, **kwargs: self.fail("blocked worker should not execute"),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(client.requests, [])
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["output_refs"], ["docs:msg_docs_assistant"])
+        self.assertEqual(run["workers"]["docs"]["status"], "done")
+        self.assertEqual(run["workers"]["build"]["status"], "failed")
+        self.assertEqual(run["workers"]["review"]["status"], "blocked")
+        self.assertEqual(run["workers"]["review"]["blockers"], ["dependency:build"])
+        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+
     def test_start_blocks_workers_in_dependency_cycle(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:

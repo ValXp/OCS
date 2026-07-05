@@ -11,6 +11,7 @@ from opencode_session.blocking_execution import (
 )
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.run_store import RunStoreError
+from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_execution import (
     cleanup_created_worker_sessions,
     ensure_worker_session,
@@ -30,8 +31,11 @@ from opencode_session.worker_state import (
     mark_worker_failed as _mark_worker_failed,
     refresh_run_summary as _refresh_worker_run_summary,
     worker_prompt as _worker_prompt,
-    workers_in_dependency_order,
+    workers_in_dependency_order as _workers_in_dependency_order,
 )
+
+
+workers_in_dependency_order = _workers_in_dependency_order
 
 
 @dataclass
@@ -223,16 +227,8 @@ def save_orchestration_run(store, run, *, now=None):
 
 
 def _ready_prompted_workers(workers):
-    ready = []
-    for worker_id in sorted(workers):
-        worker = workers[worker_id]
-        if not isinstance(worker, dict) or not _worker_prompt(worker):
-            continue
-        if worker.get("status") in {"done", "failed", "aborted", "timeout"}:
-            continue
-        if _dependencies_done(worker, workers):
-            ready.append(worker)
-    return ready
+    analysis = analyze_worker_dependencies(workers)
+    return [workers[worker_id] for worker_id in analysis.ready_worker_ids]
 
 
 def _pending_prompted_workers(workers):
@@ -247,128 +243,21 @@ def _pending_prompted_workers(workers):
 
 def _mark_invalid_dependency_graph_workers(run):
     workers = run.get("workers", {})
-    invalid_worker_ids = set()
-
-    for cycle in _dependency_cycles(workers):
-        blocker = f"dependency-cycle:{'->'.join(cycle)}"
-        for worker_id in set(cycle[:-1]):
-            worker = workers.get(worker_id)
-            if _blockable_prompted_worker(worker):
-                _mark_dependency_blocked(worker, [blocker])
-                invalid_worker_ids.add(worker_id)
-
-    for worker_id in sorted(workers):
-        if worker_id in invalid_worker_ids:
-            continue
+    analysis = analyze_worker_dependencies(workers)
+    for worker_id in sorted(analysis.invalid_graph_blockers_by_worker_id):
         worker = workers.get(worker_id)
-        blockers = _non_runnable_dependency_blockers(worker, workers)
-        if blockers and _blockable_prompted_worker(worker):
-            _mark_dependency_blocked(worker, blockers)
-            invalid_worker_ids.add(worker_id)
-
-    while True:
-        newly_blocked = set()
-        for worker_id in sorted(workers):
-            if worker_id in invalid_worker_ids:
-                continue
-            worker = workers.get(worker_id)
-            if not isinstance(worker, dict):
-                continue
-            blockers = [
-                f"dependency:{dependency}"
-                for dependency in worker.get("dependencies", [])
-                if dependency in invalid_worker_ids
-            ]
-            if blockers and _blockable_prompted_worker(worker):
-                _mark_dependency_blocked(worker, blockers)
-                newly_blocked.add(worker_id)
-        if not newly_blocked:
-            break
-        invalid_worker_ids.update(newly_blocked)
-
-    return bool(invalid_worker_ids)
-
-
-def _non_runnable_dependency_blockers(worker, workers):
-    if not isinstance(worker, dict):
-        return []
-    return [
-        f"dependency-not-runnable:{dependency}"
-        for dependency in worker.get("dependencies", [])
-        if _non_runnable_dependency(workers.get(dependency))
-    ]
-
-
-def _non_runnable_dependency(worker):
-    if not isinstance(worker, dict):
-        return False
-    if worker.get("status") in {"done", "failed", "aborted", "timeout", "blocked"}:
-        return False
-    return not _worker_prompt(worker)
+        if isinstance(worker, dict):
+            _mark_dependency_blocked(worker, analysis.invalid_graph_blockers_by_worker_id[worker_id])
+    return bool(analysis.invalid_graph_blockers_by_worker_id)
 
 
 def _mark_dependency_blocked_workers(run):
     workers = run.get("workers", {})
-    for worker in workers.values():
-        if not isinstance(worker, dict) or not _worker_prompt(worker):
-            continue
-        if worker.get("status") in {"done", "failed", "aborted", "timeout"}:
-            continue
-        if _dependencies_failed(worker, workers):
-            _mark_dependency_blocked(worker, [f"dependency:{dependency}" for dependency in worker.get("dependencies", [])])
-
-
-def _dependency_cycles(workers):
-    cycles = []
-    visited = set()
-    visiting = []
-
-    def visit(worker_id):
-        if worker_id in visited:
-            return
-        if worker_id in visiting:
-            cycles.append(visiting[visiting.index(worker_id) :] + [worker_id])
-            return
-
+    analysis = analyze_worker_dependencies(workers)
+    for worker_id in sorted(analysis.dependency_blockers_by_worker_id):
         worker = workers.get(worker_id)
-        if not isinstance(worker, dict):
-            return
-
-        visiting.append(worker_id)
-        for dependency in worker.get("dependencies", []):
-            visit(dependency)
-        visiting.pop()
-        visited.add(worker_id)
-
-    for worker_id in sorted(workers):
-        visit(worker_id)
-    return cycles
-
-
-def _blockable_prompted_worker(worker):
-    return (
-        isinstance(worker, dict)
-        and _worker_prompt(worker)
-        and worker.get("status") not in {"done", "failed", "aborted", "timeout"}
-    )
-
-
-def _dependencies_done(worker, workers):
-    for dependency in worker.get("dependencies", []):
-        dependency_worker = workers.get(dependency)
-        if not isinstance(dependency_worker, dict) or dependency_worker.get("status") != "done":
-            return False
-    return True
-
-
-def _dependencies_failed(worker, workers):
-    for dependency in worker.get("dependencies", []):
-        dependency_worker = workers.get(dependency)
-        if not isinstance(dependency_worker, dict):
-            return True
-        if dependency_worker.get("status") in {"failed", "aborted", "timeout", "blocked"}:
-            return True
-    return False
+        if isinstance(worker, dict):
+            _mark_dependency_blocked(worker, analysis.dependency_blockers_by_worker_id[worker_id])
 
 
 def _created_session_ids(created_session_ids_by_worker, worker):

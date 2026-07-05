@@ -1,6 +1,7 @@
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.records import session_value
 from opencode_session.status import short_status
+from opencode_session.worker_dependencies import analyze_worker_dependencies
 
 
 EX_UNAVAILABLE = 69
@@ -257,25 +258,8 @@ def worker_output_refs_in_dependency_order(workers):
 
 
 def workers_in_dependency_order(workers):
-    ordered = []
-    visited = set()
-    visiting = set()
-
-    def visit(worker_id):
-        if worker_id in visited or worker_id in visiting:
-            return
-        visiting.add(worker_id)
-        worker = workers.get(worker_id)
-        if isinstance(worker, dict):
-            for dependency in worker.get("dependencies", []):
-                visit(dependency)
-            ordered.append(worker)
-        visiting.remove(worker_id)
-        visited.add(worker_id)
-
-    for worker_id in sorted(workers):
-        visit(worker_id)
-    return ordered
+    analysis = analyze_worker_dependencies(workers)
+    return [workers[worker_id] for worker_id in analysis.worker_ids_in_dependency_order]
 
 
 def exit_code_for_run(run):
