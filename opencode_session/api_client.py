@@ -25,11 +25,22 @@ class OpenCodeApiResponse:
         self.body = body
 
 
+DEFAULT_ROUTE_PLAN = {
+    "session_collection": "/api/session",
+    "session_item": "/api/session/{sessionID}",
+}
+
+
 class OpenCodeApiClient:
     def __init__(self, base_url, *, timeout=3):
         _validate_base_url(base_url)
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
+        self.route_plan = dict(DEFAULT_ROUTE_PLAN)
+
+    def configure_route_plan(self, route_plan):
+        self.route_plan = {**DEFAULT_ROUTE_PLAN, **(route_plan or {})}
+        return self
 
     def get_health(self, *, deadline=None):
         errors = []
@@ -171,31 +182,25 @@ class OpenCodeApiClient:
             payload["title"] = title
         if metadata is not None:
             payload["metadata"] = metadata
-        return _with_session_payload(self.post_response("api/session", payload))
+        return _with_session_payload(self.post_response(self._route_path("session_collection"), payload))
 
     def list_sessions(self):
         return self.list_sessions_response().data
 
     def list_sessions_response(self):
-        return _with_session_payload(self.get_response("api/session"))
+        return _with_session_payload(self.get_response(self._route_path("session_collection")))
 
     def get_session(self, session_id):
         return self.get_session_response(session_id).data
 
     def get_session_response(self, session_id):
-        return _with_session_payload(self.get_response(f"api/session/{quote(session_id, safe='')}"))
+        return _with_session_payload(self.get_response(self._route_path("session_item", session_id=session_id)))
 
     def delete_session(self, session_id):
         return self.delete_session_response(session_id).data
 
     def delete_session_response(self, session_id):
-        quoted_session_id = quote(session_id, safe="")
-        try:
-            return self.delete_response(f"api/session/{quoted_session_id}")
-        except OpenCodeApiError as error:
-            if error.method == "DELETE" and error.path == f"/api/session/{quoted_session_id}" and "invalid JSON" in str(error):
-                return self.delete_response(f"session/{quoted_session_id}")
-            raise
+        return self.delete_response(self._route_path("session_item", session_id=session_id))
 
     def abort_session_response(self, session_id):
         return self.post_response(f"session/{quote(session_id, safe='')}/abort", {})
@@ -266,6 +271,12 @@ class OpenCodeApiClient:
         if deadline is None:
             return self.timeout
         return deadline.require_time()
+
+    def _route_path(self, name, *, session_id=None):
+        path = self.route_plan.get(name) or DEFAULT_ROUTE_PLAN[name]
+        if session_id is not None:
+            path = _session_prompt_path(path, session_id)
+        return path.lstrip("/")
 
 
 def _session_prompt_path(prompt_path, session_id):

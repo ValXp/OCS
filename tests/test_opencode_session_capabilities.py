@@ -1,6 +1,9 @@
 import argparse
 import unittest
 
+from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.capabilities import detect_capabilities
+
 try:
     from tests.mocked_cli_harness import FakeOpenCodeServer, load_json, run_ocs
 except ModuleNotFoundError:
@@ -122,6 +125,73 @@ class CapabilityProbeCliTest(unittest.TestCase):
                 },
             },
         )
+        self.assertEqual(
+            payload["route_plan"],
+            {
+                "session_collection": "/api/session",
+                "session_item": "/api/session/{sessionID}",
+                "v2_prompt": "/api/session/{sessionID}/prompt",
+                "v2_wait": "/api/session/{sessionID}/wait",
+                "events": "/api/event",
+                "blocking_message": "/session/{sessionID}/message",
+                "legacy_run": "/session/{sessionID}/run",
+                "legacy_reply": "/session/{sessionID}/reply",
+            },
+        )
+
+    def test_detected_session_route_plan_drives_client_session_routes(self):
+        doc = {
+            "openapi": "3.1.0",
+            "paths": {
+                "/session": {"get": {}, "post": {}},
+                "/session/{sessionID}": {"get": {}, "delete": {}},
+                "/session/{sessionID}/run": {"post": {}},
+                "/session/{sessionID}/reply": {"post": {}},
+            },
+        }
+
+        with capability_server(doc=doc) as server:
+            server.json("POST", "/session", {"id": "ses_1", "directory": "/tmp/project"})
+            server.json("GET", "/session", {"sessions": [{"id": "ses_1", "directory": "/tmp/project"}]})
+            server.json("GET", "/session/ses_1", {"id": "ses_1", "directory": "/tmp/project"})
+            server.json("DELETE", "/session/ses_1", {"id": "ses_1", "deleted": True})
+            client = OpenCodeApiClient(server.url)
+
+            capabilities = detect_capabilities(client)
+            created = client.create_session_response("/tmp/project")
+            listed = client.list_sessions_response()
+            inspected = client.get_session_response("ses_1")
+            deleted = client.delete_session_response("ses_1")
+            requests = list(server.requests)
+
+        self.assertEqual(capabilities["route_plan"]["session_collection"], "/session")
+        self.assertEqual(created.data["id"], "ses_1")
+        self.assertEqual(listed.data["sessions"][0]["id"], "ses_1")
+        self.assertEqual(inspected.data["id"], "ses_1")
+        self.assertEqual(deleted.data["deleted"], True)
+        self.assertEqual(
+            [(method, path) for method, path, _payload in requests],
+            [
+                ("GET", "/global/health"),
+                ("GET", "/doc"),
+                ("POST", "/session"),
+                ("GET", "/session"),
+                ("GET", "/session/ses_1"),
+                ("DELETE", "/session/ses_1"),
+            ],
+        )
+
+    def test_delete_session_does_not_fallback_on_invalid_json(self):
+        with FakeOpenCodeServer() as server:
+            server.route("DELETE", "/api/session/ses_1", lambda handler, _request: handler._write_text("deleted"))
+            server.json("DELETE", "/session/ses_1", {"id": "ses_1", "deleted": True})
+            client = OpenCodeApiClient(server.url)
+
+            with self.assertRaisesRegex(OpenCodeApiError, "returned invalid JSON"):
+                client.delete_session_response("ses_1")
+            requests = list(server.requests)
+
+        self.assertEqual([(method, path) for method, path, _payload in requests], [("DELETE", "/api/session/ses_1")])
 
     def test_unsupported_server_has_stable_exit_and_clear_error(self):
         doc = {"openapi": "3.1.0", "paths": {"/unrelated": {"get": {}}}}
