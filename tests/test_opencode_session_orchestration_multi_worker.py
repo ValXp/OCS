@@ -297,6 +297,76 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(run["workers"]["review"]["blockers"], ["manual:blocker"])
         self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
+    def test_start_requeued_worker_finishes_without_stale_status_metadata(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Run the implementation",
+                status="done",
+                output_refs=["assistant:msg_build_assistant"],
+            )
+            store.upsert_worker(
+                "demo",
+                "review",
+                role="review",
+                prompt="Review the implementation",
+                session_id="ses_review",
+                dependencies=["build"],
+                status="queued",
+                blockers=["dependency:build"],
+            )
+
+            def seed_stale_metadata(run):
+                worker = run["workers"]["review"]
+                worker["error"] = "previous failure"
+                worker["failure_category"] = "api"
+                worker["failure_reason"] = "previous failure"
+                worker["failure_retryable"] = False
+                worker["last_failure_category"] = "api"
+                worker["last_failure_reason"] = "previous failure"
+
+            store.update_run("demo", seed_stale_metadata)
+            client = FakeClient([])
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append((session_id, prompt))
+                return {
+                    "session_id": session_id,
+                    "message_ids": {"user": "msg_review_user", "assistant": "msg_review_assistant"},
+                    "status": "done",
+                }
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(executions, [("ses_review", "Review the implementation")])
+        self.assertEqual(run["status"], "done")
+        self.assertEqual(run["output_refs"], ["build:msg_build_assistant", "review:msg_review_assistant"])
+        review = run["workers"]["review"]
+        self.assertEqual(review["status"], "done")
+        self.assertEqual(review["blockers"], [])
+        self.assertNotIn("error", review)
+        self.assertIsNone(review["failure_category"])
+        self.assertIsNone(review["failure_reason"])
+        self.assertNotIn("failure_retryable", review)
+        self.assertEqual(review["last_failure_category"], "api")
+        self.assertEqual(review["last_failure_reason"], "previous failure")
+        self.assertEqual(review["next_eligible_action"], "collect")
+
 
 if __name__ == "__main__":
     unittest.main()

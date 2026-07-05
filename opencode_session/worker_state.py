@@ -98,10 +98,18 @@ def ensure_worker(run, worker_id, *, role):
 
 def mark_worker_active(worker, *, now=None):
     worker["status"] = "active"
-    worker.pop("failure_retryable", None)
+    _clear_current_status_metadata(worker)
     worker["next_eligible_action"] = "wait"
     if now is not None:
         worker["timeout_started_at"] = now() if worker.get("timeout_seconds") else None
+
+
+def _clear_current_status_metadata(worker):
+    worker["blockers"] = []
+    worker.pop("error", None)
+    worker["failure_category"] = None
+    worker["failure_reason"] = None
+    worker.pop("failure_retryable", None)
 
 
 def mark_worker_failed(worker, category, reason, *, retryable=True):
@@ -136,8 +144,7 @@ def schedule_worker_retry(worker, category, reason):
         return False
     worker["retry_count"] = int(worker.get("retry_count") or 0) + 1
     worker["status"] = "active"
-    worker["failure_category"] = None
-    worker["failure_reason"] = None
+    _clear_current_status_metadata(worker)
     worker["last_failure_category"] = category
     worker["last_failure_reason"] = reason
     worker["next_eligible_action"] = "retry"
@@ -190,8 +197,11 @@ def format_timeout(timeout):
 def apply_worker_result(worker, result):
     worker["result"] = result
     worker["status"] = result["status"]
-    worker["failure_category"] = None
-    worker["failure_reason"] = None
+    if result["status"] == "done":
+        _clear_current_status_metadata(worker)
+    else:
+        worker["failure_category"] = None
+        worker["failure_reason"] = None
     worker["next_eligible_action"] = "collect" if result["status"] == "done" else "none"
     assistant_message_id = result["message_ids"].get("assistant")
     worker["output_refs"] = [f"assistant:{assistant_message_id}"] if result["status"] == "done" and assistant_message_id else []

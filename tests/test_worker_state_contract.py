@@ -2,12 +2,14 @@ import unittest
 
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
+    apply_worker_result,
     exit_code_for_run,
     mark_dependency_blocked,
     mark_worker_aborted,
     mark_worker_active,
     normalize_worker,
     refresh_run_summary,
+    schedule_worker_retry,
 )
 
 
@@ -42,6 +44,32 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["next_eligible_action"], "wait")
         self.assertEqual(worker["timeout_started_at"], "2026-07-04T00:00:00Z")
 
+    def test_mark_worker_active_clears_stale_current_status_metadata(self):
+        worker = normalize_worker(
+            {
+                "status": "blocked",
+                "blockers": ["dependency:build"],
+                "error": "previous failure",
+                "failure_category": "api",
+                "failure_reason": "previous failure",
+                "failure_retryable": False,
+                "last_failure_category": "api",
+                "last_failure_reason": "previous failure",
+            },
+            "review",
+        )
+
+        mark_worker_active(worker)
+
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["blockers"], [])
+        self.assertNotIn("error", worker)
+        self.assertIsNone(worker["failure_category"])
+        self.assertIsNone(worker["failure_reason"])
+        self.assertNotIn("failure_retryable", worker)
+        self.assertEqual(worker["last_failure_category"], "api")
+        self.assertEqual(worker["last_failure_reason"], "previous failure")
+
     def test_mark_dependency_blocked_records_blockers_and_resolution_action(self):
         worker = normalize_worker({}, "review")
 
@@ -50,6 +78,68 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["status"], "blocked")
         self.assertEqual(worker["blockers"], ["dependency:build"])
         self.assertEqual(worker["next_eligible_action"], "resolve_blocker")
+
+    def test_apply_worker_result_done_clears_stale_current_status_metadata(self):
+        worker = normalize_worker(
+            {
+                "status": "failed",
+                "blockers": ["dependency:build"],
+                "error": "previous failure",
+                "failure_category": "api",
+                "failure_reason": "previous failure",
+                "failure_retryable": False,
+                "last_failure_category": "api",
+                "last_failure_reason": "previous failure",
+            },
+            "review",
+        )
+
+        apply_worker_result(
+            worker,
+            {
+                "status": "done",
+                "message_ids": {"assistant": "msg_assistant"},
+            },
+        )
+
+        self.assertEqual(worker["status"], "done")
+        self.assertEqual(worker["blockers"], [])
+        self.assertNotIn("error", worker)
+        self.assertIsNone(worker["failure_category"])
+        self.assertIsNone(worker["failure_reason"])
+        self.assertNotIn("failure_retryable", worker)
+        self.assertEqual(worker["last_failure_category"], "api")
+        self.assertEqual(worker["last_failure_reason"], "previous failure")
+        self.assertEqual(worker["output_refs"], ["assistant:msg_assistant"])
+
+    def test_schedule_worker_retry_clears_stale_current_status_metadata(self):
+        worker = normalize_worker(
+            {
+                "status": "failed",
+                "blockers": ["dependency:build"],
+                "error": "previous failure",
+                "failure_category": "api",
+                "failure_reason": "previous failure",
+                "failure_retryable": True,
+                "retryable_failures": ["api"],
+                "retry_count": 0,
+                "retry_limit": 1,
+            },
+            "review",
+        )
+
+        scheduled = schedule_worker_retry(worker, "api", "previous failure")
+
+        self.assertTrue(scheduled)
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["blockers"], [])
+        self.assertNotIn("error", worker)
+        self.assertIsNone(worker["failure_category"])
+        self.assertIsNone(worker["failure_reason"])
+        self.assertNotIn("failure_retryable", worker)
+        self.assertEqual(worker["last_failure_category"], "api")
+        self.assertEqual(worker["last_failure_reason"], "previous failure")
+        self.assertEqual(worker["next_eligible_action"], "retry")
 
     def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
         worker = normalize_worker({"status": "active", "next_eligible_action": "wait"}, "planner")
