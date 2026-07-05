@@ -1,6 +1,9 @@
 from copy import deepcopy
 
 
+REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
+
+
 def persist_run_mutation(store, run, mutator, *, now):
     name = run["name"]
 
@@ -41,10 +44,17 @@ def merge_worker_transition(latest_worker, worker_record):
 
     merged = deepcopy(latest_worker)
     merged.update(deepcopy(worker_record))
+    _delete_removed_transition_fields(merged, worker_record)
     _merge_unique_list_field(merged, latest_worker, worker_record, "prompt_ids")
     if "abort" not in worker_record and "abort" in latest_worker:
         merged["abort"] = deepcopy(latest_worker["abort"])
     return merged
+
+
+def _delete_removed_transition_fields(target, worker_record):
+    for field in REMOVABLE_WORKER_TRANSITION_FIELDS:
+        if field not in worker_record:
+            target.pop(field, None)
 
 
 def _merge_into_aborted_worker(latest_worker, worker_record):
