@@ -32,6 +32,7 @@ class SessionEventWatcherTest(unittest.TestCase):
             [
                 {
                     "kind": "status",
+                    "schema_status": "known",
                     "session_id": "ses_target",
                     "type": "session.status",
                     "status": "done",

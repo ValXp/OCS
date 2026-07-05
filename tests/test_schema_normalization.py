@@ -28,6 +28,7 @@ class SchemaNormalizationTest(unittest.TestCase):
         normalized = normalize_session_payload(payload)
 
         session = normalized["sessions"][0]
+        self.assertEqual(session["schema_status"], "known")
         self.assertEqual(session["id"], "ses_1")
         self.assertEqual(session["title"], "Build")
         self.assertEqual(session["directory"], "/tmp/project")
@@ -102,6 +103,7 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(admission["delivery"], "queue")
         self.assertEqual(admission["status"], "active")
         self.assertEqual(event["kind"], "blocker")
+        self.assertEqual(event["schema_status"], "known")
         self.assertEqual(event["blocker"], "permission")
         self.assertEqual(event["blocker_id"], "perm_1")
         self.assertEqual(event["status"], "queued")
@@ -109,11 +111,33 @@ class SchemaNormalizationTest(unittest.TestCase):
     def test_unknown_session_shapes_are_explicit_records(self):
         self.assertEqual(
             normalize_session_payload("not-a-session-record"),
-            {"schema_status": "unknown", "raw": "not-a-session-record"},
+            {
+                "schema_status": "unknown",
+                "id": None,
+                "directory": None,
+                "title": None,
+                "agent": None,
+                "model": None,
+                "tokens": None,
+                "createdAt": None,
+                "updatedAt": None,
+                "raw": "not-a-session-record",
+            },
         )
         self.assertEqual(
             normalize_session_payload({"unexpected": True}),
-            {"unexpected": True, "schema_status": "unknown"},
+            {
+                "schema_status": "unknown",
+                "id": None,
+                "directory": None,
+                "title": None,
+                "agent": None,
+                "model": None,
+                "tokens": None,
+                "createdAt": None,
+                "updatedAt": None,
+                "raw": {"unexpected": True},
+            },
         )
 
     def test_event_session_mismatch_is_explicit_but_watcher_boundary_filters_it(self):
@@ -128,6 +152,7 @@ class SchemaNormalizationTest(unittest.TestCase):
             normalized,
             {
                 "kind": "ignored",
+                "schema_status": "known",
                 "target_session_id": "ses_target",
                 "reason": "session_mismatch",
                 "session_id": "ses_other",
@@ -150,6 +175,7 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(normalized["session_id"], "ses_target")
         self.assertEqual(normalized["type"], "session.custom.statusish")
         self.assertEqual(normalized["raw"], event)
+        self.assertNotIn("status", normalized)
 
 
 if __name__ == "__main__":

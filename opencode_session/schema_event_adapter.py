@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 
 from opencode_session.schema_common import (
@@ -55,13 +56,12 @@ class EventRouteAdapter:
         call_id = string_value(first_present_in(sources, "callID", "callId", "toolCallID", "toolCallId", "tool_call_id"))
         kind = _event_kind(event_type_text, text, tool_name, call_id, error_text, sources)
 
-        normalized = {"kind": kind}
+        if kind == "unknown":
+            return unknown_event_record(event, event_type=event_type_text, session_id=session_id)
+
+        normalized = {"kind": kind, "schema_status": "known"}
         set_if_present(normalized, "session_id", session_id)
         set_if_present(normalized, "type", event_type_text)
-        if kind == "unknown":
-            normalized["schema_status"] = "unknown"
-            normalized["reason"] = "unrecognized_event_shape"
-            normalized["raw"] = dict(event)
         set_if_present(normalized, "message_id", _event_message_id(sources))
         set_if_present(normalized, "status", short_status(raw_status))
         if raw_status is not None and short_status(raw_status) != raw_status:
@@ -105,6 +105,7 @@ def _event_kind(event_type, text, tool_name, call_id, error_text, sources):
 def ignored_event_record(session_id, target_session_id, event_type) -> NormalizedEventRecord:
     normalized = {
         "kind": "ignored",
+        "schema_status": "known",
         "target_session_id": target_session_id,
         "reason": "session_mismatch",
     }
@@ -118,7 +119,7 @@ def unknown_event_record(raw, *, event_type=None, session_id=None) -> Normalized
         "kind": "unknown",
         "schema_status": "unknown",
         "reason": "unrecognized_event_shape",
-        "raw": raw,
+        "raw": deepcopy(raw),
     }
     set_if_present(normalized, "session_id", session_id)
     set_if_present(normalized, "type", event_type)

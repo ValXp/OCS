@@ -1,6 +1,10 @@
+from copy import deepcopy
 from dataclasses import dataclass
 
 from opencode_session.schema_common import NormalizedSessionRecord, first_present, normalized_tokens, set_missing
+
+
+SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "tokens", "createdAt", "updatedAt")
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,7 @@ class SessionRouteAdapter:
             return unknown_session_record(record)
 
         normalized = dict(record)
+        normalized["schema_status"] = "known"
         set_missing(normalized, "id", self.value(record, "id", "sessionID", "sessionId", "session_id"))
         set_missing(normalized, "directory", self.value(record, "directory", "cwd"))
         set_missing(normalized, "title", self.value(record, "title", "name"))
@@ -54,6 +59,7 @@ class SessionRouteAdapter:
         )
         set_missing(normalized, "createdAt", self.value(record, "createdAt", "created_at", "created"))
         set_missing(normalized, "updatedAt", self.value(record, "updatedAt", "updated_at", "updated"))
+        require_session_canonical_fields(normalized)
         return normalized
 
     def record(self, session):
@@ -101,11 +107,15 @@ class SessionRouteAdapter:
 
 
 def unknown_session_record(raw) -> NormalizedSessionRecord:
-    if isinstance(raw, dict):
-        normalized = dict(raw)
-        normalized["schema_status"] = "unknown"
-        return normalized
-    return {"schema_status": "unknown", "raw": raw}
+    normalized = {field_name: None for field_name in SESSION_CANONICAL_FIELDS}
+    normalized["schema_status"] = "unknown"
+    normalized["raw"] = deepcopy(raw)
+    return normalized
+
+
+def require_session_canonical_fields(record):
+    for field_name in SESSION_CANONICAL_FIELDS:
+        record.setdefault(field_name, None)
 
 
 SESSION_ADAPTER = SessionRouteAdapter()

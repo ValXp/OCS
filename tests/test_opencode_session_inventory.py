@@ -326,7 +326,7 @@ class SessionInventoryCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(json.loads(result.stdout), session)
+        self.assertEqual(json.loads(result.stdout), {**session, "schema_status": "known"})
         self.assertEqual(server.requests, [("GET", "/api/session/ses_build", None)])
 
     def test_inspect_raw_exposes_exact_api_response_body(self):
