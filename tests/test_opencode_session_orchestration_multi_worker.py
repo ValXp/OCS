@@ -4,11 +4,38 @@ import unittest
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.multi_worker_orchestration import MultiWorkerRunOrchestrationService, MultiWorkerRunStartRequest
 from opencode_session.run_store import RunStore
+from opencode_session.worker_dependencies import analyze_worker_dependencies
 
 try:
     from tests.multi_worker_orchestration_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES
 except ModuleNotFoundError:
     from multi_worker_orchestration_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES
+
+
+class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
+    def test_ready_worker_ids_exclude_worker_blocked_by_partially_completed_cycle(self):
+        workers = {
+            "build": {
+                "id": "build",
+                "prompt": "Run the implementation",
+                "status": "done",
+                "dependencies": ["review"],
+            },
+            "review": {
+                "id": "review",
+                "prompt": "Review the implementation",
+                "status": "queued",
+                "dependencies": ["build"],
+            },
+        }
+
+        analysis = analyze_worker_dependencies(workers)
+
+        self.assertEqual(analysis.ready_worker_ids, ())
+        self.assertEqual(
+            analysis.blockers_by_worker_id,
+            {"review": ("dependency-cycle:build->review->build",)},
+        )
 
 
 class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
@@ -234,6 +261,59 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(run["workers"]["build"]["status"], "failed")
         self.assertEqual(run["workers"]["review"]["status"], "blocked")
         self.assertEqual(run["workers"]["review"]["blockers"], ["dependency:build"])
+        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+
+    def test_start_does_not_probe_capabilities_when_partially_completed_cycle_blocks_worker(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Run the implementation",
+                status="done",
+                dependencies=["review"],
+                output_refs=["assistant:msg_build_assistant"],
+            )
+            store.upsert_worker(
+                "demo",
+                "review",
+                role="review",
+                prompt="Review the implementation",
+                dependencies=["build"],
+            )
+            client = FakeClient([])
+            detector_calls = []
+            executions = []
+
+            def detect_capabilities(client):
+                detector_calls.append(client)
+                return CAPABILITIES
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append((session_id, prompt))
+                self.fail("locally blocked run should not execute workers")
+
+            service = MultiWorkerRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=detect_capabilities,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 75)
+        self.assertEqual(detector_calls, [])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(executions, [])
+        self.assertEqual(run["status"], "blocked")
+        self.assertEqual(run["workers"]["build"]["status"], "done")
+        self.assertEqual(run["workers"]["review"]["status"], "blocked")
+        self.assertEqual(run["workers"]["review"]["blockers"], ["dependency-cycle:build->review->build"])
         self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_does_not_execute_blocked_worker_after_dependency_succeeds(self):

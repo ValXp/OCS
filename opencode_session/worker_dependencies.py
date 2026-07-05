@@ -21,10 +21,11 @@ def analyze_worker_dependencies(workers):
     worker_ids_in_dependency_order, cycles = _dependency_order_and_cycles(workers)
     invalid_graph_blockers = _invalid_graph_blockers(workers, cycles)
     dependency_blockers = _dependency_blockers(workers)
+    blockers = _merge_blocker_maps(invalid_graph_blockers, dependency_blockers)
     return WorkerDependencyAnalysis(
         worker_ids_in_dependency_order=tuple(worker_ids_in_dependency_order),
-        ready_worker_ids=tuple(_ready_worker_ids(workers)),
-        blockers_by_worker_id=_merge_blocker_maps(invalid_graph_blockers, dependency_blockers),
+        ready_worker_ids=tuple(_ready_worker_ids(workers, blockers)),
+        blockers_by_worker_id=blockers,
         invalid_graph_blockers_by_worker_id=invalid_graph_blockers,
         dependency_blockers_by_worker_id=dependency_blockers,
     )
@@ -59,9 +60,11 @@ def _dependency_order_and_cycles(workers):
     return ordered, cycles
 
 
-def _ready_worker_ids(workers):
+def _ready_worker_ids(workers, blockers_by_worker_id):
     ready = []
     for worker_id in sorted(workers):
+        if worker_id in blockers_by_worker_id:
+            continue
         worker = workers[worker_id]
         if not _runnable_prompted_worker(worker):
             continue
