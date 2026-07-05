@@ -5,7 +5,8 @@ from pathlib import Path
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
 from opencode_session.capabilities import unsupported_reasons
-from opencode_session.events import is_terminal_event, normalize_event
+from opencode_session.event_watcher import SessionEventWatcher
+from opencode_session.events import is_terminal_event
 from opencode_session.formatting import compact_bool, compact_value
 from opencode_session.prompt_admission import admit_prompt
 from opencode_session.records import first_present, session_value
@@ -206,10 +207,8 @@ def assistant_message_status(session):
 def live_event_execution_observation(client, steer, event_path):
     deadline = TimeoutDeadline(LIVE_EVENT_OBSERVATION_TIMEOUT)
     try:
-        for raw_event in client.stream_events(event_path, deadline=deadline):
-            event = normalize_event(raw_event, steer["session_id"])
-            if event is None:
-                continue
+        watcher = SessionEventWatcher(client, event_path, steer["session_id"])
+        for event in watcher.iter_events(deadline=deadline):
             observation = event_execution_observation(event)
             if observation["executed"] != "unknown":
                 return observation

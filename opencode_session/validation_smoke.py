@@ -1,6 +1,3 @@
-import queue
-import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -12,7 +9,12 @@ from opencode_session.blocking_execution import (
     skipped_blocking_execution_result,
 )
 from opencode_session.capabilities import unsupported_reasons
-from opencode_session.events import is_terminal_event, normalize_event
+from opencode_session.event_watcher import (
+    BackgroundSessionEventWatcher,
+    EventWatchEmpty,
+    EventWatchOpenTimeout,
+    EventWatchTimeout,
+)
 from opencode_session.formatting import compact_bool, compact_list, compact_value
 from opencode_session.prompt_admission import admit_prompt
 from opencode_session.records import session_value
@@ -138,79 +140,31 @@ def require_smoke_capabilities(capabilities, *, unsupported_exit=EX_UNSUPPORTED)
 
 class SmokeEventCollector:
     def __init__(self, client, session_id, event_path, event_limit):
-        self.client = client
-        self.session_id = session_id
-        self.event_path = event_path
         self.event_limit = event_limit
-        self.opened = threading.Event()
-        self.items = queue.Queue()
-        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.watcher = BackgroundSessionEventWatcher(client, event_path, session_id)
 
     def start(self):
-        self.thread.start()
+        self.watcher.start()
 
     def wait_open(self, timeout):
-        if self.opened.wait(timeout):
-            return
-        error = self._first_error()
-        if error is not None:
-            raise error
-        raise SmokeFailure(f"event stream did not open within {format_timeout(timeout)}s")
+        try:
+            self.watcher.wait_open(timeout)
+        except EventWatchOpenTimeout as error:
+            raise SmokeFailure(f"event stream did not open within {format_timeout(error.timeout)}s") from error
 
     def collect(self, timeout):
+        try:
+            events = self.watcher.collect(timeout=timeout, limit=self.event_limit)
+        except EventWatchTimeout as error:
+            raise SmokeFailure(f"event stream timed out after {format_timeout(error.timeout)}s") from error
+        except EventWatchEmpty as error:
+            raise SmokeFailure("event stream produced no events for disposable session") from error
         event_types = []
-        deadline = time.monotonic() + timeout
-        while len(event_types) < self.event_limit:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                kind, value = self.items.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if kind == "error":
-                raise value
-            if kind == "done":
-                break
-            event = value
+        for event in events:
             event_type = event.get("type") or event.get("kind")
             if event_type and event_type not in event_types:
                 event_types.append(event_type)
-            if is_terminal_event(event):
-                break
-        if event_types:
-            return event_types
-        if self.thread.is_alive():
-            raise SmokeFailure(f"event stream timed out after {format_timeout(timeout)}s")
-        raise SmokeFailure("event stream produced no events for disposable session")
-
-    def _run(self):
-        try:
-            for raw_event in self.client.stream_events(self.event_path, on_open=self.opened.set):
-                event = normalize_event(raw_event, self.session_id)
-                if event is None:
-                    continue
-                self.items.put(("event", event))
-        except OpenCodeApiError as error:
-            self.items.put(("error", error))
-        finally:
-            self.items.put(("done", None))
-
-    def _first_error(self):
-        pending = []
-        error = None
-        while True:
-            try:
-                item = self.items.get_nowait()
-            except queue.Empty:
-                break
-            pending.append(item)
-            if item[0] == "error":
-                error = item[1]
-                break
-        for item in pending:
-            self.items.put(item)
-        return error
+        return event_types
 
 
 def smoke_blocker_summary(client, session_id):
