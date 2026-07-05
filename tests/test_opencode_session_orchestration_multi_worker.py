@@ -2,7 +2,10 @@ import tempfile
 import unittest
 
 from opencode_session.api_client import OpenCodeApiError
-from opencode_session.multi_worker_orchestration import MultiWorkerRunOrchestrationService, MultiWorkerRunStartRequest
+from opencode_session.multi_worker_orchestration import (
+    DependencyOrderedSerialRunOrchestrationService,
+    DependencyOrderedSerialRunStartRequest,
+)
 from opencode_session.run_store import RunStore
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 
@@ -98,7 +101,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 retryable_failures=["api"],
             )
             client = FakeClient([])
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: UNSUPPORTED_CAPABILITIES,
@@ -106,7 +109,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 70)
@@ -135,7 +138,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
             def detect_capabilities(client):
                 raise OpenCodeApiError("capability probe failed")
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=detect_capabilities,
@@ -143,7 +146,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 69)
@@ -186,7 +189,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 detector_calls.append(client)
                 raise OpenCodeApiError("capability probe failed")
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=detect_capabilities,
@@ -194,7 +197,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 69)
@@ -236,7 +239,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 detector_calls.append(client)
                 raise OpenCodeApiError("capability probe failed")
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=detect_capabilities,
@@ -244,7 +247,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 69)
@@ -307,7 +310,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 detector_calls.append(client)
                 return CAPABILITIES
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=detect_capabilities,
@@ -315,7 +318,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="deploy", role="deploy"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="deploy", role="deploy"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 69)
@@ -364,7 +367,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 dependencies=["docs", "build"],
             )
             client = FakeClient([])
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -372,7 +375,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 1)
@@ -417,7 +420,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 executions.append((session_id, prompt))
                 self.fail("locally blocked run should not execute workers")
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=detect_capabilities,
@@ -425,7 +428,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 75)
@@ -461,7 +464,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                     "status": "done",
                 }
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -469,7 +472,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            first_outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="build", role="build"))
+            first_outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="build", role="build"))
             requests_after_first_start = list(client.requests)
             executions_after_first_start = list(executions)
             store.upsert_worker(
@@ -483,7 +486,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 blockers=["manual:blocker"],
             )
 
-            second_outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            second_outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
             run = store.load_run("demo")
 
         self.assertEqual(first_outcome.exit_code, 0)
@@ -543,7 +546,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                     "status": "done",
                 }
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -551,7 +554,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="review", role="review"))
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 0)

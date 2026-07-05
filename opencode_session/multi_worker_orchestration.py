@@ -32,7 +32,7 @@ workers_in_dependency_order = _workers_in_dependency_order
 
 
 @dataclass
-class MultiWorkerRunStartRequest:
+class DependencyOrderedSerialRunStartRequest:
     name: str
     worker_id: str
     role: str
@@ -43,13 +43,15 @@ class MultiWorkerRunStartRequest:
 
 
 @dataclass
-class MultiWorkerRunStartOutcome:
+class DependencyOrderedSerialRunStartOutcome:
     run: dict
     exit_code: int
     error: Optional[str] = None
 
 
-class MultiWorkerRunOrchestrationService:
+class DependencyOrderedSerialRunOrchestrationService:
+    """Run prompted workers one at a time after their dependencies are satisfied."""
+
     def __init__(
         self,
         store,
@@ -96,68 +98,43 @@ class MultiWorkerRunOrchestrationService:
         dependency_analysis = self._mark_and_persist_dependency_blocked_workers(run)
         if dependency_analysis.blockers_by_worker_id or not dependency_analysis.ready_worker_ids:
             if not dependency_analysis.ready_worker_ids:
-                return MultiWorkerRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+                return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
         try:
             probe = self.core.probe_capabilities(run)
             client = probe.client
             if probe.start_error is not None:
                 self._mark_prompted_workers_failed(run, probe.start_error)
-                return MultiWorkerRunStartOutcome(run, EX_UNSUPPORTED, probe.start_error)
+                return DependencyOrderedSerialRunStartOutcome(run, EX_UNSUPPORTED, probe.start_error)
 
             run["status"] = "active"
             self._persist_mutation(run, _mark_run_active)
             while True:
-                workers = run.get("workers", {})
-                ready_workers = _ready_prompted_workers(workers)
+                ready_workers = _ready_prompted_workers(run.get("workers", {}))
                 if not ready_workers:
                     self._mark_and_persist_dependency_blocked_workers(run)
                     break
 
-                attempt_workers = list(ready_workers)
-                while attempt_workers:
-                    retry_workers = []
-                    for worker in attempt_workers:
-                        outcome = self.core.execute_worker(
-                            client,
-                            run,
-                            worker,
-                            _worker_prompt(worker),
-                            probe.capabilities,
-                            agent=worker.get("agent"),
-                            model=worker.get("model"),
-                            stop_after_retry=True,
-                        )
-                        if cleanup:
-                            remember_created_worker_sessions(
-                                created_session_ids_by_worker,
-                                worker,
-                                outcome.created_session_ids,
-                            )
-                        if outcome.kind == "retry":
-                            retry_workers.append(worker)
-                            continue
-                        if outcome.error is not None:
-                            self._mark_and_persist_dependency_blocked_workers(run)
-                            cleanup_error = (
-                                self._cleanup_created_workers(client, run, created_session_ids_by_worker)
-                                if cleanup
-                                else None
-                            )
-                            if cleanup_error is not None:
-                                return cleanup_error
-                            return MultiWorkerRunStartOutcome(
-                                run,
-                                _exit_code_for_orchestration_run(run),
-                                outcome.error,
-                            )
-
-                    if retry_workers:
-                        self._persist_summary(run)
-                        attempt_workers = retry_workers
-                        continue
-                    self._persist_summary(run)
-                    break
+                outcome = self._execute_ready_workers_serially(
+                    client,
+                    run,
+                    ready_workers,
+                    probe.capabilities,
+                    cleanup=cleanup,
+                    created_session_ids_by_worker=created_session_ids_by_worker,
+                )
+                if outcome is not None:
+                    self._mark_and_persist_dependency_blocked_workers(run)
+                    cleanup_error = (
+                        self._cleanup_created_workers(client, run, created_session_ids_by_worker) if cleanup else None
+                    )
+                    if cleanup_error is not None:
+                        return cleanup_error
+                    return DependencyOrderedSerialRunStartOutcome(
+                        run,
+                        _exit_code_for_orchestration_run(run),
+                        outcome.error,
+                    )
 
                 if not _ready_prompted_workers(run.get("workers", {})):
                     self._mark_and_persist_dependency_blocked_workers(run)
@@ -172,17 +149,56 @@ class MultiWorkerRunOrchestrationService:
             )
             if cleanup_error is not None:
                 return cleanup_error
-            return MultiWorkerRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
+            return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
 
         cleanup_error = self._cleanup_created_workers(client, run, created_session_ids_by_worker) if cleanup else None
         if cleanup_error is not None:
             return cleanup_error
-        return MultiWorkerRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+        return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+
+    def _execute_ready_workers_serially(
+        self,
+        client,
+        run,
+        ready_workers,
+        capabilities,
+        *,
+        cleanup,
+        created_session_ids_by_worker,
+    ):
+        attempt_workers = list(ready_workers)
+        while attempt_workers:
+            retry_workers = []
+            for worker in attempt_workers:
+                outcome = self.core.execute_worker(
+                    client,
+                    run,
+                    worker,
+                    _worker_prompt(worker),
+                    capabilities,
+                    agent=worker.get("agent"),
+                    model=worker.get("model"),
+                    stop_after_retry=True,
+                )
+                if cleanup:
+                    remember_created_worker_sessions(
+                        created_session_ids_by_worker,
+                        worker,
+                        outcome.created_session_ids,
+                    )
+                if outcome.kind == "retry":
+                    retry_workers.append(worker)
+                    continue
+                if outcome.error is not None:
+                    return outcome
+            self._persist_summary(run)
+            attempt_workers = retry_workers
+        return None
 
     def _cleanup_created_workers(self, client, run, created_session_ids_by_worker):
         cleanup_failure = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
         if cleanup_failure is not None:
-            return MultiWorkerRunStartOutcome(run, cleanup_failure.exit_code, cleanup_failure.error)
+            return DependencyOrderedSerialRunStartOutcome(run, cleanup_failure.exit_code, cleanup_failure.error)
         return None
 
     def _mark_prompted_workers_failed(self, run, error):

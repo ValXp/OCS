@@ -4,7 +4,10 @@ import unittest
 from unittest import mock
 
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.multi_worker_orchestration import MultiWorkerRunOrchestrationService, MultiWorkerRunStartRequest
+from opencode_session.multi_worker_orchestration import (
+    DependencyOrderedSerialRunOrchestrationService,
+    DependencyOrderedSerialRunStartRequest,
+)
 from opencode_session.run_start_core import RunStartCore
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
@@ -28,7 +31,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
                 client.requests.append(("execute", session_id, prompt))
                 raise BlockingProviderFailure("alpha failed")
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -37,7 +40,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
             )
 
             outcome = service.start(
-                MultiWorkerRunStartRequest(name="demo", worker_id="alpha", role="build", cleanup=True)
+                DependencyOrderedSerialRunStartRequest(name="demo", worker_id="alpha", role="build", cleanup=True)
             )
             run = store.load_run("demo")
 
@@ -68,9 +71,9 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
                 "beta": {"id": "beta", "status": "done"},
             },
         }
-        saves = []
+        persisted_worker_ids = []
         core = RunStartCore(
-            save_run=lambda run: saves.append(run),
+            persist_worker_update=lambda run, worker: persisted_worker_ids.append(worker["id"]),
             refresh_run_summary=lambda run: None,
             now=lambda: "2026-07-03T00:00:00Z",
         )
@@ -91,7 +94,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
         self.assertEqual(run["workers"]["alpha"]["status"], "failed")
         self.assertEqual(run["workers"]["alpha"]["failure_reason"], first_error)
         self.assertEqual(run["workers"]["beta"]["cleanup"], {"requested": True, "deleted": True})
-        self.assertEqual(saves, [run])
+        self.assertEqual(persisted_worker_ids, ["alpha", "alpha", "beta"])
 
     def test_timeout_retry_abandoned_callback_keeps_original_session_after_worker_rebind(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -143,7 +146,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
                 client.requests.append(("execute", session_id, prompt))
                 return result_for(session_id)
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -153,7 +156,9 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
 
             try:
                 with mock.patch("opencode_session.worker_execution.TimeoutDeadline", DelayedFirstTimeoutDeadline):
-                    outcome = service.start(MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker"))
+                    outcome = service.start(
+                        DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker")
+                    )
                 run = store.load_run("demo")
             finally:
                 release_abandoned_callback.set()
@@ -217,7 +222,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
                     "text": "Worker finished after isolated retry.",
                 }
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -227,7 +232,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
 
             with mock.patch("opencode_session.worker_execution.TimeoutDeadline", FirstAttemptTimeoutDeadline):
                 outcome = service.start(
-                    MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker", cleanup=True)
+                    DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker", cleanup=True)
                 )
             run = store.load_run("demo")
 
@@ -290,7 +295,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
                     "text": "Worker finished after isolated retry.",
                 }
 
-            service = MultiWorkerRunOrchestrationService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -300,7 +305,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
 
             with mock.patch("opencode_session.worker_execution.TimeoutDeadline", FirstAttemptTimeoutDeadline):
                 outcome = service.start(
-                    MultiWorkerRunStartRequest(name="demo", worker_id="worker", role="worker", cleanup=True)
+                    DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker", cleanup=True)
                 )
             run = store.load_run("demo")
 

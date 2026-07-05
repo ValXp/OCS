@@ -8,8 +8,8 @@ from opencode_session.blocking_execution import format_blocking_execution_compac
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.multi_worker_orchestration import (
-    MultiWorkerRunOrchestrationService,
-    MultiWorkerRunStartRequest,
+    DependencyOrderedSerialRunOrchestrationService,
+    DependencyOrderedSerialRunStartRequest,
     refresh_orchestration_run_summary as _refresh_orchestration_run_summary,
     workers_in_dependency_order as _workers_in_dependency_order,
 )
@@ -176,8 +176,8 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
 def _start_orchestration_run(args, store, *, print_error):
     if args.prompt is not None:
         return _start_single_worker_run(args, store, print_error=print_error)
-    outcome = MultiWorkerRunOrchestrationService(store).start(
-        MultiWorkerRunStartRequest(
+    outcome = DependencyOrderedSerialRunOrchestrationService(store).start(
+        DependencyOrderedSerialRunStartRequest(
             name=args.name,
             worker_id=args.worker,
             role=args.role,
