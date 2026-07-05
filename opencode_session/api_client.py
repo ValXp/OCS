@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 from opencode_session.events import EventStreamError, iter_event_stream
 from opencode_session.schema_normalization import normalize_session_payload
 from opencode_session.timeout_boundary import TimeoutExpired
+from opencode_session.urllib_compat import set_response_socket_timeout
 
 
 class OpenCodeApiError(Exception):
@@ -72,7 +73,7 @@ class OpenCodeApiClient:
         request = Request(url, headers=headers, method="GET")
         try:
             with urlopen(request, timeout=self._stream_open_timeout(deadline)) as response:
-                _set_response_socket_timeout(response, None if deadline is None else deadline.require_time())
+                set_response_socket_timeout(response, None if deadline is None else deadline.require_time())
                 if on_open is not None:
                     on_open()
                 lines = response if deadline is None else _iter_response_lines_until_deadline(response, deadline)
@@ -269,7 +270,7 @@ def _validate_base_url(base_url):
 
 def _iter_response_lines_until_deadline(response, deadline):
     while True:
-        _set_response_socket_timeout(response, deadline.require_time())
+        set_response_socket_timeout(response, deadline.require_time())
         try:
             line = response.readline()
         except TimeoutError as error:
@@ -277,7 +278,3 @@ def _iter_response_lines_until_deadline(response, deadline):
         if line == b"":
             return
         yield line
-
-
-def _set_response_socket_timeout(response, timeout):
-    response.fp.raw._sock.settimeout(timeout)
