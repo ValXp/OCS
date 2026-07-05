@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-from copy import deepcopy
 import fcntl
 import json
 import os
@@ -9,7 +8,6 @@ from pathlib import Path
 
 from opencode_session.run_record import (
     RunRecordError,
-    merge_run_changes,
     new_run_record,
     normalize_run,
     upsert_worker_record,
@@ -26,18 +24,18 @@ class RunStoreError(Exception):
         self.kind = kind
 
 
-class _StoredRun(dict):
-    pass
-
-
 class RunStore:
     def __init__(self, root):
         self.root = Path(root)
 
     def create_run(self, name, *, directory, server_url):
         now = _utc_now()
-        run = _StoredRun(new_run_record(name, directory=directory, server_url=server_url, now=now))
-        self.save_run(run)
+        run = _normalize_for_store(
+            new_run_record(name, directory=directory, server_url=server_url, now=now),
+            fallback_name=name,
+        )
+        with self._locked_run(name):
+            self._write_run_unlocked(run)
         return run
 
     def upsert_worker(self, name, worker_id, **changes):
@@ -50,25 +48,7 @@ class RunStore:
         return self.update_run(name, mutate)
 
     def load_run(self, name):
-        return _track_run(self._read_run_unlocked(name))
-
-    def save_run(self, run):
-        name = run["name"]
-        incoming = _normalize_for_store(dict(run), fallback_name=name)
-        baseline = _run_snapshot(run)
-        with self._locked_run(name):
-            merged = incoming
-            if baseline is not None:
-                try:
-                    current = self._read_run_unlocked(name)
-                except RunStoreError as error:
-                    if error.kind != "missing":
-                        raise
-                else:
-                    merged = _merge_for_store(baseline, incoming, current)
-            self._write_run_unlocked(merged)
-        _replace_mapping_in_place(run, merged)
-        _remember_run_snapshot(run, merged)
+        return self._read_run_unlocked(name)
 
     def update_run(self, name, mutator):
         with self._locked_run(name):
@@ -78,7 +58,7 @@ class RunStore:
                 run = replacement
             run = _normalize_for_store(run, fallback_name=name)
             self._write_run_unlocked(run)
-        return _track_run(run)
+        return run
 
     def _read_run_unlocked(self, name):
         path = self._run_path(name)
@@ -138,46 +118,9 @@ def _thread_lock_for(path):
         return lock
 
 
-def _track_run(run):
-    stored = _StoredRun(run)
-    _remember_run_snapshot(stored, run)
-    return stored
-
-
-def _run_snapshot(run):
-    snapshot = getattr(run, "_run_store_snapshot", None)
-    return deepcopy(snapshot) if snapshot is not None else None
-
-
-def _remember_run_snapshot(run, snapshot):
-    if isinstance(run, _StoredRun):
-        run._run_store_snapshot = deepcopy(snapshot)
-
-
-def _replace_mapping_in_place(target, source):
-    for key in list(target):
-        if key not in source:
-            del target[key]
-    for key, value in source.items():
-        existing = target.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            _replace_mapping_in_place(existing, value)
-        elif isinstance(existing, list) and isinstance(value, list):
-            existing[:] = deepcopy(value)
-        else:
-            target[key] = deepcopy(value)
-
-
 def _normalize_for_store(run, *, fallback_name):
     try:
         return normalize_run(run, fallback_name=fallback_name)
-    except RunRecordError as error:
-        raise RunStoreError(str(error), kind=error.kind) from error
-
-
-def _merge_for_store(baseline, incoming, current):
-    try:
-        return merge_run_changes(baseline, incoming, current)
     except RunRecordError as error:
         raise RunStoreError(str(error), kind=error.kind) from error
 

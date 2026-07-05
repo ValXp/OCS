@@ -6,6 +6,7 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
+from opencode_session.run_persistence import persist_run_mutation, persist_run_summary, persist_worker_updates
 from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
@@ -64,7 +65,7 @@ class MultiWorkerRunOrchestrationService:
         self.executor = executor
         self.now = now or _utc_now
         self.core = RunStartCore(
-            save_run=self._save,
+            persist_worker_update=self._persist_worker_update,
             refresh_run_summary=refresh_orchestration_run_summary,
             client_factory=self.client_factory,
             capability_detector=self.capability_detector,
@@ -74,13 +75,17 @@ class MultiWorkerRunOrchestrationService:
 
     def start(self, request):
         run = self.store.load_run(request.name)
-        if request.directory is not None:
-            run["directory"] = str(Path(request.directory).resolve())
-        if request.server_url is not None:
-            run["server_url"] = request.server_url
-        if request.session_id is not None:
-            worker = _ensure_orchestration_worker(run, request.worker_id, role=request.role)
-            worker["session_id"] = request.session_id
+
+        def prepare(latest_run):
+            if request.directory is not None:
+                latest_run["directory"] = str(Path(request.directory).resolve())
+            if request.server_url is not None:
+                latest_run["server_url"] = request.server_url
+            if request.session_id is not None:
+                worker = _ensure_orchestration_worker(latest_run, request.worker_id, role=request.role)
+                worker["session_id"] = request.session_id
+
+        run = self._persist_mutation(run, prepare)
         if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):
             raise RunStoreError(f"run '{request.name}' has no worker prompts; pass --prompt or add workers with --prompt")
         return self._start_prompted_workers(run, cleanup=request.cleanup)
@@ -88,10 +93,8 @@ class MultiWorkerRunOrchestrationService:
     def _start_prompted_workers(self, run, *, cleanup=False):
         created_session_ids_by_worker = {}
         client = None
-        dependency_analysis = _mark_dependency_blocked_workers(run)
+        dependency_analysis = self._mark_and_persist_dependency_blocked_workers(run)
         if dependency_analysis.blockers_by_worker_id or not dependency_analysis.ready_worker_ids:
-            refresh_orchestration_run_summary(run)
-            self._save(run)
             if not dependency_analysis.ready_worker_ids:
                 return MultiWorkerRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
@@ -103,14 +106,12 @@ class MultiWorkerRunOrchestrationService:
                 return MultiWorkerRunStartOutcome(run, EX_UNSUPPORTED, probe.start_error)
 
             run["status"] = "active"
-            self._save(run)
+            self._persist_mutation(run, _mark_run_active)
             while True:
                 workers = run.get("workers", {})
                 ready_workers = _ready_prompted_workers(workers)
                 if not ready_workers:
-                    _mark_dependency_blocked_workers(run)
-                    refresh_orchestration_run_summary(run)
-                    self._save(run)
+                    self._mark_and_persist_dependency_blocked_workers(run)
                     break
 
                 attempt_workers = list(ready_workers)
@@ -137,9 +138,7 @@ class MultiWorkerRunOrchestrationService:
                             retry_workers.append(worker)
                             continue
                         if outcome.error is not None:
-                            _mark_dependency_blocked_workers(run)
-                            refresh_orchestration_run_summary(run)
-                            self._save(run)
+                            self._mark_and_persist_dependency_blocked_workers(run)
                             cleanup_error = (
                                 self._cleanup_created_workers(client, run, created_session_ids_by_worker)
                                 if cleanup
@@ -153,18 +152,15 @@ class MultiWorkerRunOrchestrationService:
                                 outcome.error,
                             )
 
-                    refresh_orchestration_run_summary(run)
                     if retry_workers:
-                        self._save(run)
+                        self._persist_summary(run)
                         attempt_workers = retry_workers
                         continue
-                    self._save(run)
+                    self._persist_summary(run)
                     break
 
                 if not _ready_prompted_workers(run.get("workers", {})):
-                    _mark_dependency_blocked_workers(run)
-                    refresh_orchestration_run_summary(run)
-                    self._save(run)
+                    self._mark_and_persist_dependency_blocked_workers(run)
                     if not _pending_prompted_workers(run.get("workers", {})):
                         break
         except OpenCodeApiError as error:
@@ -190,21 +186,59 @@ class MultiWorkerRunOrchestrationService:
         return None
 
     def _mark_prompted_workers_failed(self, run, error):
-        mark_orchestration_start_failed(run, _pending_prompted_workers(run.get("workers", {})), error)
-        self._save(run)
+        workers = _pending_prompted_workers(run.get("workers", {}))
+        mark_orchestration_start_failed(run, workers, error)
+        self._persist_workers(run, workers)
 
-    def _save(self, run):
-        save_orchestration_run(self.store, run, now=self.now)
+    def _mark_and_persist_dependency_blocked_workers(self, run):
+        analysis = _mark_dependency_blocked_workers(run)
+        blocked_workers = [
+            run.get("workers", {}).get(worker_id)
+            for worker_id in sorted(analysis.blockers_by_worker_id)
+            if isinstance(run.get("workers", {}).get(worker_id), dict)
+        ]
+        if blocked_workers:
+            self._persist_workers(run, blocked_workers)
+        else:
+            self._persist_summary(run)
+        return analysis
+
+    def _persist_mutation(self, run, mutator):
+        return persist_run_mutation(self.store, run, mutator, now=self.now)
+
+    def _persist_worker_update(self, run, worker):
+        persist_worker_updates(
+            self.store,
+            run,
+            [worker],
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
+
+    def _persist_workers(self, run, workers):
+        persist_worker_updates(
+            self.store,
+            run,
+            workers,
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
+
+    def _persist_summary(self, run):
+        persist_run_summary(
+            self.store,
+            run,
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
 
 
 def refresh_orchestration_run_summary(run):
     _refresh_worker_run_summary(run, include_unprompted_when_no_prompts=True)
 
 
-def save_orchestration_run(store, run, *, now=None):
-    clock = now or _utc_now
-    run["updated_at"] = clock()
-    store.save_run(run)
+def _mark_run_active(run):
+    run["status"] = "active"
 
 
 def _ready_prompted_workers(workers):

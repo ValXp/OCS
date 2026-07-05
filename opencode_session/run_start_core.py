@@ -26,14 +26,14 @@ class RunStartCore:
     def __init__(
         self,
         *,
-        save_run,
+        persist_worker_update,
         refresh_run_summary,
         client_factory=OpenCodeApiClient,
         capability_detector=detect_capabilities,
         executor=execute_blocking_prompt,
         now,
     ):
-        self.save_run = save_run
+        self.persist_worker_update = persist_worker_update
         self.refresh_run_summary = refresh_run_summary
         self.client_factory = client_factory
         self.capability_detector = capability_detector
@@ -70,7 +70,7 @@ class RunStartCore:
             agent=agent,
             model=model,
             stop_after_retry=stop_after_retry,
-            on_worker_update=lambda: self.save_run(run),
+            on_worker_update=lambda: self.persist_worker_update(run, worker),
         )
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):
@@ -81,18 +81,18 @@ class RunStartCore:
             if not isinstance(worker, dict):
                 continue
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
+            self.persist_worker_update(run, worker)
             if cleanup_outcome.error is not None:
                 if first_error is None:
                     first_error = cleanup_outcome.error
                 mark_orchestration_cleanup_failed(run, worker, str(cleanup_outcome.error))
+                self.persist_worker_update(run, worker)
         if first_error is not None:
             self.refresh_run_summary(run)
-            self.save_run(run)
             return CleanupFailureOutcome(
                 EX_UNAVAILABLE,
                 f"api failure: disposable session cleanup failed: {first_error}",
             )
-        self.save_run(run)
         return None
 
 
