@@ -10,6 +10,7 @@ from opencode_session.run_persistence import persist_run_mutation, persist_run_s
 from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
+from opencode_session.worker_execution import RETRY_SCHEDULED
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_status import is_runnable_status
 from opencode_session.worker_state import (
@@ -186,7 +187,7 @@ class DependencyOrderedSerialRunOrchestrationService:
                         worker,
                         outcome.created_session_ids,
                     )
-                if outcome.kind == "retry":
+                if outcome.kind == RETRY_SCHEDULED:
                     retry_workers.append(worker)
                     continue
                 if outcome.error is not None:

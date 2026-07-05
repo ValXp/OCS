@@ -115,7 +115,7 @@ class WorkerExecutionTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-        self.assertEqual(outcome.kind, "failed")
+        self.assertEqual(outcome.kind, "terminal_failure")
         self.assertEqual(outcome.failure_category, "api")
         self.assertEqual(
             outcome.error,
@@ -210,6 +210,46 @@ class WorkerExecutionTest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_execute_worker_attempts_returns_retry_scheduled_when_requested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            worker["timeout_seconds"] = 0.05
+            worker["retry_limit"] = 1
+            worker["retryable_failures"] = ["timeout"]
+            client = FakeClient(["ses_initial", "ses_retry"])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                raise WorkerExecutionTimeout()
+
+            outcome = execute_worker_attempts(
+                client,
+                run,
+                worker,
+                "Finish the worker task",
+                CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+                stop_after_retry=True,
+            )
+
+        self.assertEqual(outcome.kind, "retry_scheduled")
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.failure_category, "timeout")
+        self.assertEqual(outcome.created_session_ids, ["ses_initial", "ses_retry"])
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", directory, None, None),
+                ("execute", "ses_initial", "Finish the worker task"),
+                ("create", directory, None, None),
+            ],
+        )
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["next_eligible_action"], "retry")
+        self.assertEqual(worker["session_id"], "ses_retry")
 
 
 if __name__ == "__main__":
