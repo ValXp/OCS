@@ -416,6 +416,127 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency:build"])
         self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
+    def test_start_blocks_workers_in_dependency_cycle(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with FakeOpenCodeServer() as server:
+                configure_multi_worker_server(server)
+                init = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                worker_a = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "a",
+                    "--role",
+                    "build",
+                    "--prompt",
+                    "Run worker A",
+                    "--depends-on",
+                    "b",
+                )
+                worker_b = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "b",
+                    "--role",
+                    "review",
+                    "--prompt",
+                    "Run worker B",
+                    "--depends-on",
+                    "a",
+                )
+                start = run_ocs("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, format_completed_process(init))
+        self.assertEqual(worker_a.returncode, 0, format_completed_process(worker_a))
+        self.assertEqual(worker_b.returncode, 0, format_completed_process(worker_b))
+        self.assertEqual(start.returncode, 75)
+        self.assertIn("run=demo status=blocked", start.stdout)
+        self.assertEqual(status.returncode, 0, format_completed_process(status))
+        self.assertFalse(any(path[0] == "POST" for path in request_paths(requests)))
+        payload = load_json(self, status, "status")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["workers"]["a"]["status"], "blocked")
+        self.assertEqual(payload["workers"]["a"]["blockers"], ["dependency-cycle:a->b->a"])
+        self.assertEqual(payload["workers"]["a"]["next_eligible_action"], "resolve_blocker")
+        self.assertEqual(payload["workers"]["b"]["status"], "blocked")
+        self.assertEqual(payload["workers"]["b"]["blockers"], ["dependency-cycle:a->b->a"])
+        self.assertEqual(payload["workers"]["b"]["next_eligible_action"], "resolve_blocker")
+
+    def test_start_blocks_prompted_worker_waiting_on_unprompted_worker(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            with FakeOpenCodeServer() as server:
+                configure_multi_worker_server(server)
+                init = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "init",
+                    "demo",
+                    "--directory",
+                    directory,
+                    "--server",
+                    server.url,
+                )
+                setup = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "setup",
+                    "--role",
+                    "build",
+                )
+                review = run_ocs(
+                    "run",
+                    "--store",
+                    store,
+                    "worker",
+                    "demo",
+                    "review",
+                    "--role",
+                    "review",
+                    "--prompt",
+                    "Review the implementation",
+                    "--depends-on",
+                    "setup",
+                )
+                start = run_ocs("run", "--store", store, "start", "demo")
+                requests = list(server.requests)
+            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, format_completed_process(init))
+        self.assertEqual(setup.returncode, 0, format_completed_process(setup))
+        self.assertEqual(review.returncode, 0, format_completed_process(review))
+        self.assertEqual(start.returncode, 75)
+        self.assertIn("run=demo status=blocked", start.stdout)
+        self.assertEqual(status.returncode, 0, format_completed_process(status))
+        self.assertFalse(any(path[0] == "POST" for path in request_paths(requests)))
+        payload = load_json(self, status, "status")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["workers"]["setup"]["status"], "queued")
+        self.assertEqual(payload["workers"]["setup"].get("prompt"), None)
+        self.assertEqual(payload["workers"]["review"]["status"], "blocked")
+        self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency-not-runnable:setup"])
+        self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+
     def test_start_returns_partial_failure_exit_code_when_some_workers_complete_before_failure(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:
