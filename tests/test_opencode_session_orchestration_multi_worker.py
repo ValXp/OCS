@@ -89,6 +89,31 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(analysis.dependency_blockers_by_worker_id, expected_blockers)
         self.assertEqual(analysis.blockers_by_worker_id, expected_blockers)
 
+    def test_ready_worker_ids_use_next_eligible_action_for_active_workers(self):
+        workers = {
+            "retry": {
+                "id": "retry",
+                "prompt": "Retry transient failure",
+                "status": "active",
+                "next_eligible_action": "retry",
+            },
+            "start": {
+                "id": "start",
+                "prompt": "Start queued worker",
+                "status": "queued",
+            },
+            "wait": {
+                "id": "wait",
+                "prompt": "Wait for existing worker",
+                "status": "active",
+                "next_eligible_action": "wait",
+            },
+        }
+
+        analysis = analyze_worker_dependencies(workers)
+
+        self.assertEqual(analysis.ready_worker_ids, ("retry", "start"))
+
     def test_schedule_tick_returns_ready_workers_and_block_transitions_without_mutation(self):
         workers = {
             "build": {"id": "build", "prompt": "Build", "status": "failed"},

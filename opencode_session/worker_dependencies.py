@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 
-from opencode_session.worker_status import (
-    is_dependency_blockable_status,
+from opencode_session.worker_model import (
+    is_dependency_blockable_worker,
+    is_executable_worker,
     is_failed_dependency_status,
     is_runnable_status,
+    worker_has_prompt,
 )
 
 
@@ -192,24 +194,15 @@ def _non_runnable_dependency(worker):
 
 
 def _runnable_prompted_worker(worker):
-    return (
-        isinstance(worker, dict)
-        and _worker_has_prompt(worker)
-        and is_runnable_status(worker.get("status"))
-    )
+    return is_executable_worker(worker)
 
 
 def _dependency_blockable_prompted_worker(worker):
-    return (
-        isinstance(worker, dict)
-        and _worker_has_prompt(worker)
-        and is_dependency_blockable_status(worker.get("status"))
-    )
+    return is_dependency_blockable_worker(worker)
 
 
 def _worker_has_prompt(worker):
-    prompt = worker.get("prompt")
-    return prompt is not None and bool(str(prompt))
+    return worker_has_prompt(worker)
 
 
 def _worker_dependencies(worker):

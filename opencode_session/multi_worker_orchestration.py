@@ -18,7 +18,7 @@ from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.worker_execution import RETRY_SCHEDULED
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_status import is_runnable_status
+from opencode_session.worker_model import is_executable_worker
 from opencode_session.worker_state import (
     EX_ABORTED,
     EX_BLOCKED,
@@ -326,8 +326,7 @@ def _pending_prompted_worker_ids(workers, *, blocked_worker_ids=()):
         for worker_id in sorted(workers)
         if worker_id not in blocked_worker_ids
         and isinstance(workers.get(worker_id), dict)
-        and _worker_prompt(workers[worker_id])
-        and is_runnable_status(workers[worker_id].get("status"))
+        and is_executable_worker(workers[worker_id])
     )
 
 
