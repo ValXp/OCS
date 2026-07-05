@@ -204,6 +204,7 @@ class SingleWorkerOrchestrationCliTest(unittest.TestCase):
         payload = load_json(self, status, "status")
         self.assertEqual(payload["status"], "aborted")
         self.assertEqual(payload["workers"]["worker"]["status"], "aborted")
+        self.assertEqual(payload["workers"]["worker"]["lifecycle_state"], "aborted")
         self.assertEqual(payload["workers"]["worker"]["result"]["terminal_state"], "aborted")
         self.assertEqual(payload["workers"]["worker"]["next_eligible_action"], "none")
 

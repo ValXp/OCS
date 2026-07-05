@@ -313,8 +313,8 @@ def reduce_worker_lifecycle(worker_id, event, **data):
 
     if event == "result_applied":
         result = data["result"]
-        status = result["status"]
-        lifecycle_state = WORKER_LIFECYCLE_DONE_COLLECT if status == WORKER_STATUS_DONE else WORKER_LIFECYCLE_FAILED_TERMINAL
+        status = short_status(result["status"])
+        lifecycle_state = _result_lifecycle_state(status)
         set_fields = _lifecycle_set_fields(worker_id, lifecycle_state)
         set_fields["result"] = deepcopy(result)
         _set_if_not_unset(set_fields, "timeout_started_at", data.get("timeout_started_at", _UNSET))
@@ -356,6 +356,18 @@ def _timeout_lifecycle_state(status, retry_available):
     if status == WORKER_STATUS_ABORTED:
         return WORKER_LIFECYCLE_TIMEOUT_ABORTED
     return WORKER_LIFECYCLE_TIMEOUT_RETRY if retry_available else WORKER_LIFECYCLE_TIMEOUT_TERMINAL
+
+
+def _result_lifecycle_state(status):
+    if status == WORKER_STATUS_DONE:
+        return WORKER_LIFECYCLE_DONE_COLLECT
+    if status == WORKER_STATUS_ABORTED:
+        return WORKER_LIFECYCLE_ABORTED
+    if status == WORKER_STATUS_TIMEOUT:
+        return WORKER_LIFECYCLE_TIMEOUT_TERMINAL
+    if status == WORKER_STATUS_BLOCKED:
+        return WORKER_LIFECYCLE_BLOCKED_DEPENDENCY
+    return WORKER_LIFECYCLE_FAILED_TERMINAL
 
 
 def _latest_prompt_ids_are_retry_marker(latest_worker):
