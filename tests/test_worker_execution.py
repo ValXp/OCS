@@ -1,7 +1,9 @@
+from copy import deepcopy
 import tempfile
 import unittest
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_start_core import RunStartCore
 from opencode_session.worker_execution import (
     WorkerExecutionTimeout,
@@ -168,8 +170,9 @@ class WorkerExecutionTest(unittest.TestCase):
 
             def persist_worker_transition(run, transition):
                 persisted_statuses.append(transition.set_fields.get("status"))
-                updated = transition.apply_to(run.setdefault("workers", {}))
-                return [updated]
+                persisted_run = deepcopy(run)
+                updated = transition.apply_to(persisted_run.setdefault("workers", {}))
+                return PersistedWorkerTransitions(persisted_run, [updated])
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))

@@ -1,6 +1,12 @@
-from copy import deepcopy
+from dataclasses import dataclass
 
 from opencode_session.worker_state import WorkerTransition
+
+
+@dataclass(frozen=True)
+class PersistedWorkerTransitions:
+    run: dict
+    workers: list
 
 
 def persist_run_mutation(store, run, mutator, *, now):
@@ -10,9 +16,7 @@ def persist_run_mutation(store, run, mutator, *, now):
         mutator(latest_run)
         latest_run["updated_at"] = now()
 
-    persisted = store.update_run(name, update)
-    replace_run_snapshot(run, persisted)
-    return run
+    return store.update_run(name, update)
 
 
 def persist_worker_snapshot_update(store, run, worker, *, refresh_run_summary, now):
@@ -36,12 +40,14 @@ def persist_worker_transitions(store, run, transitions, *, refresh_run_summary, 
         latest_run["updated_at"] = now()
 
     persisted = store.update_run(name, update)
-    replace_run_snapshot(run, persisted)
-    return [
-        run["workers"][transition.worker_id]
-        for transition in transitions
-        if transition.worker_id in run.get("workers", {})
-    ]
+    return PersistedWorkerTransitions(
+        persisted,
+        [
+            persisted["workers"][transition.worker_id]
+            for transition in transitions
+            if transition.worker_id in persisted.get("workers", {})
+        ],
+    )
 
 
 def persist_run_summary(store, run, *, refresh_run_summary, now):
@@ -51,11 +57,4 @@ def persist_run_summary(store, run, *, refresh_run_summary, now):
         refresh_run_summary(latest_run)
         latest_run["updated_at"] = now()
 
-    persisted = store.update_run(name, update)
-    replace_run_snapshot(run, persisted)
-    return run
-
-
-def replace_run_snapshot(target, source):
-    target.clear()
-    target.update(deepcopy(source))
+    return store.update_run(name, update)

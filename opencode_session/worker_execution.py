@@ -40,6 +40,7 @@ class WorkerExecutionOutcome:
     created_session_ids: list = field(default_factory=list)
     error: Optional[str] = None
     failure_category: Optional[str] = None
+    run: Optional[DomainRecord] = None
 
 
 @dataclass

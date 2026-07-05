@@ -76,6 +76,7 @@ class OrchestrationExecutionState:
 
 @dataclass(frozen=True)
 class WorkerBatchExecutionResult:
+    run: DomainRecord
     retry_workers: tuple
     first_error_outcome: Any = None
     fail_fast_outcome: Any = None
@@ -107,21 +108,22 @@ class DurableDependencyScheduler:
     def persist_next_tick(self, run):
         tick = self.planner.plan(run.get("workers", {}))
         if tick.dependency_blocked_transitions:
-            persist_worker_transitions(
+            result = persist_worker_transitions(
                 self.store,
                 run,
                 tick.dependency_blocked_transitions,
                 refresh_run_summary=refresh_orchestration_run_summary,
                 now=self.now,
             )
+            return result.run, tick
         else:
-            persist_run_summary(
+            run = persist_run_summary(
                 self.store,
                 run,
                 refresh_run_summary=refresh_orchestration_run_summary,
                 now=self.now,
             )
-        return tick
+        return run, tick
 
 
 class WorkerExecutionCoordinator:
@@ -132,24 +134,24 @@ class WorkerExecutionCoordinator:
 
     def execute_scheduled_workers(self, run, schedule_tick, execution_state, *, cleanup, execution_policy):
         while schedule_tick.ready_worker_ids:
-            outcome = self._execute_schedule_tick(
+            run, outcome = self._execute_schedule_tick(
                 run,
                 schedule_tick,
                 execution_state,
                 cleanup=cleanup,
                 execution_policy=execution_policy,
             )
-            schedule_tick = self.scheduler.persist_next_tick(run)
+            run, schedule_tick = self.scheduler.persist_next_tick(run)
             if outcome is not None:
                 if execution_state.first_error_outcome is None:
                     execution_state.first_error_outcome = outcome
                 if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                    return outcome
-        return None
+                    return run, outcome
+        return run, None
 
     def cleanup_after_execution(self, run, execution_state, *, cleanup):
         if not cleanup or execution_state is None or not execution_state.created_session_ids_by_worker:
-            return None
+            return run, None
         return self._cleanup_created_workers(
             execution_state.client,
             run,
@@ -194,10 +196,10 @@ class WorkerExecutionCoordinator:
             if first_error_outcome is None:
                 first_error_outcome = batch_result.first_error_outcome
             if batch_result.fail_fast_outcome is not None:
-                return batch_result.fail_fast_outcome
-            self.persist_summary(run)
+                return batch_result.run, batch_result.fail_fast_outcome
+            run = self.persist_summary(batch_result.run)
             attempt_workers = list(batch_result.retry_workers)
-        return first_error_outcome
+        return run, first_error_outcome
 
     def _execute_worker_attempt_batch(
         self,
@@ -221,15 +223,17 @@ class WorkerExecutionCoordinator:
                 cleanup=cleanup,
                 created_session_ids_by_worker=created_session_ids_by_worker,
             )
+            run = outcome.run or run
+            current_worker = run.get("workers", {}).get(worker.get("id"), worker)
             if outcome.kind == RETRY_SCHEDULED:
-                retry_workers.append(run.get("workers", {}).get(worker.get("id"), worker))
+                retry_workers.append(current_worker)
                 continue
             if outcome.error is not None:
                 if first_error_outcome is None:
                     first_error_outcome = outcome
                 if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                    return WorkerBatchExecutionResult(tuple(retry_workers), first_error_outcome, outcome)
-        return WorkerBatchExecutionResult(tuple(retry_workers), first_error_outcome)
+                    return WorkerBatchExecutionResult(run, tuple(retry_workers), first_error_outcome, outcome)
+        return WorkerBatchExecutionResult(run, tuple(retry_workers), first_error_outcome)
 
     def _execute_single_ready_worker(
         self,
@@ -252,18 +256,23 @@ class WorkerExecutionCoordinator:
             stop_after_retry=True,
         )
         if cleanup:
+            current_worker = (outcome.run or run).get("workers", {}).get(worker.get("id"), worker)
             remember_created_worker_sessions(
                 created_session_ids_by_worker,
-                worker,
+                current_worker,
                 outcome.created_session_ids,
             )
         return outcome
 
     def _cleanup_created_workers(self, client, run, created_session_ids_by_worker):
-        cleanup_failure = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
-        if cleanup_failure is not None:
-            return DependencyOrderedSerialRunStartOutcome(run, cleanup_failure.exit_code, cleanup_failure.error)
-        return None
+        cleanup_result = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
+        if cleanup_result.error is not None:
+            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
+                cleanup_result.run,
+                cleanup_result.exit_code,
+                cleanup_result.error,
+            )
+        return cleanup_result.run, None
 
 
 class DependencyOrderedSerialRunOrchestrationService:
@@ -322,7 +331,7 @@ class DependencyOrderedSerialRunOrchestrationService:
         return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
 
     def _start_prompted_workers(self, run, *, cleanup=False, execution_policy=EXECUTION_POLICY_FAIL_FAST):
-        schedule_tick = self.scheduler.persist_next_tick(run)
+        run, schedule_tick = self.scheduler.persist_next_tick(run)
         early_outcome = self._outcome_if_no_ready_workers(run, schedule_tick)
         if early_outcome is not None:
             return early_outcome
@@ -335,8 +344,8 @@ class DependencyOrderedSerialRunOrchestrationService:
                 return self._unsupported_probe_outcome(run, probe_outcome)
 
             execution_state = OrchestrationExecutionState(probe_outcome.client, probe_outcome.capabilities)
-            self._activate_run(run)
-            fail_fast_outcome = self.execution.execute_scheduled_workers(
+            run = self._activate_run(run)
+            run, fail_fast_outcome = self.execution.execute_scheduled_workers(
                 run,
                 schedule_tick,
                 execution_state,
@@ -344,16 +353,16 @@ class DependencyOrderedSerialRunOrchestrationService:
                 execution_policy=execution_policy,
             )
             if fail_fast_outcome is not None:
-                cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+                run, cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
                 return cleanup_error or self._execution_outcome(run, fail_fast_outcome)
         except OpenCodeApiError as error:
-            self._mark_prompted_workers_failed(run, str(error))
-            cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+            run = self._mark_prompted_workers_failed(run, str(error))
+            run, cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
             if cleanup_error:
                 return cleanup_error
             return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
 
-        cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
+        run, cleanup_error = self.execution.cleanup_after_execution(run, execution_state, cleanup=cleanup)
         return cleanup_error or self._execution_outcome(run, execution_state.first_error_outcome)
 
     def _outcome_if_no_ready_workers(self, run, schedule_tick):
@@ -365,12 +374,11 @@ class DependencyOrderedSerialRunOrchestrationService:
         return self.core.probe_capabilities(run)
 
     def _unsupported_probe_outcome(self, run, probe_outcome):
-        self._mark_prompted_workers_failed(run, probe_outcome.start_error)
+        run = self._mark_prompted_workers_failed(run, probe_outcome.start_error)
         return DependencyOrderedSerialRunStartOutcome(run, EX_UNSUPPORTED, probe_outcome.start_error)
 
     def _activate_run(self, run):
-        run["status"] = "active"
-        self._persist_mutation(run, _mark_run_active)
+        return self._persist_mutation(run, _mark_run_active)
 
     def _execution_outcome(self, run, first_error_outcome):
         return DependencyOrderedSerialRunStartOutcome(
@@ -382,7 +390,7 @@ class DependencyOrderedSerialRunOrchestrationService:
     def _mark_prompted_workers_failed(self, run, error):
         workers = _pending_prompted_workers(run.get("workers", {}))
         transitions = mark_orchestration_start_failed(run, workers, error)
-        self._persist_transitions(run, transitions)
+        return self._persist_transitions(run, transitions)
 
     def _persist_mutation(self, run, mutator):
         return persist_run_mutation(self.store, run, mutator, now=self.now)
@@ -397,16 +405,17 @@ class DependencyOrderedSerialRunOrchestrationService:
         )
 
     def _persist_transitions(self, run, transitions):
-        persist_worker_transitions(
+        result = persist_worker_transitions(
             self.store,
             run,
             transitions,
             refresh_run_summary=refresh_orchestration_run_summary,
             now=self.now,
         )
+        return result.run
 
     def _persist_summary(self, run):
-        persist_run_summary(
+        return persist_run_summary(
             self.store,
             run,
             refresh_run_summary=refresh_orchestration_run_summary,

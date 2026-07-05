@@ -81,6 +81,34 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(set(run["workers"]), {"planner", "builder"})
 
+    def test_worker_snapshot_persistence_returns_new_run_without_mutating_loaded_run(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active")
+            run = run_store.load_run("demo")
+            build_worker = dict(run["workers"]["build"])
+            build_worker["status"] = "done"
+            build_worker["result"] = {
+                "session_id": "ses_build",
+                "status": "done",
+                "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
+            }
+            build_worker["output_refs"] = ["assistant:msg_build"]
+
+            persisted = persist_worker_snapshot_update(
+                run_store,
+                run,
+                build_worker,
+                refresh_run_summary=refresh_run_summary,
+                now=lambda: "2026-07-03T00:00:00Z",
+            ).run
+
+        self.assertEqual(run["workers"]["build"]["status"], "active")
+        self.assertNotIn("result", run["workers"]["build"])
+        self.assertEqual(persisted["workers"]["build"]["status"], "done")
+        self.assertEqual(persisted["output_refs"], ["build:msg_build"])
+
     def test_worker_patch_preserves_concurrent_prompt_id_on_other_worker(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)

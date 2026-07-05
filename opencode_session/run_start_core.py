@@ -25,9 +25,16 @@ class CapabilityProbeOutcome:
 
 
 @dataclass
-class CleanupFailureOutcome:
+class PersistedTransitionOutcome:
+    run: DomainRecord
+    worker: Optional[DomainRecord] = None
+
+
+@dataclass
+class CleanupWorkersOutcome:
+    run: DomainRecord
     exit_code: int
-    error: str
+    error: Optional[str] = None
 
 
 class RunStartCore:
@@ -79,11 +86,15 @@ class RunStartCore:
         )
         if session_outcome.created_session_id is not None:
             created_session_ids.append(session_outcome.created_session_id)
-        worker = self._persist_transition(run, WorkerTransition.provisioned(worker))
+        persisted = self._persist_transition(run, WorkerTransition.provisioned(worker))
+        run = persisted.run
+        worker = persisted.worker
 
         while True:
             active_transition = mark_worker_active(worker, now=self.now)
-            worker = self._persist_transition(run, active_transition)
+            persisted = self._persist_transition(run, active_transition)
+            run = persisted.run
+            worker = persisted.worker
             attempt = execute_single_worker_attempt(
                 client,
                 worker,
@@ -94,7 +105,9 @@ class RunStartCore:
             transition = apply_worker_attempt_transition(client, run, worker, attempt, now=self.now, agent=agent, model=model)
             if transition.created_session_id is not None:
                 created_session_ids.append(transition.created_session_id)
-            worker = self._persist_transition(run, transition.worker_transition)
+            persisted = self._persist_transition(run, transition.worker_transition)
+            run = persisted.run
+            worker = persisted.worker
             if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
                 continue
             return WorkerExecutionOutcome(
@@ -102,32 +115,35 @@ class RunStartCore:
                 created_session_ids,
                 transition.error,
                 transition.failure_category,
+                run,
             )
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):
         first_error = None
+        current_run = run
         for worker_id, session_ids in created_session_ids_by_worker.items():
-            worker = run.get("workers", {}).get(worker_id)
+            worker = current_run.get("workers", {}).get(worker_id)
             if not isinstance(worker, dict):
                 continue
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
-            self._persist_transition(run, WorkerTransition.cleanup_updated(worker))
+            persisted = self._persist_transition(current_run, WorkerTransition.cleanup_updated(worker))
+            current_run = persisted.run
             if cleanup_outcome.error is not None:
                 if first_error is None:
                     first_error = cleanup_outcome.error
         if first_error is not None:
-            self.refresh_run_summary(run)
-            return CleanupFailureOutcome(
+            self.refresh_run_summary(current_run)
+            return CleanupWorkersOutcome(
+                current_run,
                 EX_UNAVAILABLE,
                 f"api failure: disposable session cleanup failed: {first_error}",
             )
-        return None
+        return CleanupWorkersOutcome(current_run, 0)
 
     def _persist_transition(self, run, transition):
-        persisted_workers = self.persist_worker_transition(run, transition)
-        if persisted_workers:
-            return persisted_workers[0]
-        return run.get("workers", {}).get(transition.worker_id)
+        result = self.persist_worker_transition(run, transition)
+        worker = result.workers[0] if result.workers else result.run.get("workers", {}).get(transition.worker_id)
+        return PersistedTransitionOutcome(result.run, worker)
 
 
 def remember_created_worker_sessions(created_session_ids_by_worker, worker, session_ids):

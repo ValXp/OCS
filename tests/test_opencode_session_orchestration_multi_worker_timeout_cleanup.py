@@ -7,6 +7,7 @@ from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunStartRequest,
 )
 from opencode_session.run_start_core import RunStartCore
+from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
 
@@ -71,8 +72,14 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
             },
         }
         persisted_worker_ids = []
+
+        def persist_worker_transition(run, transition):
+            persisted_worker_ids.append(transition.worker_id)
+            updated = transition.apply_to(run.setdefault("workers", {}))
+            return PersistedWorkerTransitions(run, [updated])
+
         core = RunStartCore(
-            persist_worker_transition=lambda run, transition: persisted_worker_ids.append(transition.worker_id),
+            persist_worker_transition=persist_worker_transition,
             refresh_run_summary=lambda run: None,
             now=lambda: "2026-07-03T00:00:00Z",
         )
@@ -91,7 +98,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
             {"requested": True, "deleted": False, "error": first_error},
         )
         self.assertEqual(run["workers"]["alpha"]["status"], "done")
-        self.assertNotIn("failure_reason", run["workers"]["alpha"])
+        self.assertIsNone(run["workers"]["alpha"].get("failure_reason"))
         self.assertEqual(run["workers"]["beta"]["cleanup"], {"requested": True, "deleted": True})
         self.assertEqual(persisted_worker_ids, ["alpha", "beta"])
 
