@@ -13,7 +13,7 @@ from opencode_session.status_policy import (
     exit_code_for_status,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_status import is_blocked_status
+from opencode_session.worker_model import next_eligible_worker_action, worker_retry_available
 
 
 WORKER_LIST_FIELDS = (
@@ -174,20 +174,7 @@ def normalize_worker(worker, worker_id):
 
 
 def next_eligible_action(worker):
-    status = worker.get("status")
-    if status == "queued":
-        return "start"
-    if status == "active":
-        return "retry" if worker.get("next_eligible_action") == "retry" else "wait"
-    if is_blocked_status(status):
-        return "resolve_blocker"
-    if status == "done":
-        return "collect"
-    if status == "timeout" and worker_retry_available(worker, "timeout"):
-        return "retry"
-    if status == "failed" and worker_retry_available(worker):
-        return "retry"
-    return "none"
+    return next_eligible_worker_action(worker)
 
 
 def ensure_worker(run, worker_id, *, role):
@@ -254,24 +241,6 @@ def schedule_worker_retry(worker, category, reason):
     worker["last_failure_reason"] = reason
     worker["next_eligible_action"] = "retry"
     return True
-
-
-def worker_retry_available(worker, category=None):
-    if worker.get("failure_retryable") is False:
-        return False
-    retryable = set(worker.get("retryable_failures") or [])
-    if not retryable:
-        return False
-    if category is None:
-        category = worker.get("failure_category") or worker.get("last_failure_category")
-    if category and category not in retryable and "all" not in retryable:
-        return False
-    try:
-        retry_count = int(worker.get("retry_count") or 0)
-        retry_limit = int(worker.get("retry_limit") or 0)
-    except (TypeError, ValueError):
-        return False
-    return retry_count < retry_limit
 
 
 def worker_timeout_reason(worker):

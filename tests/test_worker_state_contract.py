@@ -11,6 +11,7 @@ from opencode_session.worker_state import (
     refresh_run_summary,
     schedule_worker_retry,
 )
+from opencode_session.worker_model import WorkerSchedulingState
 
 
 class WorkerStateContractTest(unittest.TestCase):
@@ -34,6 +35,16 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["prompt_ids"], [])
         self.assertEqual(worker["timeout_policy"], "timeout")
         self.assertEqual(worker["next_eligible_action"], "retry")
+
+    def test_worker_scheduling_state_derives_canonical_execution_action(self):
+        queued = {"id": "build", "prompt": "Build", "status": "queued"}
+        waiting = {"id": "review", "prompt": "Review", "status": "active", "next_eligible_action": "wait"}
+        retrying = {"id": "test", "prompt": "Test", "status": "active", "next_eligible_action": "retry"}
+
+        self.assertTrue(WorkerSchedulingState.from_worker(queued).can_execute())
+        self.assertFalse(WorkerSchedulingState.from_worker(waiting).can_execute())
+        self.assertEqual(WorkerSchedulingState.from_worker(waiting).next_eligible_action, "wait")
+        self.assertTrue(WorkerSchedulingState.from_worker(retrying).can_execute())
 
     def test_mark_worker_active_sets_waiting_action_and_timeout_start(self):
         worker = normalize_worker({"timeout_seconds": 30}, "builder")
