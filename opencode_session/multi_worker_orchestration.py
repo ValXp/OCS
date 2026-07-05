@@ -10,7 +10,6 @@ from opencode_session.run_persistence import (
     persist_run_mutation,
     persist_run_summary,
     persist_worker_transitions,
-    persist_worker_updates,
 )
 from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
 from opencode_session.run_start_policy import mark_orchestration_start_failed
@@ -223,7 +222,7 @@ class WorkerExecutionCoordinator:
                 created_session_ids_by_worker=created_session_ids_by_worker,
             )
             if outcome.kind == RETRY_SCHEDULED:
-                retry_workers.append(worker)
+                retry_workers.append(run.get("workers", {}).get(worker.get("id"), worker))
                 continue
             if outcome.error is not None:
                 if first_error_outcome is None:
@@ -286,7 +285,7 @@ class DependencyOrderedSerialRunOrchestrationService:
         self.now = now or _utc_now
         self.scheduler = DurableDependencyScheduler(self.store, now=self.now)
         self.core = RunStartCore(
-            persist_worker_update=self._persist_worker_update,
+            persist_worker_transition=self._persist_worker_transition,
             refresh_run_summary=refresh_orchestration_run_summary,
             client_factory=self.client_factory,
             capability_detector=self.capability_detector,
@@ -388,11 +387,11 @@ class DependencyOrderedSerialRunOrchestrationService:
     def _persist_mutation(self, run, mutator):
         return persist_run_mutation(self.store, run, mutator, now=self.now)
 
-    def _persist_worker_update(self, run, worker):
-        persist_worker_updates(
+    def _persist_worker_transition(self, run, transition):
+        return persist_worker_transitions(
             self.store,
             run,
-            [worker],
+            [transition],
             refresh_run_summary=refresh_orchestration_run_summary,
             now=self.now,
         )

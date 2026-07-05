@@ -123,9 +123,7 @@ def provision_worker_session(
     return WorkerSessionOutcome(worker.get("session_id"))
 
 
-def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor, now, on_worker_update=None):
-    active_transition = mark_worker_active(worker, now=now)
-    _notify_worker_update(on_worker_update, worker, active_transition)
+def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor):
     attempt_session_id = worker["session_id"]
     try:
         result = _call_worker_with_deadline(
@@ -191,7 +189,6 @@ def execute_worker_attempts(
     model=None,
     create_session=True,
     stop_after_retry=False,
-    on_worker_update=None,
 ):
     created_session_ids = []
     session_outcome = provision_worker_session(
@@ -205,23 +202,19 @@ def execute_worker_attempts(
     )
     if session_outcome.created_session_id is not None:
         created_session_ids.append(session_outcome.created_session_id)
-    if create_session:
-        _notify_worker_update(on_worker_update, worker, WorkerTransition.provisioned(worker))
 
     while True:
+        mark_worker_active(worker, now=now)
         attempt = execute_single_worker_attempt(
             client,
             worker,
             prompt,
             capabilities,
             executor=executor,
-            now=now,
-            on_worker_update=on_worker_update,
         )
         transition = apply_worker_attempt_transition(client, run, worker, attempt, now=now, agent=agent, model=model)
         if transition.created_session_id is not None:
             created_session_ids.append(transition.created_session_id)
-        _notify_worker_update(on_worker_update, worker, transition.worker_transition)
         if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
             continue
         return WorkerExecutionOutcome(
@@ -328,8 +321,3 @@ def _accepts_keyword(callable_object, name):
             if parameter.name == name:
                 return True
     return False
-
-
-def _notify_worker_update(callback, worker, transition):
-    if callback is not None and transition is not None:
-        callback(worker, transition)

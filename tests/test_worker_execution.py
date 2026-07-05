@@ -2,6 +2,7 @@ import tempfile
 import unittest
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.run_start_core import RunStartCore
 from opencode_session.worker_execution import (
     WorkerExecutionTimeout,
     cleanup_created_worker_sessions,
@@ -158,30 +159,35 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertNotIn("timeout_retry_sessions", worker)
         self.assertNotIn("result", worker)
 
-    def test_execute_worker_attempts_persists_active_transition_before_blocking_executor(self):
+    def test_run_start_core_persists_active_transition_before_blocking_executor(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
             client = FakeClient(["ses_initial"])
             persisted_statuses = []
 
-            def persist_worker_update(_updated_worker, transition):
+            def persist_worker_transition(run, transition):
                 persisted_statuses.append(transition.set_fields.get("status"))
+                updated = transition.apply_to(run.setdefault("workers", {}))
+                return [updated]
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
                 self.assertIn("active", persisted_statuses)
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
-            outcome = execute_worker_attempts(
+            core = RunStartCore(
+                persist_worker_transition=persist_worker_transition,
+                refresh_run_summary=lambda run: None,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+            outcome = core.execute_worker(
                 client,
                 run,
                 worker,
                 "Finish the worker task",
                 CAPABILITIES,
-                executor=execute_prompt,
-                now=lambda: "2026-07-03T00:00:00Z",
-                on_worker_update=persist_worker_update,
             )
 
         self.assertEqual(outcome.kind, "completed")

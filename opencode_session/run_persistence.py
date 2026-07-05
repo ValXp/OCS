@@ -11,17 +11,8 @@ def persist_run_mutation(store, run, mutator, *, now):
         latest_run["updated_at"] = now()
 
     persisted = store.update_run(name, update)
-    replace_mapping_in_place(run, persisted)
+    replace_run_snapshot(run, persisted)
     return run
-
-
-def persist_worker_update(store, run, worker, *, refresh_run_summary, now):
-    return persist_worker_updates(store, run, [worker], refresh_run_summary=refresh_run_summary, now=now)
-
-
-def persist_worker_updates(store, run, workers, *, refresh_run_summary, now):
-    updates = [worker for worker in workers if isinstance(worker, WorkerTransition)]
-    return persist_worker_transitions(store, run, updates, refresh_run_summary=refresh_run_summary, now=now)
 
 
 def persist_worker_snapshot_update(store, run, worker, *, refresh_run_summary, now):
@@ -45,7 +36,7 @@ def persist_worker_transitions(store, run, transitions, *, refresh_run_summary, 
         latest_run["updated_at"] = now()
 
     persisted = store.update_run(name, update)
-    replace_mapping_in_place(run, persisted)
+    replace_run_snapshot(run, persisted)
     return [
         run["workers"][transition.worker_id]
         for transition in transitions
@@ -61,19 +52,10 @@ def persist_run_summary(store, run, *, refresh_run_summary, now):
         latest_run["updated_at"] = now()
 
     persisted = store.update_run(name, update)
-    replace_mapping_in_place(run, persisted)
+    replace_run_snapshot(run, persisted)
     return run
 
 
-def replace_mapping_in_place(target, source):
-    for key in list(target):
-        if key not in source:
-            del target[key]
-    for key, value in source.items():
-        existing = target.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            replace_mapping_in_place(existing, value)
-        elif isinstance(existing, list) and isinstance(value, list):
-            existing[:] = deepcopy(value)
-        else:
-            target[key] = deepcopy(value)
+def replace_run_snapshot(target, source):
+    target.clear()
+    target.update(deepcopy(source))
