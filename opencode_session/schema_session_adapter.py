@@ -12,7 +12,7 @@ class SessionRouteAdapter:
         if isinstance(payload, list):
             return [self.normalize_record(item) for item in payload]
         if not isinstance(payload, dict):
-            return payload
+            return unknown_session_record(payload)
 
         normalized = dict(payload)
         data = normalized.get("data")
@@ -33,11 +33,13 @@ class SessionRouteAdapter:
 
     def normalize_record(self, record) -> NormalizedSessionRecord:
         if not isinstance(record, dict):
-            return record
+            return unknown_session_record(record)
         if isinstance(record.get("data"), dict):
             normalized = dict(record)
             normalized["data"] = self.normalize_record(record["data"])
             return normalized
+        if not self.is_known_record(record):
+            return unknown_session_record(record)
 
         normalized = dict(record)
         set_missing(normalized, "id", self.value(record, "id", "sessionID", "sessionId", "session_id"))
@@ -81,6 +83,29 @@ class SessionRouteAdapter:
                 if name in {"updatedAt", "updated_at"} and time.get("updated") is not None:
                     return time.get("updated")
         return None
+
+    def is_known_record(self, session):
+        return any(
+            self.value(session, *names) is not None
+            for names in (
+                ("id", "sessionID", "sessionId", "session_id"),
+                ("directory", "cwd"),
+                ("title", "name"),
+                ("agent", "agentID", "agentId", "agent_id"),
+                ("model", "modelID", "modelId", "model_id"),
+                ("tokens", "token", "tokenUsage", "token_usage", "usage"),
+                ("createdAt", "created_at", "created"),
+                ("updatedAt", "updated_at", "updated"),
+            )
+        )
+
+
+def unknown_session_record(raw) -> NormalizedSessionRecord:
+    if isinstance(raw, dict):
+        normalized = dict(raw)
+        normalized["schema_status"] = "unknown"
+        return normalized
+    return {"schema_status": "unknown", "raw": raw}
 
 
 SESSION_ADAPTER = SessionRouteAdapter()

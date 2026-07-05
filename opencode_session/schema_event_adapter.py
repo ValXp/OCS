@@ -15,6 +15,15 @@ from opencode_session.status import short_status
 SUCCESS_STATUSES = {"complete", "completed", "done", "idle", "success", "succeeded"}
 ABORT_STATUSES = {"abort", "aborted", "cancelled", "canceled"}
 
+BLOCKER_EVENT_TYPES = frozenset({"permission.requested", "question.requested", "blocker.requested"})
+ADMISSION_EVENT_TYPES = frozenset({"session.prompt.admitted", "session.prompt.promoted", "session.prompt.queued"})
+PROMPT_EVENT_TYPES = frozenset({"session.prompt.started", "session.prompt.updated", "session.prompt.completed"})
+STEP_EVENT_TYPES = frozenset({"session.step.started", "session.step.updated", "session.step.completed"})
+STATUS_EVENT_TYPES = frozenset({"session.status", "session.idle"})
+TEXT_EVENT_TYPES = frozenset({"message.part.updated", "message.part.delta", "message.text.delta"})
+TOOL_EVENT_TYPES = frozenset({"tool.execute.started", "tool.execute.updated", "tool.execute.completed"})
+ERROR_EVENT_TYPES = frozenset({"message.error", "session.error", "tool.execute.error"})
+
 
 @dataclass(frozen=True)
 class EventRouteAdapter:
@@ -23,7 +32,7 @@ class EventRouteAdapter:
 
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
         if not isinstance(event, dict):
-            event = {"data": event}
+            return unknown_event_record(event)
         properties = mapping_value(event, "properties") or mapping_value(event, "payload") or mapping_value(event, "data")
         info = mapping_value(event, "info") or mapping_value(properties, "info")
         part = mapping_value(event, "part") or mapping_value(properties, "part")
@@ -33,23 +42,26 @@ class EventRouteAdapter:
         sources = [event, properties, info, part, message, tool]
 
         session_id = _event_session_id(sources)
-        if target_session_id is not None and session_id != target_session_id:
-            return None
-
         event_type = first_present_in(sources, "type", "event", "name", "kind")
+        event_type_text = string_value(event_type)
+        if target_session_id is not None and session_id != target_session_id:
+            return ignored_event_record(session_id, target_session_id, event_type_text)
+
         status = first_present_in(sources, "status", "state", "phase")
         raw_status = string_value(status)
         text = _event_text_value(sources)
         error_text = _error_text(error) or string_value(first_present_in(sources, "error", "reason"))
         tool_name = _tool_name(tool) or string_value(first_present_in([event, properties], "toolName", "tool_name", "tool"))
         call_id = string_value(first_present_in(sources, "callID", "callId", "toolCallID", "toolCallId", "tool_call_id"))
-        kind = _event_kind(event_type, status, text, tool_name, call_id, error_text, sources)
+        kind = _event_kind(event_type_text, text, tool_name, call_id, error_text, sources)
 
-        normalized = {
-            "kind": kind,
-            "session_id": session_id,
-            "type": string_value(event_type),
-        }
+        normalized = {"kind": kind}
+        set_if_present(normalized, "session_id", session_id)
+        set_if_present(normalized, "type", event_type_text)
+        if kind == "unknown":
+            normalized["schema_status"] = "unknown"
+            normalized["reason"] = "unrecognized_event_shape"
+            normalized["raw"] = dict(event)
         set_if_present(normalized, "message_id", _event_message_id(sources))
         set_if_present(normalized, "status", short_status(raw_status))
         if raw_status is not None and short_status(raw_status) != raw_status:
@@ -69,26 +81,48 @@ class EventRouteAdapter:
         return normalized
 
 
-def _event_kind(event_type, status, text, tool_name, call_id, error_text, sources):
-    lowered_type = str(event_type or "").lower()
-    lowered_status = str(status or "").lower()
+def _event_kind(event_type, text, tool_name, call_id, error_text, sources):
+    normalized_type = str(event_type or "").lower()
     if _blocker_type(event_type, sources):
         return "blocker"
-    if error_text is not None or "error" in lowered_type or "failed" in lowered_type:
+    if normalized_type in ERROR_EVENT_TYPES or error_text is not None:
         return "error"
-    if text is not None and ("text" in lowered_type or "part" in lowered_type or "message" in lowered_type):
+    if normalized_type in TEXT_EVENT_TYPES and text is not None:
         return "text"
-    if tool_name is not None or call_id is not None or "tool" in lowered_type:
+    if normalized_type in TOOL_EVENT_TYPES and (tool_name is not None or call_id is not None):
         return "tool"
-    if "prompt" in lowered_type:
-        if lowered_status in {"admitted", "promoted", "queued"} or first_present_in(sources, "delivery", "deliveryMode", "mode"):
-            return "admission"
+    if normalized_type in ADMISSION_EVENT_TYPES:
+        return "admission"
+    if normalized_type in PROMPT_EVENT_TYPES:
         return "prompt"
-    if "step" in lowered_type:
+    if normalized_type in STEP_EVENT_TYPES:
         return "step"
-    if "idle" in lowered_type or "status" in lowered_type or lowered_status in SUCCESS_STATUSES or lowered_status in ABORT_STATUSES:
+    if normalized_type in STATUS_EVENT_TYPES:
         return "status"
-    return "event"
+    return "unknown"
+
+
+def ignored_event_record(session_id, target_session_id, event_type) -> NormalizedEventRecord:
+    normalized = {
+        "kind": "ignored",
+        "target_session_id": target_session_id,
+        "reason": "session_mismatch",
+    }
+    set_if_present(normalized, "session_id", session_id)
+    set_if_present(normalized, "type", event_type)
+    return normalized
+
+
+def unknown_event_record(raw, *, event_type=None, session_id=None) -> NormalizedEventRecord:
+    normalized = {
+        "kind": "unknown",
+        "schema_status": "unknown",
+        "reason": "unrecognized_event_shape",
+        "raw": raw,
+    }
+    set_if_present(normalized, "session_id", session_id)
+    set_if_present(normalized, "type", event_type)
+    return normalized
 
 
 def _event_session_id(sources):
@@ -133,12 +167,12 @@ def _tool_name(tool):
 
 
 def _blocker_type(event_type, sources):
-    lowered_type = str(event_type or "").lower()
-    if "permission" in lowered_type:
+    normalized_type = str(event_type or "").lower()
+    if normalized_type == "permission.requested":
         return "permission"
-    if "question" in lowered_type:
+    if normalized_type == "question.requested":
         return "question"
-    if "blocker" in lowered_type:
+    if normalized_type in BLOCKER_EVENT_TYPES:
         return "blocker"
     if first_present_in(sources, "permission", "permissionID", "permissionId") is not None:
         return "permission"

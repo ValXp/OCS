@@ -10,6 +10,8 @@ class NormalizedSessionRecord(TypedDict, total=False):
     tokens: Any
     createdAt: Any
     updatedAt: Any
+    schema_status: str
+    raw: Any
 
 
 class NormalizedMessageRecord(TypedDict, total=False):
@@ -39,6 +41,7 @@ class NormalizedAdmissionRecord(TypedDict, total=False):
 class NormalizedEventRecord(TypedDict, total=False):
     kind: str
     session_id: str
+    target_session_id: str
     type: str
     message_id: str
     status: str
@@ -53,6 +56,9 @@ class NormalizedEventRecord(TypedDict, total=False):
     blocker_id: str
     question: str
     error: str
+    reason: str
+    schema_status: str
+    raw: Any
 
 
 def first_present(mapping, *names):

@@ -1,5 +1,6 @@
 import unittest
 
+from opencode_session.events import normalize_event
 from opencode_session.schema_normalization import (
     iter_normalized_message_records,
     normalize_admission_record,
@@ -104,6 +105,51 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(event["blocker"], "permission")
         self.assertEqual(event["blocker_id"], "perm_1")
         self.assertEqual(event["status"], "queued")
+
+    def test_unknown_session_shapes_are_explicit_records(self):
+        self.assertEqual(
+            normalize_session_payload("not-a-session-record"),
+            {"schema_status": "unknown", "raw": "not-a-session-record"},
+        )
+        self.assertEqual(
+            normalize_session_payload({"unexpected": True}),
+            {"unexpected": True, "schema_status": "unknown"},
+        )
+
+    def test_event_session_mismatch_is_explicit_but_watcher_boundary_filters_it(self):
+        event = {
+            "type": "session.status",
+            "properties": {"sessionID": "ses_other", "status": "completed"},
+        }
+
+        normalized = normalize_event_record(event, "ses_target")
+
+        self.assertEqual(
+            normalized,
+            {
+                "kind": "ignored",
+                "target_session_id": "ses_target",
+                "reason": "session_mismatch",
+                "session_id": "ses_other",
+                "type": "session.status",
+            },
+        )
+        self.assertIsNone(normalize_event(event, "ses_target"))
+
+    def test_unknown_event_shapes_are_not_classified_by_substrings(self):
+        event = {
+            "type": "session.custom.statusish",
+            "properties": {"sessionID": "ses_target", "messageID": "msg_1", "status": "completed"},
+        }
+
+        normalized = normalize_event_record(event, "ses_target")
+
+        self.assertEqual(normalized["kind"], "unknown")
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["reason"], "unrecognized_event_shape")
+        self.assertEqual(normalized["session_id"], "ses_target")
+        self.assertEqual(normalized["type"], "session.custom.statusish")
+        self.assertEqual(normalized["raw"], event)
 
 
 if __name__ == "__main__":

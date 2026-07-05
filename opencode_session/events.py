@@ -49,7 +49,10 @@ def iter_event_stream(lines):
 
 
 def normalize_event(event, target_session_id=None):
-    return normalize_event_record(event, target_session_id)
+    normalized = normalize_event_record(event, target_session_id)
+    if normalized.get("kind") == "ignored":
+        return None
+    return normalized
 
 
 def format_watch_event(event):
