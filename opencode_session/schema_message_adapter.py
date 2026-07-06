@@ -1,7 +1,13 @@
 from copy import deepcopy
 from dataclasses import dataclass
 
-from opencode_session.schema_common import NormalizedMessageRecord, first_present, normalized_tokens, set_missing
+from opencode_session.schema_common import (
+    FieldExtractor,
+    FieldSource,
+    NormalizedMessageRecord,
+    normalized_tokens,
+    set_missing,
+)
 from opencode_session.status import short_status
 
 
@@ -9,23 +15,32 @@ MESSAGE_CANONICAL_FIELDS = ("id", "role", "status", "raw_status", "cost", "token
 
 
 @dataclass(frozen=True)
+class MessageRouteSchema:
+    extractor: FieldExtractor
+    known_fields: tuple
+
+
+@dataclass(frozen=True)
 class MessageRouteAdapter:
+    schema: MessageRouteSchema
     route: str = "message"
-    version: str = "opencode-compatible"
+    version: str = "compatible"
 
     def normalize_record(self, message) -> NormalizedMessageRecord:
         if not isinstance(message, dict):
             return unknown_message_record(message)
         message = self.record(message)
+        if not self.is_known_record(message):
+            return unknown_message_record(message)
         normalized = dict(message)
-        set_missing(normalized, "id", self.value(message, "id", "messageID", "messageId", "message_id"))
-        set_missing(normalized, "role", self.value(message, "role", "author", "speaker", "type", "kind"))
-        raw_status = self.value(message, "status", "state", "phase")
+        set_missing(normalized, "id", self.field_value(message, "id"))
+        set_missing(normalized, "role", self.field_value(message, "role"))
+        raw_status = self.field_value(message, "status")
         if raw_status is not None:
             normalized["status"] = short_status(raw_status)
             if normalized["status"] != raw_status:
                 normalized["raw_status"] = raw_status
-        set_missing(normalized, "cost", self.value(message, "cost"))
+        set_missing(normalized, "cost", self.field_value(message, "cost"))
         set_missing(normalized, "tokens", self.tokens(message))
         set_missing(normalized, "text", self.text(message))
         require_message_canonical_fields(normalized)
@@ -57,17 +72,21 @@ class MessageRouteAdapter:
 
     def value(self, message, *names):
         message = self.record(message)
-        value = first_present(message, *names)
-        if value is not None:
-            return value
-        return first_present(message.get("info"), *names)
+        return self.schema.extractor.named_value(message, *names)
+
+    def field_value(self, message, field_name):
+        message = self.record(message)
+        return self.schema.extractor.value(message, field_name)
+
+    def is_known_record(self, message):
+        return self.schema.extractor.has_any(self.record(message), self.schema.known_fields)
 
     def tokens(self, message):
-        return normalized_tokens(self.value(message, "tokens", "token", "tokenUsage", "token_usage", "usage"))
+        return normalized_tokens(self.field_value(message, "tokens"))
 
     def text(self, message):
         message = self.record(message)
-        text = self.value(message, "text", "content")
+        text = self.field_value(message, "text")
         if text is not None:
             return text
         parts = message.get("parts")
@@ -78,6 +97,53 @@ class MessageRouteAdapter:
                 if isinstance(part, dict) and part.get("type") == "text"
             )
         return ""
+
+
+@dataclass(frozen=True)
+class OpenApiMessageRouteAdapter(MessageRouteAdapter):
+    schema: MessageRouteSchema
+    version: str = "api-v1"
+
+
+@dataclass(frozen=True)
+class LegacyMessageRouteAdapter(MessageRouteAdapter):
+    schema: MessageRouteSchema
+    version: str = "legacy"
+
+
+def _message_schema(field_aliases):
+    fields = {}
+    for field_name, aliases in field_aliases.items():
+        fields[field_name] = (
+            FieldSource((), aliases),
+            FieldSource(("info",), aliases),
+        )
+    return MessageRouteSchema(FieldExtractor(fields), tuple(field_aliases))
+
+
+COMPATIBLE_MESSAGE_FIELD_ALIASES = {
+    "id": ("id", "messageID", "messageId", "message_id"),
+    "role": ("role", "author", "speaker", "type", "kind"),
+    "status": ("status", "state", "phase"),
+    "cost": ("cost",),
+    "tokens": ("tokens", "token", "tokenUsage", "token_usage", "usage"),
+    "text": ("text", "content"),
+    "error": ("error", "reason", "message"),
+}
+
+OPENAPI_MESSAGE_FIELD_ALIASES = {
+    "id": ("id",),
+    "role": ("role",),
+    "status": ("status",),
+    "cost": ("cost",),
+    "tokens": ("tokens", "tokenUsage", "usage"),
+    "text": ("text", "content"),
+    "error": ("error", "reason", "message"),
+}
+
+
+COMPATIBLE_MESSAGE_SCHEMA = _message_schema(COMPATIBLE_MESSAGE_FIELD_ALIASES)
+OPENAPI_MESSAGE_SCHEMA = _message_schema(OPENAPI_MESSAGE_FIELD_ALIASES)
 
 
 def unknown_message_record(raw) -> NormalizedMessageRecord:
@@ -94,7 +160,9 @@ def require_message_canonical_fields(record):
     record.setdefault("text", "")
 
 
-MESSAGE_ADAPTER = MessageRouteAdapter()
+MESSAGE_ADAPTER = MessageRouteAdapter(COMPATIBLE_MESSAGE_SCHEMA)
+OPENAPI_MESSAGE_ADAPTER = OpenApiMessageRouteAdapter(OPENAPI_MESSAGE_SCHEMA)
+LEGACY_MESSAGE_ADAPTER = LegacyMessageRouteAdapter(COMPATIBLE_MESSAGE_SCHEMA)
 
 normalize_message_record = MESSAGE_ADAPTER.normalize_record
 iter_normalized_message_records = MESSAGE_ADAPTER.iter_normalized_records

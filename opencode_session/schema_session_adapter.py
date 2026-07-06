@@ -2,9 +2,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from opencode_session.schema_common import (
+    FieldExtractor,
+    FieldSource,
     NormalizedSessionRecord,
     collection_records,
-    first_present,
     normalized_tokens,
     set_missing,
 )
@@ -14,14 +15,8 @@ SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "token
 
 
 @dataclass(frozen=True)
-class RouteFieldSource:
-    path: tuple
-    aliases: tuple
-
-
-@dataclass(frozen=True)
 class SessionRouteSchema:
-    fields: dict
+    extractor: FieldExtractor
     known_fields: tuple
 
 
@@ -88,52 +83,28 @@ class SessionRouteAdapter:
 
     def value(self, session, *names):
         session = self.record(session)
-        requested_names = set(names)
-        for sources in self.schema.fields.values():
-            value = _field_source_value(session, sources, requested_names=requested_names)
-            if value is not None:
-                return value
-        return None
+        return self.schema.extractor.named_value(session, *names)
 
     def field_value(self, session, field_name):
         session = self.record(session)
-        return _field_source_value(session, self.schema.fields.get(field_name, ()))
+        return self.schema.extractor.value(session, field_name)
 
     def is_known_record(self, session):
-        return any(self.field_value(session, field_name) is not None for field_name in self.schema.known_fields)
-
-
-def _field_source_value(record, sources, *, requested_names=None):
-    for source in sources:
-        if requested_names is not None and not requested_names.intersection(source.aliases):
-            continue
-        value = first_present(_mapping_at_path(record, source.path), *source.aliases)
-        if value is not None:
-            return value
-    return None
-
-
-def _mapping_at_path(record, path):
-    current = record
-    for name in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(name)
-    return current if isinstance(current, dict) else None
+        return self.schema.extractor.has_any(session, self.schema.known_fields)
 
 
 def _session_schema(field_aliases):
     root_and_info_fields = {}
     for field_name, aliases in field_aliases.items():
         root_and_info_fields[field_name] = [
-            RouteFieldSource((), aliases),
-            RouteFieldSource(("info",), aliases),
+            FieldSource((), aliases),
+            FieldSource(("info",), aliases),
         ]
-    root_and_info_fields["directory"].append(RouteFieldSource(("location",), ("directory",)))
-    root_and_info_fields["createdAt"].append(RouteFieldSource(("time",), ("created",)))
-    root_and_info_fields["updatedAt"].append(RouteFieldSource(("time",), ("updated",)))
+    root_and_info_fields["directory"].append(FieldSource(("location",), ("directory",)))
+    root_and_info_fields["createdAt"].append(FieldSource(("time",), ("created",)))
+    root_and_info_fields["updatedAt"].append(FieldSource(("time",), ("updated",)))
     return SessionRouteSchema(
-        fields={field_name: tuple(sources) for field_name, sources in root_and_info_fields.items()},
+        extractor=FieldExtractor({field_name: tuple(sources) for field_name, sources in root_and_info_fields.items()}),
         known_fields=tuple(field_aliases),
     )
 

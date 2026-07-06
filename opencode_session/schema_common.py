@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Dict, List, Optional, TypedDict, Union
 
 
@@ -140,6 +141,58 @@ def first_present(mapping, *names):
 def first_present_in(sources, *names):
     for source in sources:
         value = first_present(source, *names)
+        if value is not None:
+            return value
+    return None
+
+
+@dataclass(frozen=True)
+class FieldSource:
+    path: tuple
+    aliases: tuple
+
+
+@dataclass(frozen=True)
+class FieldExtractor:
+    fields: dict
+
+    def value(self, record, field_name):
+        return field_source_value(record, self.fields.get(field_name, ()))
+
+    def named_value(self, record, *names):
+        requested_names = set(names)
+        for sources in self.fields.values():
+            value = field_source_value(record, sources, requested_names=requested_names)
+            if value is not None:
+                return value
+        return None
+
+    def has_any(self, record, field_names):
+        return any(self.value(record, field_name) is not None for field_name in field_names)
+
+
+def field_source_value(record, sources, *, requested_names=None):
+    for source in sources:
+        if requested_names is not None and not requested_names.intersection(source.aliases):
+            continue
+        value = first_present(mapping_at_path(record, source.path), *source.aliases)
+        if value is not None:
+            return value
+    return None
+
+
+def mapping_at_path(record, path):
+    current = record
+    for name in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(name)
+    return current if isinstance(current, dict) else None
+
+
+def first_mapping_at_paths(record, paths):
+    for path in paths:
+        value = mapping_at_path(record, path)
         if value is not None:
             return value
     return None

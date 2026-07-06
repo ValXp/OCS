@@ -6,6 +6,7 @@ from opencode_session.schema_normalization import (
     iter_normalized_message_records,
     normalize_admission_record,
     normalize_event_record,
+    normalize_message_record,
     normalize_session_payload,
 )
 
@@ -151,6 +152,22 @@ class SchemaNormalizationTest(unittest.TestCase):
                 "tokens": None,
                 "createdAt": None,
                 "updatedAt": None,
+                "raw": {"unexpected": True},
+            },
+        )
+
+    def test_unknown_message_shapes_are_explicit_records(self):
+        self.assertEqual(
+            normalize_message_record({"unexpected": True}),
+            {
+                "schema_status": "unknown",
+                "id": None,
+                "role": None,
+                "status": None,
+                "raw_status": None,
+                "cost": None,
+                "tokens": None,
+                "text": "",
                 "raw": {"unexpected": True},
             },
         )

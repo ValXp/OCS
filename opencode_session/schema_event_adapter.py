@@ -6,6 +6,8 @@ from opencode_session.schema_common import (
     NormalizedEventRecord,
     first_present,
     first_present_in,
+    first_mapping_at_paths,
+    mapping_at_path,
     mapping_value,
     set_if_present,
     string_value,
@@ -149,7 +151,7 @@ class EventRouteAdapter:
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
         if not isinstance(event, dict):
             return unknown_event_record(event)
-        payload = _first_mapping_at_paths(event, self.schema.payload_paths)
+        payload = first_mapping_at_paths(event, self.schema.payload_paths)
         sources = _event_sources(event, payload, self.schema.source_paths)
         tool = _first_mapping_from_sources(event, payload, self.schema.tool_paths)
         error = _first_mapping_from_sources(event, payload, self.schema.error_paths)
@@ -254,14 +256,6 @@ def unknown_event_record(raw, *, event_type=None, session_id=None) -> Normalized
     return normalized
 
 
-def _first_mapping_at_paths(record, paths):
-    for path in paths:
-        value = _mapping_at_path(record, path)
-        if value is not None:
-            return value
-    return None
-
-
 def _event_sources(event, payload, source_paths):
     return [_mapping_from_source(event, payload, source) for source in source_paths]
 
@@ -276,14 +270,7 @@ def _first_mapping_from_sources(event, payload, source_paths):
 
 def _mapping_from_source(event, payload, source):
     root = event if source.root == EVENT_ROOT else payload
-    return _mapping_at_path(root, source.path)
-
-
-def _mapping_at_path(record, path):
-    current = record
-    for name in path:
-        current = mapping_value(current, name)
-    return current if isinstance(current, dict) else None
+    return mapping_at_path(root, source.path)
 
 
 def _event_session_id(sources, aliases):
