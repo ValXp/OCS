@@ -1,7 +1,11 @@
 import unittest
+from types import SimpleNamespace
 
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
+    UNSET_TRANSITION_FIELD,
+    WorkerTransition,
+    WorkerTransitionName,
     apply_worker_transition_to_worker,
     apply_worker_result,
     deserialize_worker_record,
@@ -325,6 +329,31 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["last_failure_reason"], "previous failure")
         self.assertEqual(worker["next_eligible_action"], "retry")
         self.assertEqual(worker["lifecycle_state"], "active_retry")
+
+    def test_worker_transition_name_rejects_raw_strings(self):
+        worker = normalize_worker({}, "review")
+        transition = mark_worker_active(worker)
+
+        self.assertIs(transition.name, WorkerTransitionName.ACTIVE)
+        with self.assertRaisesRegex(ValueError, "unknown worker transition: active"):
+            WorkerTransition("review", "active")
+        with self.assertRaisesRegex(ValueError, "unknown worker transition: missing"):
+            WorkerTransition("review", "missing")
+
+    def test_worker_transition_reducer_rejects_raw_string_dispatch(self):
+        worker = normalize_worker({}, "review")
+        transition = SimpleNamespace(
+            worker_id="review",
+            name="active",
+            payload=SimpleNamespace(
+                timeout_started_at=UNSET_TRANSITION_FIELD,
+                clear_prompt_ids=False,
+            ),
+            attempt_finalization=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown worker transition: active"):
+            apply_worker_transition_to_worker(worker, transition)
 
     def test_mark_worker_active_clears_retry_marker_prompt_ids(self):
         worker = normalize_worker(

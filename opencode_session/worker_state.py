@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 from opencode_session.schema_common import WORKER_REQUIRED_FIELD_NAMES
@@ -487,14 +488,35 @@ class _AttemptFinalization:
     fields: dict
 
 
+class WorkerTransitionName(str, Enum):
+    PROVISIONED = "provisioned"
+    ACTIVE = "active"
+    ATTEMPT_STARTED = "attempt_started"
+    FAILED = "failed"
+    DEPENDENCY_BLOCKED = "dependency_blocked"
+    ABORTED = "aborted"
+    RETRY_SCHEDULED = "retry_scheduled"
+    TIMED_OUT = "timed_out"
+    RESULT_APPLIED = "result_applied"
+    CLEANUP_UPDATED = "cleanup_updated"
+    SNAPSHOT_APPLIED = "snapshot_applied"
+
+    def __str__(self):
+        return self.value
+
+
 @dataclass(frozen=True)
 class WorkerTransition:
     """Named lifecycle transition applied by WorkerLifecycleReducer."""
 
     worker_id: str
-    name: str
+    name: WorkerTransitionName
     payload: object = None
     attempt_finalization: Optional[_AttemptFinalization] = None
+
+    def __post_init__(self):
+        if not isinstance(self.name, WorkerTransitionName):
+            raise ValueError(f"unknown worker transition: {self.name}")
 
     def with_finalized_attempt(self, attempt_id, fields):
         return WorkerTransition(
@@ -509,7 +531,7 @@ class WorkerTransition:
         worker_id = worker["id"]
         return cls(
             worker_id,
-            "provisioned",
+            WorkerTransitionName.PROVISIONED,
             _ProvisionedTransition(
                 session_id=deepcopy(worker.get("session_id")),
                 agent=_copy_present(worker.get("agent")),
@@ -521,7 +543,7 @@ class WorkerTransition:
     def active(cls, worker_id, *, timeout_started_at=UNSET_TRANSITION_FIELD, clear_prompt_ids=False):
         return cls(
             worker_id,
-            "active",
+            WorkerTransitionName.ACTIVE,
             _ActiveTransition(
                 timeout_started_at=_copy_transition_value(timeout_started_at),
                 clear_prompt_ids=clear_prompt_ids,
@@ -530,7 +552,11 @@ class WorkerTransition:
 
     @classmethod
     def attempt_started(cls, worker_id, attempt):
-        return cls(worker_id, "attempt_started", _AttemptStartedTransition(deepcopy(attempt or {})))
+        return cls(
+            worker_id,
+            WorkerTransitionName.ATTEMPT_STARTED,
+            _AttemptStartedTransition(deepcopy(attempt or {})),
+        )
 
     @classmethod
     def failed(
@@ -546,7 +572,7 @@ class WorkerTransition:
     ):
         return cls(
             worker_id,
-            "failed",
+            WorkerTransitionName.FAILED,
             _FailedTransition(
                 category,
                 reason,
@@ -559,11 +585,15 @@ class WorkerTransition:
 
     @classmethod
     def dependency_blocked(cls, worker_id, blockers):
-        return cls(worker_id, "dependency_blocked", _DependencyBlockedTransition(tuple(blockers)))
+        return cls(
+            worker_id,
+            WorkerTransitionName.DEPENDENCY_BLOCKED,
+            _DependencyBlockedTransition(tuple(blockers)),
+        )
 
     @classmethod
     def aborted(cls, worker_id, abort):
-        return cls(worker_id, "aborted", _AbortedTransition(deepcopy(abort)))
+        return cls(worker_id, WorkerTransitionName.ABORTED, _AbortedTransition(deepcopy(abort)))
 
     @classmethod
     def retry_scheduled(
@@ -578,7 +608,7 @@ class WorkerTransition:
     ):
         return cls(
             worker_id,
-            "retry_scheduled",
+            WorkerTransitionName.RETRY_SCHEDULED,
             _RetryScheduledTransition(
                 category,
                 reason,
@@ -602,7 +632,7 @@ class WorkerTransition:
     ):
         return cls(
             worker_id,
-            "timed_out",
+            WorkerTransitionName.TIMED_OUT,
             _TimedOutTransition(
                 reason,
                 status=status,
@@ -617,7 +647,7 @@ class WorkerTransition:
     def result_applied(cls, worker_id, result, *, prompt_ids=(), timeout_started_at=UNSET_TRANSITION_FIELD):
         return cls(
             worker_id,
-            "result_applied",
+            WorkerTransitionName.RESULT_APPLIED,
             _ResultAppliedTransition(
                 deepcopy(result or {}),
                 prompt_ids=_filtered_prompt_ids(prompt_ids),
@@ -628,14 +658,18 @@ class WorkerTransition:
     @classmethod
     def cleanup_updated(cls, worker):
         worker_id = worker["id"]
-        return cls(worker_id, "cleanup_updated", _CleanupUpdatedTransition(deepcopy(worker.get("cleanup"))))
+        return cls(
+            worker_id,
+            WorkerTransitionName.CLEANUP_UPDATED,
+            _CleanupUpdatedTransition(deepcopy(worker.get("cleanup"))),
+        )
 
     @classmethod
     def snapshot_applied(cls, worker):
         worker_id = worker["id"]
         return cls(
             worker_id,
-            "snapshot_applied",
+            WorkerTransitionName.SNAPSHOT_APPLIED,
             _SnapshotAppliedTransition(
                 deepcopy(worker),
                 state_fields=tuple(WORKER_SNAPSHOT_STATE_FIELDS),

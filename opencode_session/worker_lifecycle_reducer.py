@@ -25,6 +25,7 @@ from opencode_session.worker_state import (
     WORKER_STATUS_TIMEOUT,
     WorkerRecord,
     WorkerTransition,
+    WorkerTransitionName,
     latest_prompt_ids_are_retry_marker,
     public_worker_state,
     worker_lifecycle_set_fields,
@@ -38,30 +39,9 @@ class WorkerLifecycleReducer:
         self.latest_worker = record.to_snapshot()
 
     def apply(self, transition):
-        if transition.name == "provisioned":
-            worker = self.provisioned(transition)
-        elif transition.name == "active":
-            worker = self.active(transition)
-        elif transition.name == "attempt_started":
-            worker = self.attempt_started(transition)
-        elif transition.name == "failed":
-            worker = self.failed(transition)
-        elif transition.name == "dependency_blocked":
-            worker = self.dependency_blocked(transition)
-        elif transition.name == "aborted":
-            worker = self.aborted(transition)
-        elif transition.name == "retry_scheduled":
-            worker = self.retry_scheduled(transition)
-        elif transition.name == "timed_out":
-            worker = self.timed_out(transition)
-        elif transition.name == "result_applied":
-            worker = self.result_applied(transition)
-        elif transition.name == "cleanup_updated":
-            worker = self.cleanup_updated(transition)
-        elif transition.name == "snapshot_applied":
-            worker = self.snapshot_applied(transition)
-        else:
+        if not isinstance(transition.name, WorkerTransitionName):
             raise ValueError(f"unknown worker transition: {transition.name}")
+        worker = _WORKER_TRANSITION_APPLIERS[transition.name](self, transition)
         _finalize_worker_attempt(worker, transition.attempt_finalization)
         return WorkerRecord.from_worker(worker, self.record.worker_id or transition.worker_id).to_worker()
 
@@ -262,6 +242,21 @@ class WorkerLifecycleReducer:
 
 def apply_worker_transition_to_record(record, transition):
     return WorkerLifecycleReducer(record).apply(transition)
+
+
+_WORKER_TRANSITION_APPLIERS = {
+    WorkerTransitionName.PROVISIONED: WorkerLifecycleReducer.provisioned,
+    WorkerTransitionName.ACTIVE: WorkerLifecycleReducer.active,
+    WorkerTransitionName.ATTEMPT_STARTED: WorkerLifecycleReducer.attempt_started,
+    WorkerTransitionName.FAILED: WorkerLifecycleReducer.failed,
+    WorkerTransitionName.DEPENDENCY_BLOCKED: WorkerLifecycleReducer.dependency_blocked,
+    WorkerTransitionName.ABORTED: WorkerLifecycleReducer.aborted,
+    WorkerTransitionName.RETRY_SCHEDULED: WorkerLifecycleReducer.retry_scheduled,
+    WorkerTransitionName.TIMED_OUT: WorkerLifecycleReducer.timed_out,
+    WorkerTransitionName.RESULT_APPLIED: WorkerLifecycleReducer.result_applied,
+    WorkerTransitionName.CLEANUP_UPDATED: WorkerLifecycleReducer.cleanup_updated,
+    WorkerTransitionName.SNAPSHOT_APPLIED: WorkerLifecycleReducer.snapshot_applied,
+}
 
 
 def _snapshot_transition_fields(transition):
