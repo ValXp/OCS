@@ -1,7 +1,7 @@
 import os
 
 from opencode_session.run_record import DEFAULT_SERVER_URL
-from opencode_session.status_policy import (
+from opencode_session.worker_state import (
     EX_ABORTED,
     EX_BLOCKED,
     EX_PARTIAL,

@@ -20,6 +20,7 @@ from opencode_session.worker_state import (
     apply_worker_transition_to_worker,
     apply_worker_result,
     deserialize_worker_record,
+    exit_code_for_status,
     exit_code_for_run,
     is_executable_worker,
     mark_dependency_blocked,
@@ -33,6 +34,7 @@ from opencode_session.worker_state import (
     require_internal_worker,
     schedule_worker_retry,
     serialize_worker_snapshot,
+    status_priority,
     worker_lifecycle_source_states,
     worker_lifecycle_state,
     worker_lifecycle_state_for_status_alias,
@@ -82,18 +84,10 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(WORKER_STATUS_PRIORITY_BY_STATUS, _metadata_by_status("status_priority"))
         self.assertEqual(WORKER_EXIT_CODE_BY_STATUS, _metadata_by_status("exit_code", skip_none=True))
 
-    def test_lifecycle_metadata_feeds_cli_status_policy_and_reducer_legality(self):
+    def test_lifecycle_metadata_feeds_status_helpers_and_reducer_legality(self):
         from opencode_session.commands.runs import _lifecycle_state_from_status_alias
-        from opencode_session.status_policy import (
-            _EXIT_CODE_BY_STATUS,
-            _STATUS_PRIORITY,
-            exit_code_for_status,
-            status_priority,
-        )
         from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS
 
-        self.assertIs(_STATUS_PRIORITY, WORKER_STATUS_PRIORITY_BY_STATUS)
-        self.assertIs(_EXIT_CODE_BY_STATUS, WORKER_EXIT_CODE_BY_STATUS)
         for status, lifecycle_state in WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS.items():
             with self.subTest(status=status):
                 self.assertEqual(worker_lifecycle_state_for_status_alias(status), lifecycle_state)
