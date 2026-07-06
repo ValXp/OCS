@@ -31,6 +31,26 @@ def temporarily_unimported(*module_names):
 
 
 class ImportBoundaryTest(unittest.TestCase):
+    def test_api_transport_import_does_not_require_session_domain_modules(self):
+        blocked = BlockedModuleFinder(
+            {
+                "opencode_session.api_domain",
+                "opencode_session.schema_session_adapter",
+            }
+        )
+        with temporarily_unimported(
+            "opencode_session.api_domain",
+            "opencode_session.api_transport",
+            "opencode_session.schema_session_adapter",
+        ):
+            sys.meta_path.insert(0, blocked)
+            try:
+                api_transport = importlib.import_module("opencode_session.api_transport")
+            finally:
+                sys.meta_path.remove(blocked)
+
+        self.assertTrue(hasattr(api_transport, "OpenCodeApiTransport"))
+
     def test_run_record_import_does_not_require_execution_api_or_session_parsing(self):
         blocked = BlockedModuleFinder(
             {
