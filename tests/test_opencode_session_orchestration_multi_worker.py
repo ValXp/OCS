@@ -119,10 +119,11 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
         self.assertEqual(analysis.ready_worker_ids, ("retry", "start"))
 
-    def test_schedule_tick_returns_ready_workers_and_block_transitions_without_mutation(self):
+    def test_schedule_tick_returns_serial_next_worker_and_block_transitions_without_mutation(self):
         workers = {
             "build": {"id": "build", "prompt": "Build", "status": "failed"},
             "docs": {"id": "docs", "prompt": "Docs", "status": "queued"},
+            "lint": {"id": "lint", "prompt": "Lint", "status": "queued"},
             "review": {
                 "id": "review",
                 "prompt": "Review",
@@ -134,7 +135,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         tick = schedule_dependency_ordered_tick(workers)
 
         self.assertEqual(tick.next_worker_id, "docs")
-        self.assertEqual(tick.eligible_worker_ids, ("docs",))
+        self.assertFalse(hasattr(tick, "eligible_worker_ids"))
         self.assertEqual([transition.worker_id for transition in tick.dependency_blocked_transitions], ["review"])
         self.assertTrue(tick.has_pending_workers)
         self.assertEqual(workers["review"]["status"], "queued")

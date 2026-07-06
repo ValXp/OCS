@@ -64,7 +64,6 @@ class DependencyOrderedSerialRunStartOutcome:
 @dataclass(frozen=True)
 class DependencyScheduleTick:
     next_worker_id: Optional[str]
-    eligible_worker_ids: tuple
     dependency_blocked_transitions: tuple
     has_pending_workers: bool
     blockers_by_worker_id: dict
@@ -75,10 +74,9 @@ class DependencySchedulePlanner:
         workers = workers if isinstance(workers, dict) else {}
         analysis = analyze_worker_dependencies(workers)
         blocked_worker_ids = set(analysis.blockers_by_worker_id)
-        eligible_worker_ids = analysis.ready_worker_ids
+        next_worker_id = analysis.ready_worker_ids[0] if analysis.ready_worker_ids else None
         return DependencyScheduleTick(
-            next_worker_id=eligible_worker_ids[0] if eligible_worker_ids else None,
-            eligible_worker_ids=eligible_worker_ids,
+            next_worker_id=next_worker_id,
             dependency_blocked_transitions=tuple(
                 _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
                 for worker_id in sorted(blocked_worker_ids)
