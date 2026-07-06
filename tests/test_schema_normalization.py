@@ -13,6 +13,7 @@ from opencode_session.schema_message_adapter import (
     message_value,
     normalize_message_record,
 )
+from opencode_session.schema_route_contract import RouteAdapterContract, child_field, route_field
 from opencode_session.schema_run import PersistedRunRecord
 from opencode_session.schema_session_adapter import normalize_session_payload, session_value
 from opencode_session.schema_worker import WorkerSnapshotRecord
@@ -88,6 +89,30 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertFalse(NormalizedEventRecord.__total__)
         self.assertFalse(PersistedRunRecord.__total__)
         self.assertFalse(WorkerSnapshotRecord.__total__)
+
+    def test_route_adapter_contract_reads_only_declared_sources(self):
+        contract = RouteAdapterContract(
+            route="test_route",
+            version="unit",
+            fields=(
+                route_field("id", "id", "sessionID"),
+                route_field("createdAt", "createdAt", children=(child_field("time", "created"),)),
+                route_field("event_session_id", "sessionID", include_info=False),
+            ),
+            known_fields=("id",),
+        )
+
+        fields = contract.read_fields(
+            {
+                "info": {"sessionID": "ses_info"},
+                "time": {"created": "2026-07-01T00:00:00Z"},
+            }
+        )
+
+        self.assertEqual(fields["id"], "ses_info")
+        self.assertEqual(fields["createdAt"], "2026-07-01T00:00:00Z")
+        self.assertIsNone(fields["event_session_id"])
+        self.assertTrue(contract.has_known_shape(fields))
 
     def test_normalizes_session_aliases_in_wrapped_collections(self):
         payload = {

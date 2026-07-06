@@ -1,14 +1,19 @@
 import json
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
 from opencode_session.schema_event import NormalizedEventRecord
 from opencode_session.schema_helpers import (
+    DELIVERY_ALIASES,
     first_present,
+    MESSAGE_ID_ALIASES,
+    PROMPT_ID_ALIASES,
+    SESSION_ID_ALIASES,
     set_if_present,
     string_value,
 )
+from opencode_session.schema_route_contract import RouteAdapterContract, route_field
 from opencode_session.status import short_status
 
 
@@ -17,10 +22,8 @@ LEGACY_EVENT_ROUTES = frozenset({"/event", "/global/event"})
 SUCCESS_STATUSES = {"complete", "completed", "done", "idle", "success", "succeeded"}
 ABORT_STATUSES = {"abort", "aborted", "cancelled", "canceled"}
 
-EVENT_SESSION_ID_FIELDS = ("sessionID", "sessionId", "session_id")
-EVENT_MESSAGE_ID_FIELDS = ("messageID", "messageId", "message_id", "promptID", "promptId")
+EVENT_MESSAGE_ID_FIELDS = (*MESSAGE_ID_ALIASES, *PROMPT_ID_ALIASES)
 EVENT_STATUS_FIELDS = ("status", "state")
-EVENT_DELIVERY_FIELDS = ("delivery", "deliveryMode", "mode")
 EVENT_CALL_ID_FIELDS = ("callID", "callId", "toolCallID", "toolCallId", "tool_call_id")
 EVENT_STEP_FIELDS = ("stepID", "stepId", "step_id")
 EVENT_TOOL_NAME_FIELDS = ("toolName", "tool_name")
@@ -36,6 +39,29 @@ STATUS_EVENT_TYPES = frozenset({"session.status", "session.idle"})
 TEXT_EVENT_TYPES = frozenset({"message.part.updated", "message.part.delta", "message.text.delta"})
 TOOL_EVENT_TYPES = frozenset({"tool.execute.started", "tool.execute.updated", "tool.execute.completed"})
 ERROR_EVENT_TYPES = frozenset({"message.error", "session.error", "tool.execute.error"})
+
+EVENT_ROUTE_FIELDS = (
+    route_field("session_id", *SESSION_ID_ALIASES, include_info=False),
+    route_field("message_id", *EVENT_MESSAGE_ID_FIELDS, include_info=False),
+    route_field("status", *EVENT_STATUS_FIELDS, include_info=False),
+    route_field("delivery", *DELIVERY_ALIASES, include_info=False),
+    route_field("text", "delta", "text", "content", include_info=False),
+    route_field("call_id", *EVENT_CALL_ID_FIELDS, include_info=False),
+    route_field("step", "step", *EVENT_STEP_FIELDS, include_info=False),
+    route_field("title", "title", "description", include_info=False),
+    route_field(
+        "blocker_id",
+        *EVENT_PERMISSION_ID_FIELDS,
+        *EVENT_QUESTION_ID_FIELDS,
+        *EVENT_BLOCKER_ID_FIELDS,
+        include_info=False,
+    ),
+    route_field("question", "question", "prompt", "title", include_info=False),
+)
+API_EVENT_CONTRACT = RouteAdapterContract(route="event", version="api-v1", fields=EVENT_ROUTE_FIELDS)
+LEGACY_EVENT_CONTRACT = RouteAdapterContract(route="event", version="legacy", fields=EVENT_ROUTE_FIELDS)
+KNOWN_EVENT_CONTRACT = RouteAdapterContract(route="event", version="known-shapes", fields=EVENT_ROUTE_FIELDS)
+UNKNOWN_EVENT_CONTRACT = RouteAdapterContract(route="event", version="unknown")
 
 
 @dataclass(frozen=True)
@@ -59,13 +85,15 @@ class DecodedEvent:
 @dataclass(frozen=True)
 class EventKindContract:
     kind: str
+    event_types: FrozenSet[str]
     detail_fields: Tuple[str, ...]
     requires_blocker: bool = False
 
 
 class ApiEventRouteDecoder:
-    route = "event"
-    version = "api-v1"
+    contract = API_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
 
     def decode(self, event):
         if not isinstance(event, dict) or not isinstance(event.get("properties"), dict):
@@ -73,15 +101,16 @@ class ApiEventRouteDecoder:
         event_type = string_value(event.get("type"))
         if event_type is None:
             return None
-        return _decoded_from_api_properties(event_type, event["properties"])
+        return _decoded_from_event_fields(event_type, event["properties"], self.contract)
 
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
         return _normalize_decoded_event(event, self.decode(event), target_session_id)
 
 
 class LegacyEventRouteDecoder:
-    route = "event"
-    version = "legacy"
+    contract = LEGACY_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
 
     def decode(self, event):
         if not isinstance(event, dict):
@@ -92,15 +121,16 @@ class LegacyEventRouteDecoder:
             payload = event.get("data")
         if event_type is None or not isinstance(payload, dict):
             return None
-        return _decoded_from_legacy_payload(event_type, payload)
+        return _decoded_from_event_fields(event_type, payload, self.contract)
 
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
         return _normalize_decoded_event(event, self.decode(event), target_session_id)
 
 
 class KnownEventRouteDecoder:
-    route = "event"
-    version = "known-shapes"
+    contract = KNOWN_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
 
     def __init__(self, decoders=None):
         self.decoders = tuple(decoders or (API_EVENT_DECODER, LEGACY_EVENT_DECODER))
@@ -117,8 +147,9 @@ class KnownEventRouteDecoder:
 
 
 class UnknownEventRouteDecoder:
-    route = "event"
-    version = "unknown"
+    contract = UNKNOWN_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
 
     def decode(self, event):
         return None
@@ -127,32 +158,25 @@ class UnknownEventRouteDecoder:
         return unknown_event_record(event)
 
 
-def _decoded_from_api_properties(event_type, fields):
-    return _decoded_from_event_fields(event_type, fields)
-
-
-def _decoded_from_legacy_payload(event_type, fields):
-    return _decoded_from_event_fields(event_type, fields)
-
-
-def _decoded_from_event_fields(event_type, fields):
+def _decoded_from_event_fields(event_type, fields, contract):
+    route_fields = contract.read_fields(fields)
     tool = _tool_name(fields)
     error = _error_text(fields.get("error")) or string_value(first_present(fields, "reason"))
     blocker = _blocker_type(event_type, fields)
     return DecodedEvent(
         event_type=event_type,
-        session_id=_string_field(fields, *EVENT_SESSION_ID_FIELDS),
-        message_id=_string_field(fields, *EVENT_MESSAGE_ID_FIELDS),
-        status=_status_value(fields),
-        delivery=_string_field(fields, *EVENT_DELIVERY_FIELDS),
-        text=_text_value(fields),
+        session_id=string_value(route_fields["session_id"]),
+        message_id=string_value(route_fields["message_id"]),
+        status=_status_value(fields, route_fields),
+        delivery=string_value(route_fields["delivery"]),
+        text=_text_value(fields, route_fields),
         tool=tool,
-        call_id=_string_field(fields, *EVENT_CALL_ID_FIELDS),
-        step=_string_field(fields, "step", *EVENT_STEP_FIELDS),
-        title=_string_field(fields, "title", "description"),
+        call_id=string_value(route_fields["call_id"]),
+        step=string_value(route_fields["step"]),
+        title=string_value(route_fields["title"]),
         blocker=blocker,
-        blocker_id=_blocker_id(fields) if blocker is not None else None,
-        question=_string_field(fields, "question", "prompt", "title") if blocker is not None else None,
+        blocker_id=string_value(route_fields["blocker_id"]) if blocker is not None else None,
+        question=string_value(route_fields["question"]) if blocker is not None else None,
         error=error,
     )
 
@@ -228,12 +252,8 @@ def unknown_event_record(raw, *, event_type=None, session_id=None) -> Normalized
     return normalized
 
 
-def _string_field(fields, *names):
-    return string_value(first_present(fields, *names))
-
-
-def _text_value(fields):
-    value = first_present(fields, "delta", "text", "content")
+def _text_value(fields, route_fields):
+    value = route_fields["text"]
     if isinstance(value, str):
         return value
     part = fields.get("part")
@@ -247,13 +267,13 @@ def _text_value(fields):
     return None
 
 
-def _status_value(fields):
-    value = _string_field(fields, *EVENT_STATUS_FIELDS)
+def _status_value(fields, route_fields):
+    value = string_value(route_fields["status"])
     if value is not None:
         return value
     message = fields.get("message")
     if isinstance(message, dict):
-        return _string_field(message, *EVENT_STATUS_FIELDS)
+        return string_value(first_present(message, *EVENT_STATUS_FIELDS))
     return None
 
 
@@ -285,15 +305,6 @@ def _blocker_type(event_type, fields):
     return None
 
 
-def _blocker_id(fields):
-    return _string_field(
-        fields,
-        *EVENT_PERMISSION_ID_FIELDS,
-        *EVENT_QUESTION_ID_FIELDS,
-        *EVENT_BLOCKER_ID_FIELDS,
-    )
-
-
 def _error_text(error):
     if isinstance(error, dict):
         value = first_present(error, "message", "detail", "error")
@@ -313,28 +324,28 @@ def event_adapter_for_route(route_path=None):
 
 
 def _event_kind_contracts():
-    contracts = {}
-    for event_type in BLOCKER_EVENT_TYPES:
-        contracts[event_type] = EventKindContract(
-            "blocker",
-            ("session_id", "message_id", "blocker_id", "question", "status"),
-            requires_blocker=True,
-        )
-    for event_type in ERROR_EVENT_TYPES:
-        contracts[event_type] = EventKindContract("error", ("session_id", "message_id", "error"))
-    for event_type in TEXT_EVENT_TYPES:
-        contracts[event_type] = EventKindContract("text", ("text",))
-    for event_type in TOOL_EVENT_TYPES:
-        contracts[event_type] = EventKindContract("tool", ("tool", "call_id"))
-    for event_type in ADMISSION_EVENT_TYPES:
-        contracts[event_type] = EventKindContract("admission", ("session_id", "message_id", "status", "delivery"))
-    for event_type in PROMPT_EVENT_TYPES:
-        contracts[event_type] = EventKindContract("prompt", ("session_id", "message_id", "status", "delivery"))
-    for event_type in STEP_EVENT_TYPES:
-        contracts[event_type] = EventKindContract("step", ("session_id", "message_id", "step", "status", "title"))
-    for event_type in STATUS_EVENT_TYPES:
-        contracts[event_type] = EventKindContract("status", ("session_id", "status"))
-    return contracts
+    return {
+        event_type: contract
+        for contract in EVENT_KIND_CONTRACTS_BY_KIND
+        for event_type in contract.event_types
+    }
+
+
+EVENT_KIND_CONTRACTS_BY_KIND = (
+    EventKindContract(
+        "blocker",
+        BLOCKER_EVENT_TYPES,
+        ("session_id", "message_id", "blocker_id", "question", "status"),
+        requires_blocker=True,
+    ),
+    EventKindContract("error", ERROR_EVENT_TYPES, ("session_id", "message_id", "error")),
+    EventKindContract("text", TEXT_EVENT_TYPES, ("text",)),
+    EventKindContract("tool", TOOL_EVENT_TYPES, ("tool", "call_id")),
+    EventKindContract("admission", ADMISSION_EVENT_TYPES, ("session_id", "message_id", "status", "delivery")),
+    EventKindContract("prompt", PROMPT_EVENT_TYPES, ("session_id", "message_id", "status", "delivery")),
+    EventKindContract("step", STEP_EVENT_TYPES, ("session_id", "message_id", "step", "status", "title")),
+    EventKindContract("status", STATUS_EVENT_TYPES, ("session_id", "status")),
+)
 
 
 API_EVENT_DECODER = ApiEventRouteDecoder()

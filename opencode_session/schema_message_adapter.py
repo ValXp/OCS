@@ -1,44 +1,80 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable
 
 from opencode_session.schema_helpers import (
+    CAMEL_MESSAGE_ID_ALIASES,
+    MESSAGE_ID_ALIASES,
     normalized_tokens,
-    root_or_info_value,
     set_missing,
 )
 from opencode_session.schema_message import NormalizedMessageRecord
+from opencode_session.schema_route_contract import RouteAdapterContract, route_field
 from opencode_session.status import short_status
 
 
 MESSAGE_CANONICAL_FIELDS = ("id", "role", "status", "raw_status", "cost", "tokens", "text")
-LEGACY_MESSAGE_ID_FIELDS = ("id", "messageID", "messageId", "message_id")
-LEGACY_MESSAGE_ROLE_FIELDS = ("role", "author", "speaker", "type", "kind")
-LEGACY_MESSAGE_STATUS_FIELDS = ("status", "state", "phase")
-LEGACY_MESSAGE_TOKEN_FIELDS = ("tokens", "token", "tokenUsage", "token_usage", "usage")
-SESSION_MESSAGE_ID_FIELDS = ("id", "messageID", "messageId")
-SESSION_MESSAGE_STATUS_FIELDS = ("status", "state")
-SESSION_MESSAGE_TOKEN_FIELDS = ("tokens", "tokenUsage", "usage")
+MESSAGE_FIELD_NAMES = ("id", "role", "status", "cost", "tokens", "text", "error")
+MESSAGE_KNOWN_FIELDS = ("id", "role", "status", "text", "error")
 MESSAGE_TEXT_FIELDS = ("text", "content")
 MESSAGE_ERROR_FIELDS = ("error", "reason", "message")
-MESSAGE_VALUE_ALIASES = (
-    ("id", LEGACY_MESSAGE_ID_FIELDS),
-    ("role", LEGACY_MESSAGE_ROLE_FIELDS),
-    ("status", LEGACY_MESSAGE_STATUS_FIELDS),
-    ("cost", ("cost",)),
-    ("tokens", LEGACY_MESSAGE_TOKEN_FIELDS),
-    ("text", MESSAGE_TEXT_FIELDS),
-    ("error", MESSAGE_ERROR_FIELDS),
-)
 SESSION_MESSAGE_ROUTE = "session_message"
 LEGACY_MESSAGE_ROUTE = "legacy_run_reply"
 
 
+SESSION_MESSAGE_CONTRACT = RouteAdapterContract(
+    route=SESSION_MESSAGE_ROUTE,
+    version="session-message",
+    fields=(
+        route_field("id", "id", *CAMEL_MESSAGE_ID_ALIASES),
+        route_field("role", "role"),
+        route_field("status", "status", "state"),
+        route_field("cost", "cost"),
+        route_field("tokens", "tokens", "tokenUsage", "usage"),
+        route_field("text", *MESSAGE_TEXT_FIELDS),
+        route_field("error", *MESSAGE_ERROR_FIELDS),
+    ),
+    known_fields=MESSAGE_KNOWN_FIELDS,
+)
+LEGACY_MESSAGE_CONTRACT = RouteAdapterContract(
+    route=LEGACY_MESSAGE_ROUTE,
+    version="legacy-run-reply",
+    fields=(
+        route_field("id", "id", *MESSAGE_ID_ALIASES),
+        route_field("role", "role", "author", "speaker", "type", "kind"),
+        route_field("status", "status", "state", "phase"),
+        route_field("cost", "cost"),
+        route_field("tokens", "tokens", "token", "tokenUsage", "token_usage", "usage"),
+        route_field("text", *MESSAGE_TEXT_FIELDS),
+        route_field("error", *MESSAGE_ERROR_FIELDS),
+    ),
+    known_fields=MESSAGE_KNOWN_FIELDS,
+)
+UNKNOWN_MESSAGE_CONTRACT = RouteAdapterContract(
+    route="unknown",
+    version="unknown",
+    fields=tuple(route_field(name) for name in MESSAGE_FIELD_NAMES),
+    known_fields=MESSAGE_KNOWN_FIELDS,
+)
+MESSAGE_VALUE_ALIASES = tuple((field.name, field.aliases) for field in LEGACY_MESSAGE_CONTRACT.fields)
+
+
 @dataclass(frozen=True)
 class MessageRouteAdapter:
-    route: str
-    version: str
-    read_fields: Callable
+    contract: RouteAdapterContract
+
+    @property
+    def route(self):
+        return self.contract.route
+
+    @property
+    def version(self):
+        return self.contract.version
+
+    def read_fields(self, message):
+        return self.contract.read_fields(message)
+
+    def has_known_shape(self, fields):
+        return self.contract.has_known_shape(fields)
 
 
 def normalize_message_record(message, *, route=None) -> NormalizedMessageRecord:
@@ -51,7 +87,7 @@ def _normalize_message_record(message, adapter) -> NormalizedMessageRecord:
     message = message_record(message)
 
     fields = adapter.read_fields(message)
-    if not _has_known_message_shape(fields):
+    if not adapter.has_known_shape(fields):
         return unknown_message_record(message)
 
     normalized = dict(message)
@@ -110,16 +146,18 @@ def message_value(message, *names, route=None):
 
 def message_tokens(message, *, route=None):
     message = message_record(message)
-    fields = message_adapter_for_route(route).read_fields(message)
-    if route is not None and not _has_known_message_shape(fields):
+    adapter = message_adapter_for_route(route)
+    fields = adapter.read_fields(message)
+    if route is not None and not adapter.has_known_shape(fields):
         return None
     return normalized_tokens(fields["tokens"])
 
 
 def message_text(message, *, route=None):
     message = message_record(message)
-    fields = message_adapter_for_route(route).read_fields(message)
-    if route is not None and not _has_known_message_shape(fields):
+    adapter = message_adapter_for_route(route)
+    fields = adapter.read_fields(message)
+    if route is not None and not adapter.has_known_shape(fields):
         return ""
     return _message_text_from_fields(message, fields)
 
@@ -143,38 +181,6 @@ def message_adapter_for_route(route=None):
     return MESSAGE_ROUTE_ADAPTERS.get(route, UNKNOWN_MESSAGE_ADAPTER)
 
 
-def _session_message_fields(message):
-    return {
-        "id": root_or_info_value(message, *SESSION_MESSAGE_ID_FIELDS),
-        "role": root_or_info_value(message, "role"),
-        "status": root_or_info_value(message, *SESSION_MESSAGE_STATUS_FIELDS),
-        "cost": root_or_info_value(message, "cost"),
-        "tokens": root_or_info_value(message, *SESSION_MESSAGE_TOKEN_FIELDS),
-        "text": root_or_info_value(message, *MESSAGE_TEXT_FIELDS),
-        "error": root_or_info_value(message, *MESSAGE_ERROR_FIELDS),
-    }
-
-
-def _legacy_message_fields(message):
-    return {
-        "id": root_or_info_value(message, *LEGACY_MESSAGE_ID_FIELDS),
-        "role": root_or_info_value(message, *LEGACY_MESSAGE_ROLE_FIELDS),
-        "status": root_or_info_value(message, *LEGACY_MESSAGE_STATUS_FIELDS),
-        "cost": root_or_info_value(message, "cost"),
-        "tokens": root_or_info_value(message, *LEGACY_MESSAGE_TOKEN_FIELDS),
-        "text": root_or_info_value(message, *MESSAGE_TEXT_FIELDS),
-        "error": root_or_info_value(message, *MESSAGE_ERROR_FIELDS),
-    }
-
-
-def _unknown_message_fields(message):
-    return {field_name: None for field_name in ("id", "role", "status", "cost", "tokens", "text", "error")}
-
-
-def _has_known_message_shape(fields):
-    return any(fields[name] is not None for name in ("id", "role", "status", "text", "error"))
-
-
 def unknown_message_record(raw) -> NormalizedMessageRecord:
     normalized = {field_name: None for field_name in MESSAGE_CANONICAL_FIELDS}
     normalized["text"] = ""
@@ -194,19 +200,13 @@ def _requested(requested_names, *aliases):
 
 
 SESSION_MESSAGE_ADAPTER = MessageRouteAdapter(
-    route=SESSION_MESSAGE_ROUTE,
-    version="session-message",
-    read_fields=_session_message_fields,
+    contract=SESSION_MESSAGE_CONTRACT,
 )
 LEGACY_MESSAGE_ADAPTER = MessageRouteAdapter(
-    route=LEGACY_MESSAGE_ROUTE,
-    version="legacy-run-reply",
-    read_fields=_legacy_message_fields,
+    contract=LEGACY_MESSAGE_CONTRACT,
 )
 UNKNOWN_MESSAGE_ADAPTER = MessageRouteAdapter(
-    route="unknown",
-    version="unknown",
-    read_fields=_unknown_message_fields,
+    contract=UNKNOWN_MESSAGE_CONTRACT,
 )
 MESSAGE_ROUTE_ADAPTERS = {
     SESSION_MESSAGE_ROUTE: SESSION_MESSAGE_ADAPTER,
