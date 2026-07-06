@@ -17,7 +17,9 @@ from opencode_session.worker_execution import (
 )
 from opencode_session.worker_session_provisioning import (
     WORKER_SESSION_JOURNAL_FIELD,
+    WorkerSessionCreatedRecord,
     WorkerSessionCreationJournal,
+    WorkerSessionCreationIntent,
     WorkerSessionProvisioner,
     ensure_worker_session,
     provision_worker_session,
@@ -75,6 +77,61 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(attempt.get("session_id"), session_id)
         self.assertEqual(attempt.get("status"), status)
         return attempt
+
+    def test_worker_session_creation_records_serialize_journal_entries(self):
+        intent = WorkerSessionCreationIntent(
+            id="worker-session-intent-1",
+            worker_id="worker",
+            directory="/workspace",
+            agent="build",
+            model="openai/gpt-5.5",
+            cleanup_requested=True,
+            intent_recorded_at="2026-07-05T00:00:00Z",
+        )
+        created = WorkerSessionCreatedRecord(
+            id="worker-session-intent-1",
+            worker_id="worker",
+            session_id="ses_new",
+            cleanup_requested=True,
+            created_at="2026-07-05T00:00:00Z",
+        )
+
+        self.assertEqual(
+            intent.to_journal_entry(),
+            {
+                "id": "worker-session-intent-1",
+                "kind": "worker_session_create",
+                "status": "intent",
+                "worker_id": "worker",
+                "directory": "/workspace",
+                "agent": "build",
+                "model": "openai/gpt-5.5",
+                "cleanup_requested": True,
+                "intent_recorded_at": "2026-07-05T00:00:00Z",
+            },
+        )
+        self.assertEqual(
+            created.to_journal_update(),
+            {
+                "status": "created",
+                "session_id": "ses_new",
+                "created_session_ids": ["ses_new"],
+                "created_at": "2026-07-05T00:00:00Z",
+            },
+        )
+        self.assertEqual(
+            created.to_journal_entry(),
+            {
+                "id": "worker-session-intent-1",
+                "kind": "worker_session_create",
+                "worker_id": "worker",
+                "cleanup_requested": True,
+                "status": "created",
+                "session_id": "ses_new",
+                "created_session_ids": ["ses_new"],
+                "created_at": "2026-07-05T00:00:00Z",
+            },
+        )
 
     def test_ensure_worker_session_uses_worker_record_boundary(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -2,7 +2,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from opencode_session.remote_journal import PersistedRemoteMutationJournal
+from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationOperation
 from opencode_session.schema_common import RunRecord, Worker
 from opencode_session.session_ids import require_session_id
 from opencode_session.worker_state import (
@@ -14,6 +14,11 @@ from opencode_session.worker_state import (
 
 WORKER_SESSION_JOURNAL_FIELD = "worker_session_journal"
 WORKER_SESSION_CREATE_KIND = "worker_session_create"
+WORKER_SESSION_CREATE_OPERATION = RemoteMutationOperation(
+    kind=WORKER_SESSION_CREATE_KIND,
+    discard_cleanup_operation="discard_worker_session_create",
+    finalize_cleanup_operation="finalize_worker_session_create",
+)
 
 
 @dataclass
@@ -26,7 +31,53 @@ class WorkerSessionOutcome:
 class WorkerSessionCreationIntent:
     id: str
     worker_id: str
+    directory: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
     cleanup_requested: bool = False
+    intent_recorded_at: Optional[str] = None
+
+    def to_journal_entry(self):
+        entry = {
+            "id": self.id,
+            "kind": WORKER_SESSION_CREATE_OPERATION.kind,
+            "status": "intent",
+            "worker_id": self.worker_id,
+            "directory": self.directory,
+            "cleanup_requested": self.cleanup_requested,
+            "intent_recorded_at": self.intent_recorded_at,
+        }
+        if self.agent is not None:
+            entry["agent"] = self.agent
+        if self.model is not None:
+            entry["model"] = self.model
+        return entry
+
+
+@dataclass(frozen=True)
+class WorkerSessionCreatedRecord:
+    id: str
+    worker_id: str
+    session_id: str
+    cleanup_requested: bool
+    created_at: str
+
+    def to_journal_update(self):
+        return {
+            "status": "created",
+            "session_id": self.session_id,
+            "created_session_ids": [self.session_id],
+            "created_at": self.created_at,
+        }
+
+    def to_journal_entry(self):
+        return {
+            "id": self.id,
+            "kind": WORKER_SESSION_CREATE_OPERATION.kind,
+            "worker_id": self.worker_id,
+            "cleanup_requested": self.cleanup_requested,
+            **self.to_journal_update(),
+        }
 
 
 @dataclass
@@ -50,41 +101,26 @@ class WorkerSessionCreationJournal:
 
     def record_intent(self, run, worker, *, agent=None, model=None, cleanup_requested=False):
         intent = WorkerSessionCreationIntent(
-            self.id_factory(),
-            worker["id"],
+            id=self.id_factory(),
+            worker_id=worker["id"],
+            directory=run.get("directory"),
+            agent=agent,
+            model=model,
             cleanup_requested=bool(cleanup_requested),
+            intent_recorded_at=self.now(),
         )
-        entry = {
-            "id": intent.id,
-            "kind": WORKER_SESSION_CREATE_KIND,
-            "status": "intent",
-            "worker_id": intent.worker_id,
-            "directory": run.get("directory"),
-            "cleanup_requested": intent.cleanup_requested,
-            "intent_recorded_at": self.now(),
-        }
-        if agent is not None:
-            entry["agent"] = agent
-        if model is not None:
-            entry["model"] = model
 
-        updated_run = self._transaction(intent).record_intent(run, entry)
+        updated_run = self._transaction(intent).record_intent(run, intent)
         return updated_run, _latest_worker(updated_run, worker), intent
 
     def record_created(self, run, worker, intent, session_id, *, agent=None, model=None):
-        fields = {
-            "status": "created",
-            "session_id": session_id,
-            "created_session_ids": [session_id],
-            "created_at": self.now(),
-        }
-        missing_entry = {
-            "id": intent.id,
-            "kind": WORKER_SESSION_CREATE_KIND,
-            "worker_id": intent.worker_id,
-            "cleanup_requested": intent.cleanup_requested,
-            **fields,
-        }
+        created_record = WorkerSessionCreatedRecord(
+            id=intent.id,
+            worker_id=intent.worker_id,
+            session_id=session_id,
+            cleanup_requested=intent.cleanup_requested,
+            created_at=self.now(),
+        )
 
         def update_worker(latest_run):
             latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
@@ -95,32 +131,24 @@ class WorkerSessionCreationJournal:
 
         updated_run = self._transaction(intent).mark_applied(
             run,
-            fields,
-            before_mark=update_worker,
-            missing_entry=missing_entry,
+            created_record,
+            mutate_run=update_worker,
+            append_if_missing=True,
         )
         return updated_run, _latest_worker(updated_run, worker)
 
     def discard_intent_best_effort(self, run, worker, intent):
-        return self._remove_best_effort(run, worker, intent, operation="discard_worker_session_create")
+        updated_run = self._transaction(intent).discard_intent_best_effort(run)
+        return updated_run, _latest_worker(updated_run, worker)
 
     def finalize_best_effort(self, run, worker, intent):
-        return self._remove_best_effort(run, worker, intent, operation="finalize_worker_session_create")
-
-    def _remove_best_effort(self, run, worker, intent, *, operation):
-        transaction = self._transaction(intent)
-        if operation == "discard_worker_session_create":
-            updated_run = transaction.discard_intent_best_effort(run)
-        else:
-            updated_run = transaction.finalize_best_effort(run)
+        updated_run = self._transaction(intent).finalize_best_effort(run)
         return updated_run, _latest_worker(updated_run, worker)
 
     def _transaction(self, intent):
         return self.transactions.transaction(
             intent.id,
-            WORKER_SESSION_CREATE_KIND,
-            discard_operation="discard_worker_session_create",
-            finalize_operation="finalize_worker_session_create",
+            WORKER_SESSION_CREATE_OPERATION,
         )
 
 

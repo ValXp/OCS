@@ -1,10 +1,47 @@
+from dataclasses import dataclass
 import unittest
+from typing import Optional
 
 from opencode_session.remote_journal import (
     PersistedRemoteMutationJournal,
     RemoteMutationJournal,
+    RemoteMutationOperation,
     RemoteMutationRecovery,
 )
+
+
+PROMPT_OPERATION = RemoteMutationOperation(
+    kind="prompt",
+    discard_cleanup_operation="discard_prompt",
+    finalize_cleanup_operation="finalize_prompt",
+)
+
+
+@dataclass(frozen=True)
+class TestIntentRecord:
+    id: str
+    kind: str
+    session_id: str
+    message_id: Optional[str] = None
+
+    def to_journal_entry(self):
+        entry = {"id": self.id, "kind": self.kind, "session_id": self.session_id}
+        if self.message_id is not None:
+            entry["message_id"] = self.message_id
+        return entry
+
+
+@dataclass(frozen=True)
+class TestAppliedRecord:
+    id: str
+    kind: str
+    status: str
+
+    def to_journal_update(self):
+        return {"status": self.status}
+
+    def to_journal_entry(self):
+        return {"id": self.id, "kind": self.kind, **self.to_journal_update()}
 
 
 class RemoteMutationJournalTest(unittest.TestCase):
@@ -12,13 +49,21 @@ class RemoteMutationJournalTest(unittest.TestCase):
         run = {"journal": "corrupt"}
         journal = RemoteMutationJournal("journal")
 
-        journal.record_intent(run, {"id": "mutation-1", "kind": "prompt", "message_id": "msg_1"})
-        journal.record_intent(run, {"id": "mutation-2", "kind": "abort", "session_id": "ses_1"})
-        journal.mark_applied(run, "mutation-1", {"status": "applied"})
+        journal.record_intent(run, TestIntentRecord("mutation-1", "prompt", "ses_1", message_id="msg_1"))
+        journal.record_intent(run, TestIntentRecord("mutation-2", "abort", "ses_1"))
+        journal.mark_applied(run, "mutation-1", TestAppliedRecord("mutation-1", "prompt", "applied"))
 
         self.assertEqual(
             journal.pending_entries(run, kind="prompt"),
-            ({"id": "mutation-1", "kind": "prompt", "message_id": "msg_1", "status": "applied"},),
+            (
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "session_id": "ses_1",
+                    "message_id": "msg_1",
+                    "status": "applied",
+                },
+            ),
         )
 
         journal.finalize(run, "mutation-1")
@@ -77,11 +122,11 @@ class RemoteMutationJournalTest(unittest.TestCase):
 
         journal.record_intent_from(
             run,
-            lambda latest_run: {
-                "id": "mutation-1",
-                "kind": "prompt",
-                "session_id": latest_run["workers"]["worker"]["session_id"],
-            },
+            lambda latest_run: TestIntentRecord(
+                "mutation-1",
+                "prompt",
+                latest_run["workers"]["worker"]["session_id"],
+            ),
         )
 
         self.assertEqual(run["journal"][0]["session_id"], "ses_latest")
@@ -99,21 +144,18 @@ class RemoteMutationJournalTest(unittest.TestCase):
             persist_run_mutation,
             now=lambda: "2026-07-05T00:00:00Z",
         )
-        transaction = journal.transaction(
-            "mutation-1",
-            "prompt",
-            discard_operation="discard_remote_mutation",
-            finalize_operation="finalize_remote_mutation",
-        )
+        transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
 
         run = transaction.record_intent_from(
             run,
-            lambda latest_run: {
-                "session_id": latest_run["workers"]["worker"]["session_id"],
-                "message_id": "msg_1",
-            },
+            lambda latest_run: TestIntentRecord(
+                "mutation-1",
+                "prompt",
+                latest_run["workers"]["worker"]["session_id"],
+                message_id="msg_1",
+            ),
         )
-        run = transaction.mark_applied(run, {"status": "applied"})
+        run = transaction.mark_applied(run, TestAppliedRecord("mutation-1", "prompt", "applied"))
         self.assertEqual(
             run["journal"],
             [
@@ -130,6 +172,26 @@ class RemoteMutationJournalTest(unittest.TestCase):
         run = transaction.finalize(run)
 
         self.assertNotIn("journal", run)
+
+    def test_transaction_rejects_records_for_other_operations(self):
+        run = {"name": "demo"}
+
+        def persist_run_mutation(run, mutator):
+            mutator(run)
+            return run
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+        transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
+
+        with self.assertRaisesRegex(ValueError, "kind"):
+            transaction.record_intent(run, TestIntentRecord("mutation-1", "abort", "ses_1"))
+
+        with self.assertRaisesRegex(ValueError, "id"):
+            transaction.record_intent(run, TestIntentRecord("mutation-2", "prompt", "ses_1"))
 
     def test_recovery_collects_unique_values_by_owner_from_pending_transactions(self):
         run = {

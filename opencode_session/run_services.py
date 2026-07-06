@@ -12,7 +12,11 @@ from opencode_session.multi_worker_orchestration import (
     workers_in_dependency_order,
 )
 from opencode_session.prompt_admission import admit_prompt
-from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationRecovery
+from opencode_session.remote_journal import (
+    PersistedRemoteMutationJournal,
+    RemoteMutationOperation,
+    RemoteMutationRecovery,
+)
 from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_record import RunRecordError, upsert_worker_record
 from opencode_session.run_store import RunStoreError
@@ -30,6 +34,52 @@ from opencode_session.worker_state import (
 
 REMOTE_MUTATION_JOURNAL_FIELD = "remote_mutation_journal"
 _REMOTE_MUTATION_RECOVERY = RemoteMutationRecovery(REMOTE_MUTATION_JOURNAL_FIELD)
+STEER_PROMPT_REMOTE_MUTATION = RemoteMutationOperation(
+    kind="steer_prompt",
+    discard_cleanup_operation="discard_remote_mutation",
+    finalize_cleanup_operation="finalize_remote_mutation",
+)
+ABORT_WORKER_REMOTE_MUTATION = RemoteMutationOperation(
+    kind="abort_worker",
+    discard_cleanup_operation="discard_remote_mutation",
+    finalize_cleanup_operation="finalize_remote_mutation",
+)
+
+
+@dataclass(frozen=True)
+class SteerPromptIntentRecord:
+    id: str
+    worker_id: str
+    session_id: str
+    message_id: str
+    delivery: str
+    text: str
+
+    def to_journal_entry(self):
+        return {
+            "id": self.id,
+            "kind": STEER_PROMPT_REMOTE_MUTATION.kind,
+            "worker_id": self.worker_id,
+            "session_id": self.session_id,
+            "message_id": self.message_id,
+            "delivery": self.delivery,
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True)
+class AbortWorkerIntentRecord:
+    id: str
+    worker_id: str
+    session_id: str
+
+    def to_journal_entry(self):
+        return {
+            "id": self.id,
+            "kind": ABORT_WORKER_REMOTE_MUTATION.kind,
+            "worker_id": self.worker_id,
+            "session_id": self.session_id,
+        }
 
 
 @dataclass
@@ -178,17 +228,18 @@ class RunCommandService:
         configure_client_route_plan(client, capabilities)
         prompt_message_id = message_id or _new_prompt_message_id()
         mutation_id = _new_remote_mutation_id()
-        transaction = self._remote_transaction(mutation_id, "steer_prompt")
+        transaction = self._remote_transaction(mutation_id, STEER_PROMPT_REMOTE_MUTATION)
 
         def prompt_intent(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
-            return {
-                "worker_id": worker_id,
-                "session_id": latest_worker["session_id"],
-                "message_id": prompt_message_id,
-                "delivery": delivery,
-                "text": text,
-            }
+            return SteerPromptIntentRecord(
+                id=mutation_id,
+                worker_id=worker_id,
+                session_id=latest_worker["session_id"],
+                message_id=prompt_message_id,
+                delivery=delivery,
+                text=text,
+            )
 
         run = transaction.record_intent_from(run, prompt_intent)
         try:
@@ -211,7 +262,7 @@ class RunCommandService:
             latest_record = worker_record_for_mutation(latest_worker, worker_id)
             latest_record.remember_prompt_id(admitted_message_id)
 
-        run = transaction.finalize(run, before_finalize=record_prompt_admission)
+        run = transaction.finalize(run, mutate_run=record_prompt_admission)
         return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
 
     def abort_worker(self, name, worker_id):
@@ -219,14 +270,15 @@ class RunCommandService:
         worker = _run_worker_with_session(run, worker_id)
         client = self.client_factory(run["server_url"])
         mutation_id = _new_remote_mutation_id()
-        transaction = self._remote_transaction(mutation_id, "abort_worker")
+        transaction = self._remote_transaction(mutation_id, ABORT_WORKER_REMOTE_MUTATION)
 
         def abort_intent(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
-            return {
-                "worker_id": worker_id,
-                "session_id": latest_worker["session_id"],
-            }
+            return AbortWorkerIntentRecord(
+                id=mutation_id,
+                worker_id=worker_id,
+                session_id=latest_worker["session_id"],
+            )
 
         run = transaction.record_intent_from(run, abort_intent)
         try:
@@ -244,15 +296,13 @@ class RunCommandService:
             latest_record.apply_transition(mark_worker_aborted(latest_record, abort))
             refresh_orchestration_run_summary(latest_run)
 
-        run = transaction.finalize(run, before_finalize=mark_aborted)
+        run = transaction.finalize(run, mutate_run=mark_aborted)
         return RunAbortResult(run=run, worker=run["workers"][worker_id], abort=abort, raw_body=response.body)
 
-    def _remote_transaction(self, mutation_id, kind):
+    def _remote_transaction(self, mutation_id, operation):
         return self.remote_mutations.transaction(
             mutation_id,
-            kind,
-            discard_operation="discard_remote_mutation",
-            finalize_operation="finalize_remote_mutation",
+            operation,
         )
 
     def _persist_run_mutation(self, run, mutator):

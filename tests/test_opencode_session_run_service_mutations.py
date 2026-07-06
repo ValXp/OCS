@@ -3,8 +3,10 @@ import unittest
 from unittest.mock import patch
 
 from opencode_session.run_services import (
+    AbortWorkerIntentRecord,
     REMOTE_MUTATION_JOURNAL_FIELD,
     RunCommandService,
+    SteerPromptIntentRecord,
     recoverable_remote_mutation_entries,
 )
 from opencode_session.run_store import RunStore, RunStoreError
@@ -69,6 +71,46 @@ class FailingUpdateStore:
 
 
 class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
+    def test_steer_prompt_intent_record_serializes_journal_entry(self):
+        record = SteerPromptIntentRecord(
+            id="mutation-1",
+            worker_id="planner",
+            session_id="ses_plan",
+            message_id="msg_steer_1",
+            delivery="queue",
+            text="Continue with the plan",
+        )
+
+        self.assertEqual(
+            record.to_journal_entry(),
+            {
+                "id": "mutation-1",
+                "kind": "steer_prompt",
+                "worker_id": "planner",
+                "session_id": "ses_plan",
+                "message_id": "msg_steer_1",
+                "delivery": "queue",
+                "text": "Continue with the plan",
+            },
+        )
+
+    def test_abort_worker_intent_record_serializes_journal_entry(self):
+        record = AbortWorkerIntentRecord(
+            id="mutation-1",
+            worker_id="planner",
+            session_id="ses_plan",
+        )
+
+        self.assertEqual(
+            record.to_journal_entry(),
+            {
+                "id": "mutation-1",
+                "kind": "abort_worker",
+                "worker_id": "planner",
+                "session_id": "ses_plan",
+            },
+        )
+
     def test_steer_persists_recoverable_journal_before_prompt_admission(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = _active_worker_store(store_root, directory)

@@ -1,59 +1,71 @@
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class RemoteMutationOperation:
+    kind: str
+    discard_cleanup_operation: str
+    finalize_cleanup_operation: str
+
+
 class RemoteMutationTransaction:
     def __init__(
         self,
         journal,
         entry_id,
-        kind,
-        *,
-        discard_operation=None,
-        finalize_operation=None,
+        operation,
     ):
         self.journal = journal
         self.entry_id = entry_id
-        self.kind = kind
-        self.discard_operation = discard_operation or f"discard_{kind}"
-        self.finalize_operation = finalize_operation or f"finalize_{kind}"
+        self.operation = operation
 
-    def record_intent(self, run, entry):
-        return self.journal.record_intent(run, self._entry_with_identity(entry))
+    def record_intent(self, run, record):
+        self._validate_record_identity(record)
+        return self.journal.record_intent(run, record)
 
-    def record_intent_from(self, run, entry_factory):
+    def record_intent_from(self, run, record_factory):
         return self.journal.record_intent_from(
             run,
-            lambda latest_run: self._entry_with_identity(entry_factory(latest_run)),
+            lambda latest_run: self._validated_record(record_factory(latest_run)),
         )
 
-    def mark_applied(self, run, fields, *, before_mark=None, missing_entry=None):
+    def mark_applied(self, run, record, *, mutate_run=None, append_if_missing=False):
+        self._validate_record_identity(record)
         return self.journal.mark_applied(
             run,
             self.entry_id,
-            fields,
-            before_mark=before_mark,
-            missing_entry=self._entry_with_identity(missing_entry) if missing_entry is not None else None,
+            record,
+            mutate_run=mutate_run,
+            append_if_missing=append_if_missing,
         )
 
-    def finalize(self, run, *, before_finalize=None):
-        return self.journal.finalize(run, self.entry_id, before_finalize=before_finalize)
+    def finalize(self, run, *, mutate_run=None):
+        return self.journal.finalize(run, self.entry_id, mutate_run=mutate_run)
 
     def discard_intent_best_effort(self, run):
         return self.journal.discard_intent_best_effort(
             run,
             self.entry_id,
-            operation=self.discard_operation,
+            operation=self.operation.discard_cleanup_operation,
         )
 
     def finalize_best_effort(self, run):
         return self.journal.finalize_best_effort(
             run,
             self.entry_id,
-            operation=self.finalize_operation,
+            operation=self.operation.finalize_cleanup_operation,
         )
 
-    def _entry_with_identity(self, entry):
-        entry = dict(entry)
-        entry["id"] = self.entry_id
-        entry["kind"] = self.kind
-        return entry
+    def _validated_record(self, record):
+        self._validate_record_identity(record)
+        return record
+
+    def _validate_record_identity(self, record):
+        entry = _journal_entry(record)
+        if entry.get("id") != self.entry_id:
+            raise ValueError(f"remote journal record id must be {self.entry_id!r}")
+        if entry.get("kind") != self.operation.kind:
+            raise ValueError(f"remote journal record kind must be {self.operation.kind!r}")
 
 
 class RemoteMutationRecovery:
@@ -105,20 +117,21 @@ class RemoteMutationJournal:
         journal = run.get(self.field)
         if not isinstance(journal, list):
             journal = []
-        journal.append(dict(entry))
+        journal.append(_journal_entry(entry))
         run[self.field] = journal
 
-    def mark_applied(self, run, entry_id, fields, *, missing_entry=None):
+    def mark_applied(self, run, entry_id, record, *, append_if_missing=False):
         journal = run.get(self.field)
         if not isinstance(journal, list):
             journal = []
             run[self.field] = journal
+        update = _journal_update(record)
         for entry in journal:
             if isinstance(entry, dict) and entry.get("id") == entry_id:
-                entry.update(dict(fields))
+                entry.update(update)
                 return
-        if missing_entry is not None:
-            journal.append(dict(missing_entry))
+        if append_if_missing:
+            journal.append(_journal_entry(record))
 
     def finalize(self, run, entry_id):
         journal = run.get(self.field)
@@ -163,13 +176,11 @@ class PersistedRemoteMutationJournal:
             lambda latest_run: self.journal.record_intent(latest_run, entry),
         )
 
-    def transaction(self, entry_id, kind, *, discard_operation=None, finalize_operation=None):
+    def transaction(self, entry_id, operation):
         return RemoteMutationTransaction(
             self,
             entry_id,
-            kind,
-            discard_operation=discard_operation,
-            finalize_operation=finalize_operation,
+            operation,
         )
 
     def record_intent_from(self, run, entry_factory):
@@ -178,21 +189,21 @@ class PersistedRemoteMutationJournal:
 
         return self.persist_run_mutation(run, record)
 
-    def mark_applied(self, run, entry_id, fields, *, before_mark=None, missing_entry=None):
-        def record(latest_run):
-            if before_mark is not None:
-                before_mark(latest_run)
-            self.journal.mark_applied(latest_run, entry_id, fields, missing_entry=missing_entry)
+    def mark_applied(self, run, entry_id, record, *, mutate_run=None, append_if_missing=False):
+        def persisted_mutation(latest_run):
+            if mutate_run is not None:
+                mutate_run(latest_run)
+            self.journal.mark_applied(latest_run, entry_id, record, append_if_missing=append_if_missing)
 
-        return self.persist_run_mutation(run, record)
+        return self.persist_run_mutation(run, persisted_mutation)
 
-    def finalize(self, run, entry_id, *, before_finalize=None):
-        def record(latest_run):
-            if before_finalize is not None:
-                before_finalize(latest_run)
+    def finalize(self, run, entry_id, *, mutate_run=None):
+        def persisted_mutation(latest_run):
+            if mutate_run is not None:
+                mutate_run(latest_run)
             self.journal.finalize(latest_run, entry_id)
 
-        return self.persist_run_mutation(run, record)
+        return self.persist_run_mutation(run, persisted_mutation)
 
     def discard_intent_best_effort(self, run, entry_id, *, operation):
         return self._finalize_best_effort(run, entry_id, operation=operation)
@@ -239,3 +250,24 @@ def _string_list(value):
 def _append_unique(values, value):
     if isinstance(value, str) and value and value not in values:
         values.append(value)
+
+
+def _journal_entry(record):
+    if hasattr(record, "to_journal_entry"):
+        entry = record.to_journal_entry()
+    elif isinstance(record, dict):
+        entry = record
+    else:
+        raise TypeError("remote journal records must provide to_journal_entry")
+    if not isinstance(entry, dict):
+        raise TypeError("remote journal record serialization must be a dict")
+    return dict(entry)
+
+
+def _journal_update(record):
+    if hasattr(record, "to_journal_update"):
+        update = record.to_journal_update()
+        if not isinstance(update, dict):
+            raise TypeError("remote journal record update serialization must be a dict")
+        return dict(update)
+    return _journal_entry(record)
