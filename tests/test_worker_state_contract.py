@@ -1,5 +1,3 @@
-import ast
-import inspect
 from collections.abc import Mapping, MutableMapping
 from dataclasses import fields, is_dataclass
 import unittest
@@ -12,33 +10,18 @@ from opencode_session.worker_storage_adapter import (
     worker_snapshot_transition_patch,
 )
 from opencode_session.worker_state import (
-    _WORKER_LIFECYCLE_TABLE,
-    EXECUTABLE_WORKER_ACTIONS,
-    FAILED_DEPENDENCY_STATUSES,
-    PUBLIC_WORKER_STATE_BY_LIFECYCLE,
-    TERMINAL_WORKER_STATUSES,
-    WORKER_LIFECYCLE_DIMENSIONS_BY_STATE,
-    WORKER_LIFECYCLE_METADATA,
-    WORKER_LIFECYCLE_STATE_BY_DIMENSIONS,
-    WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS,
-    WORKER_LIFECYCLE_STATES,
-    WORKER_STATUS_PRIORITY_BY_STATUS,
-    WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES,
-    WORKER_TRANSITION_DEFINITIONS,
-    WORKER_TRANSITION_METADATA,
-    WorkerLifecycleAction,
-    WorkerLifecycleDimensions,
-    WorkerLifecycleStatus,
+    aggregate_run_status,
     WorkerRecord,
     WorkerSnapshotTransitionPatch,
     WorkerTransition,
     WorkerTransitionError,
     WorkerTransitionName,
-    WorkerTransitionSpec,
     apply_worker_transition,
     apply_worker_transition_to_worker,
     deserialize_worker_record,
+    is_failed_dependency_status,
     is_executable_worker,
+    is_terminal_status,
     is_worker_record,
     mark_worker_active,
     next_eligible_action,
@@ -51,17 +34,16 @@ from opencode_session.worker_state import (
     serialize_worker_snapshot,
     status_priority,
     worker_has_prompt,
-    worker_lifecycle_source_states,
     worker_lifecycle_state,
-    worker_lifecycle_state_for_dimensions,
+    worker_lifecycle_state_for_public_state,
     worker_lifecycle_state_for_status_alias,
-    worker_lifecycle_target_states,
     worker_field,
     worker_output_field,
     worker_retry_available,
     worker_timeout_reason,
     worker_timeout_lifecycle_state,
     worker_record_for_mutation,
+    worker_transition_is_legal,
 )
 
 try:
@@ -71,228 +53,183 @@ except ModuleNotFoundError:
 
 
 class WorkerStateContractTest(unittest.TestCase):
-    def test_lifecycle_metadata_derives_public_status_policy_and_flags(self):
-        rows_by_state = {row.state: row for row in _WORKER_LIFECYCLE_TABLE}
+    def test_lifecycle_public_state_contracts(self):
+        cases = (
+            ("queued", "queued", "start", False, True),
+            ("active_wait", "active", "wait", False, False),
+            ("active_retry", "active", "retry", False, True),
+            ("blocked_dependency", "blocked", "resolve_blocker", False, False),
+            ("blocked_timeout", "blocked", "resolve_blocker", True, False),
+            ("done_collect", "done", "collect", False, False),
+            ("failed_retry", "failed", "retry", False, True),
+            ("failed_terminal", "failed", "none", False, False),
+            ("timeout_retry", "timeout", "retry", True, True),
+            ("timeout_terminal", "timeout", "none", True, False),
+            ("timeout_failed_retry", "failed", "retry", True, True),
+            ("timeout_failed_terminal", "failed", "none", True, False),
+            ("timeout_aborted", "aborted", "none", True, False),
+            ("aborted", "aborted", "none", False, False),
+        )
 
-        self.assertEqual(WORKER_LIFECYCLE_STATES, frozenset(rows_by_state))
-        self.assertEqual(
-            {status.value for status in WorkerLifecycleStatus},
-            {row.status for row in _WORKER_LIFECYCLE_TABLE},
-        )
-        self.assertEqual(
-            {action.value for action in WorkerLifecycleAction},
-            {row.action for row in _WORKER_LIFECYCLE_TABLE},
-        )
-        self.assertEqual(WORKER_LIFECYCLE_STATES, frozenset(WORKER_LIFECYCLE_METADATA))
-        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items():
+        for lifecycle_state, status, action, timeout_origin, executable in cases:
             with self.subTest(lifecycle_state=lifecycle_state):
-                row = rows_by_state[lifecycle_state]
-                self.assertEqual(metadata.status, row.status)
-                self.assertEqual(metadata.retryable, row.retryable)
-                self.assertEqual(metadata.timeout_origin, row.timeout_origin)
-                self.assertEqual(metadata.source_transitions, row.source_transitions)
-                self.assertEqual(metadata.target_transitions, row.target_transitions)
-        self.assertEqual(
-            PUBLIC_WORKER_STATE_BY_LIFECYCLE,
-            {
-                lifecycle_state: (metadata.status, metadata.next_eligible_action)
-                for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
-            },
-        )
-        self.assertEqual(
-            WORKER_LIFECYCLE_DIMENSIONS_BY_STATE,
-            {
-                lifecycle_state: metadata.dimensions
-                for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
-            },
-        )
-        self.assertEqual(
-            WORKER_LIFECYCLE_STATE_BY_DIMENSIONS,
-            {metadata.dimensions: lifecycle_state for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()},
-        )
-        self.assertEqual(
-            TERMINAL_WORKER_STATUSES,
-            frozenset(metadata.status for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.terminal_status),
-        )
-        self.assertEqual(
-            FAILED_DEPENDENCY_STATUSES,
-            frozenset(
-                metadata.status for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.failed_dependency_status
-            ),
-        )
-        self.assertEqual(
-            EXECUTABLE_WORKER_ACTIONS,
-            frozenset(
-                metadata.next_eligible_action for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.executable
-            ),
-        )
-        self.assertEqual(
-            WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS,
-            {
-                metadata.status: lifecycle_state
-                for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
-                if metadata.status_alias
-            },
-        )
-        self.assertEqual(WORKER_STATUS_PRIORITY_BY_STATUS, _metadata_by_status("status_priority"))
-
-    def test_timeout_failed_retry_and_terminal_lifecycles_derive_from_dimensions(self):
-        retry_dimensions = WorkerLifecycleDimensions(
-            WorkerLifecycleStatus.FAILED,
-            WorkerLifecycleAction.RETRY,
-            retryable=True,
-            timeout_origin=True,
-        )
-        terminal_dimensions = WorkerLifecycleDimensions(
-            WorkerLifecycleStatus.FAILED,
-            WorkerLifecycleAction.RETRY,
-            retryable=False,
-            timeout_origin=True,
-        )
-
-        self.assertEqual(worker_lifecycle_state_for_dimensions(retry_dimensions), "timeout_failed_retry")
-        self.assertEqual(worker_lifecycle_state_for_dimensions(terminal_dimensions), "timeout_failed_terminal")
-        self.assertEqual(worker_timeout_lifecycle_state("failed", True), "timeout_failed_retry")
-        self.assertEqual(worker_timeout_lifecycle_state("failed", False), "timeout_failed_terminal")
-
-        retry_metadata = WORKER_LIFECYCLE_METADATA["timeout_failed_retry"]
-        terminal_metadata = WORKER_LIFECYCLE_METADATA["timeout_failed_terminal"]
-        self.assertEqual(retry_metadata.dimensions, retry_dimensions)
-        self.assertEqual(terminal_metadata.dimensions, terminal_dimensions)
-        self.assertEqual(retry_metadata.next_eligible_action, "retry")
-        self.assertEqual(terminal_metadata.next_eligible_action, "none")
-        self.assertTrue(retry_metadata.retryable)
-        self.assertFalse(terminal_metadata.retryable)
-        self.assertIn("timeout_failed_retry", WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES)
-        self.assertIn("timeout_failed_terminal", WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES)
-
-    def test_lifecycle_metadata_feeds_status_helpers_and_reducer_legality(self):
-        for status, lifecycle_state in WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS.items():
-            with self.subTest(status=status):
-                self.assertEqual(worker_lifecycle_state_for_status_alias(status), lifecycle_state)
-                self.assertEqual(
-                    worker_lifecycle_state(normalize_worker({"lifecycle_state": lifecycle_state}, "review")),
+                worker = normalize_worker(
+                    {"id": lifecycle_state, "prompt": "Work", "lifecycle_state": lifecycle_state},
                     lifecycle_state,
                 )
-                self.assertEqual(status_priority(status), WORKER_STATUS_PRIORITY_BY_STATUS[status])
 
-        for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
-            with self.subTest(transition=transition_name):
-                self.assertEqual(worker_lifecycle_source_states(transition_name), metadata.source_states)
-                self.assertEqual(worker_lifecycle_target_states(transition_name), metadata.target_states)
-
-    def test_transition_legality_is_derived_from_lifecycle_model(self):
-        for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
-            if not metadata.public_lifecycle_transition:
-                continue
-
-            expected_source_states = frozenset(
-                lifecycle_state
-                for lifecycle_state, lifecycle_metadata in WORKER_LIFECYCLE_METADATA.items()
-                if transition_name in lifecycle_metadata.source_transitions
-            )
-            expected_target_states = frozenset(
-                lifecycle_state
-                for lifecycle_state, lifecycle_metadata in WORKER_LIFECYCLE_METADATA.items()
-                if transition_name in lifecycle_metadata.target_transitions
-            )
-
-            with self.subTest(transition=transition_name):
+                assert_worker_outcome(self, worker, status=status, action=action, lifecycle=lifecycle_state)
+                self.assertEqual(next_eligible_worker_action(worker), action)
+                self.assertEqual(is_executable_worker(worker), executable)
                 self.assertEqual(
-                    WORKER_TRANSITION_DEFINITIONS[transition_name].source_states,
-                    expected_source_states,
+                    worker_lifecycle_state_for_public_state(status, action, timeout_origin=timeout_origin),
+                    lifecycle_state,
                 )
-                self.assertEqual(
-                    WORKER_TRANSITION_DEFINITIONS[transition_name].target_states,
-                    expected_target_states,
+
+    def test_status_helpers_match_observable_worker_outcomes(self):
+        alias_cases = (
+            ("queued", "queued"),
+            ("active", "active_wait"),
+            ("blocked", "blocked_dependency"),
+            ("done", "done_collect"),
+            ("failed", "failed_terminal"),
+            ("timeout", "timeout_terminal"),
+            ("aborted", "aborted"),
+        )
+
+        for status, lifecycle_state in alias_cases:
+            with self.subTest(status=status):
+                worker = normalize_worker({"lifecycle_state": lifecycle_state}, "review")
+
+                self.assertEqual(worker_lifecycle_state_for_status_alias(status), lifecycle_state)
+                self.assertEqual(worker_lifecycle_state(worker), lifecycle_state)
+                self.assertEqual(worker_output_field(worker, "status"), status)
+
+        terminal_statuses = {"done", "failed", "timeout", "aborted"}
+        failed_dependency_statuses = {"blocked", "failed", "timeout", "aborted"}
+        for status in ("queued", "active", "blocked", "done", "failed", "timeout", "aborted"):
+            with self.subTest(status=status):
+                self.assertEqual(is_terminal_status(status), status in terminal_statuses)
+                self.assertEqual(is_failed_dependency_status(status), status in failed_dependency_statuses)
+
+        self.assertLess(status_priority("queued"), status_priority("active"))
+        self.assertLess(status_priority("active"), status_priority("blocked"))
+        self.assertLess(status_priority("timeout"), status_priority("aborted"))
+        self.assertLess(status_priority("aborted"), status_priority("failed"))
+        self.assertEqual(aggregate_run_status(["done", "done"]), "done")
+        self.assertEqual(aggregate_run_status(["done", "active", "blocked"]), "blocked")
+        self.assertEqual(aggregate_run_status(["done", "timeout", "aborted"]), "aborted")
+        self.assertEqual(aggregate_run_status(["done", "timeout", "failed"]), "failed")
+
+    def test_timeout_failed_retry_and_terminal_lifecycles_use_public_timeout_state(self):
+        cases = (
+            (
+                "retryable timeout failure",
+                {"retryable_failures": ["timeout"], "retry_count": 0, "retry_limit": 1},
+                True,
+                "timeout_failed_retry",
+                "retry",
+                True,
+            ),
+            (
+                "terminal timeout failure",
+                {},
+                False,
+                "timeout_failed_terminal",
+                "none",
+                False,
+            ),
+        )
+
+        for name, fields, retry_available, lifecycle_state, action, executable in cases:
+            with self.subTest(name=name):
+                worker = normalize_worker({"prompt": "Review", "lifecycle_state": "active_wait", **fields}, "review")
+                transition = WorkerTransition.timed_out(
+                    "review",
+                    "worker timed out",
+                    status="failed",
+                    timed_out_at="2026-07-04T00:00:00Z",
+                    retry_available=retry_available,
                 )
-                self.assertEqual(metadata.source_states, expected_source_states)
-                self.assertEqual(metadata.target_states, expected_target_states)
 
-    def test_transition_specs_are_table_driven_reducer_rows(self):
-        annotations = WorkerTransitionSpec.__annotations__
-        for field_name in ("name", "source_states", "target_states", "target_state", "payload_type", "applier"):
-            with self.subTest(field_name=field_name):
-                self.assertNotEqual(annotations[field_name], object)
-        for removed_hook in ("payload_factory", "target_resolver", "legality_checker"):
-            with self.subTest(removed_hook=removed_hook):
-                self.assertNotIn(removed_hook, annotations)
+                self.assertEqual(worker_timeout_lifecycle_state("failed", retry_available), lifecycle_state)
+                self.assertTrue(worker_transition_is_legal(worker, transition))
 
-        for spec in WORKER_TRANSITION_DEFINITIONS.values():
-            with self.subTest(transition=spec.name):
-                self.assertIsInstance(spec.payload_type, type)
-                self.assertTrue(callable(spec.applier))
-                self.assertIs(spec.metadata, spec)
-                self.assertIs(WORKER_TRANSITION_METADATA[spec.name], spec)
-                if spec.target_state is not None:
-                    self.assertIn(spec.target_state, spec.target_states)
+                apply_worker_transition_to_worker(worker, transition)
 
-        with self.assertRaisesRegex(ValueError, "missing payload type"):
-            WorkerTransitionSpec(
-                WorkerTransitionName.ACTIVE,
-                source_states=frozenset(),
-                target_states=frozenset(),
-                payload_type=object(),
-                applier=lambda reducer, transition, payload, target_state: {},
-            )
-        with self.assertRaisesRegex(ValueError, "missing applier"):
-            WorkerTransitionSpec(
-                WorkerTransitionName.ACTIVE,
-                source_states=frozenset(),
-                target_states=frozenset(),
-                payload_type=object,
-                applier=object(),
-            )
-        with self.assertRaisesRegex(ValueError, "configured unknown target lifecycle state"):
-            WorkerTransitionSpec(
-                WorkerTransitionName.ACTIVE,
-                source_states=frozenset(),
-                target_states=frozenset({"active_wait"}),
-                payload_type=object,
-                applier=lambda reducer, transition, payload, target_state: {},
-                target_state="missing",
-            )
+                assert_worker_outcome(self, worker, status="failed", action=action, lifecycle=lifecycle_state)
+                self.assertEqual(is_executable_worker(worker), executable)
 
-    def test_core_worker_state_invariants_use_worker_record_accessors(self):
-        import opencode_session.worker_state as worker_state_module
+    def test_worker_transition_boundaries_accept_only_legal_lifecycle_moves(self):
+        legal_cases = (
+            (
+                "queued worker can start",
+                {"lifecycle_state": "queued"},
+                mark_worker_active,
+                {"status": "active", "action": "wait", "lifecycle": "active_wait"},
+            ),
+            (
+                "retryable failure can schedule retry",
+                {
+                    "lifecycle_state": "failed_retry",
+                    "failure_category": "provider",
+                    "retryable_failures": ["provider"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
+                },
+                lambda worker: schedule_worker_retry(worker, "provider", "try again"),
+                {"status": "active", "action": "retry", "lifecycle": "active_retry"},
+            ),
+            (
+                "active worker can apply done result",
+                {"lifecycle_state": "active_wait"},
+                lambda worker: WorkerTransition.result_applied(
+                    worker.worker_id,
+                    {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+                ),
+                {"status": "done", "action": "collect", "lifecycle": "done_collect"},
+            ),
+        )
 
-        tree = ast.parse(inspect.getsource(worker_state_module))
-        core_functions = {
-            "_cleanup_updated_transition_payload",
-            "_provisioned_transition_payload",
-            "_snapshot_worker_id",
-            "_timeout_started_at_or_unset",
-            "_worker_id",
-            "apply_worker_result",
-            "ensure_worker",
-            "latest_prompt_ids_are_retry_marker",
-            "mark_dependency_blocked",
-            "mark_worker_aborted",
-            "mark_worker_active",
-            "mark_worker_failed",
-            "mark_worker_timeout",
-            "retry_available",
-            "schedule_worker_retry",
-            "worker_has_prompt",
-            "worker_output_refs_in_dependency_order",
-            "worker_prompt",
-            "worker_retry_available",
-            "worker_timeout_reason",
-        }
-        offenders = []
+        for name, fields, transition_factory, expected_outcome in legal_cases:
+            with self.subTest(name=name):
+                worker = normalize_worker({"id": "review", "prompt": "Review", **fields}, "review")
+                transition = transition_factory(worker)
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) or node.name not in core_functions:
-                continue
-            for child in ast.walk(node):
-                if not isinstance(child, ast.Call):
-                    continue
-                if isinstance(child.func, ast.Name) and child.func.id == "worker_field":
-                    offenders.append(f"{node.name}:{child.lineno}: worker_field")
-                if isinstance(child.func, ast.Attribute) and child.func.attr == "field":
-                    offenders.append(f"{node.name}:{child.lineno}: field")
+                self.assertTrue(worker_transition_is_legal(worker, transition))
 
-        self.assertEqual([], offenders)
+                apply_worker_transition_to_worker(worker, transition)
+
+                assert_worker_outcome(self, worker, **expected_outcome)
+
+        illegal_cases = (
+            (
+                "done worker cannot restart",
+                {
+                    "lifecycle_state": "done_collect",
+                    "result": {"status": "done", "message_ids": {"assistant": "msg_done"}},
+                    "output_refs": ["assistant:msg_done"],
+                },
+                mark_worker_active,
+            ),
+            (
+                "queued worker cannot receive result",
+                {"lifecycle_state": "queued"},
+                lambda worker: WorkerTransition.result_applied(
+                    worker.worker_id,
+                    {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+                ),
+            ),
+        )
+
+        for name, fields, transition_factory in illegal_cases:
+            with self.subTest(name=name):
+                worker = normalize_worker({"id": "review", "prompt": "Review", **fields}, "review")
+                transition = transition_factory(worker)
+
+                self.assertFalse(worker_transition_is_legal(worker, transition))
+                with self.assertRaisesRegex(WorkerTransitionError, "illegal worker transition"):
+                    apply_worker_transition_to_worker(worker, transition)
 
     def test_worker_record_accessors_back_core_retry_timeout_and_prompt_fields(self):
         worker = normalize_worker(
@@ -812,18 +749,6 @@ class WorkerStateContractTest(unittest.TestCase):
         refresh_run_summary(run)
 
         self.assertEqual(run["status"], "failed")
-
-
-def _metadata_by_status(field_name, *, skip_none=False):
-    values = {}
-    for metadata in WORKER_LIFECYCLE_METADATA.values():
-        value = getattr(metadata, field_name)
-        if skip_none and value is None:
-            continue
-        if metadata.status in values and values[metadata.status] != value:
-            raise AssertionError(f"conflicting metadata for {metadata.status}")
-        values[metadata.status] = value
-    return values
 
 
 if __name__ == "__main__":
