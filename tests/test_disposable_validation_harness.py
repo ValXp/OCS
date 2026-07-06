@@ -2,6 +2,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
+from opencode_session.event_watcher import BackgroundSessionEventWatcher
 from opencode_session.validation_harness import DisposableValidationHarness, ValidationCheck
 
 
@@ -16,6 +17,16 @@ class FakeCleanupClient:
     def get_session(self, session_id):
         self.calls.append(("GET", session_id))
         return {"id": session_id}
+
+
+class StoppableEventClient:
+    def stream_events(self, _path, *, on_open=None, deadline=None, stop_event=None):
+        if on_open is not None:
+            on_open()
+        while stop_event is not None and not stop_event.wait(0.01):
+            pass
+        if False:
+            yield {}
 
 
 class DisposableValidationHarnessTest(unittest.TestCase):
@@ -98,18 +109,20 @@ class DisposableValidationHarnessTest(unittest.TestCase):
         self.assertIn("delete verification failed", result["cleanup"]["errors"][0]["error"])
         self.assertIs(result["checks"]["cleanup"], result["cleanup"])
 
-    def test_unexpected_exception_still_closes_resources_and_deletes_sessions(self):
+    def test_unexpected_exception_closes_event_watcher_and_deletes_sessions(self):
         client = FakeCleanupClient()
         result = {"status": "active", "ok": False, "checks": {}, "cleanup": {"status": "queued"}}
-        closed = []
-
-        class Resource:
-            def close(self):
-                closed.append("resource")
+        watcher = None
 
         def validation_body(harness):
+            nonlocal watcher
             harness.track_session("ses_leftover")
-            harness.track_resource(Resource())
+            watcher = harness.track_resource(
+                BackgroundSessionEventWatcher(StoppableEventClient(), "/api/event", "ses_leftover")
+            )
+            watcher.start()
+            watcher.wait_open(1.0)
+            self.assertTrue(watcher.thread.is_alive())
             raise ValueError("boom")
 
         with self.assertRaisesRegex(ValueError, "boom"):
@@ -128,7 +141,9 @@ class DisposableValidationHarnessTest(unittest.TestCase):
                 cleanup_summary_formatter=self._cleanup_summary,
             )
 
-        self.assertEqual(closed, ["resource"])
+        self.assertIsNotNone(watcher)
+        self.assertTrue(watcher.closed.is_set())
+        self.assertFalse(watcher.thread.is_alive())
         self.assertEqual(client.calls, [("DELETE", "ses_leftover"), ("GET", "ses_leftover")])
         self.assertEqual(result["cleanup"]["status"], "failed")
         self.assertIs(result["checks"]["cleanup"], result["cleanup"])
