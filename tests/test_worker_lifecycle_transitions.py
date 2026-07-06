@@ -460,10 +460,14 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 worker = normalize_worker(worker_fields, "review")
                 transition = transition_factory(worker)
                 target_lifecycle = worker_transition_target_lifecycle_state(transition)
-                metadata = WORKER_TRANSITION_DEFINITIONS[transition_name]
+                spec = WORKER_TRANSITION_DEFINITIONS[transition_name]
+                metadata = WORKER_TRANSITION_METADATA[transition_name]
 
                 self.assertIs(transition.name, transition_name)
-                self.assertEqual(metadata, WORKER_TRANSITION_METADATA[transition_name])
+                self.assertEqual(spec.metadata, metadata)
+                self.assertIsInstance(transition.payload, spec.payload_type)
+                self.assertIsNotNone(spec.payload_factory)
+                self.assertIsNotNone(spec.applier)
                 self.assertIn(worker_lifecycle_state(worker), metadata.source_states)
                 self.assertEqual(metadata.source_states, worker_lifecycle_source_states(transition_name))
                 self.assertTrue(worker_transition_is_legal(worker, transition))
@@ -478,6 +482,24 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 assert_worker_outcome(self, worker, **expected_outcome)
                 for field_name, expected_value in expected_fields.items():
                     self.assertEqual(worker_field(worker, field_name), expected_value)
+
+    def test_worker_transition_create_uses_registry_payload_factory(self):
+        transition = WorkerTransition.create(
+            WorkerTransitionName.ACTIVE,
+            "review",
+            timeout_started_at="2026-07-04T00:00:00Z",
+        )
+        spec = WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE]
+        worker = normalize_worker({"timeout_seconds": 30}, "review")
+
+        self.assertIsInstance(transition.payload, spec.payload_type)
+        self.assertEqual(worker_transition_target_lifecycle_state(transition), "active_wait")
+        self.assertTrue(worker_transition_is_legal(worker, transition))
+
+        apply_worker_transition_to_worker(worker, transition)
+
+        assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
+        self.assertEqual(worker_field(worker, "timeout_started_at"), "2026-07-04T00:00:00Z")
 
     def test_retry_transition_metadata_carries_legality_target_and_behavior(self):
         worker = normalize_worker(

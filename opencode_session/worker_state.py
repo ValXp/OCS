@@ -176,6 +176,62 @@ class WorkerTransitionMetadata:
 
 
 @dataclass(frozen=True)
+class WorkerTransitionSpec:
+    name: WorkerTransitionName
+    source_states: frozenset
+    payload_type: object
+    payload_factory: object
+    applier: object
+    target_states: frozenset = frozenset()
+    target_resolver: object = None
+    public_lifecycle_transition: bool = True
+    legality_checker: object = None
+
+    def __post_init__(self):
+        if not isinstance(self.name, WorkerTransitionName):
+            raise ValueError(f"unknown worker transition: {self.name}")
+        object.__setattr__(self, "source_states", frozenset(self.source_states))
+        object.__setattr__(self, "target_states", frozenset(self.target_states))
+        if self.payload_type is None:
+            raise ValueError(f"worker transition '{self.name.value}' missing payload type")
+        if self.payload_factory is None:
+            raise ValueError(f"worker transition '{self.name.value}' missing payload factory")
+        if self.applier is None:
+            raise ValueError(f"worker transition '{self.name.value}' missing applier")
+
+    @property
+    def metadata(self):
+        return WorkerTransitionMetadata(
+            self.name,
+            self.source_states,
+            self.target_states,
+            public_lifecycle_transition=self.public_lifecycle_transition,
+        )
+
+    def build_payload(self, *args, **kwargs):
+        return self.payload_factory(*args, **kwargs)
+
+    def target_lifecycle_state(self, transition):
+        if self.target_resolver is None:
+            return None
+        target_state = self.target_resolver(transition)
+        if target_state is not None and self.target_states and target_state not in self.target_states:
+            raise ValueError(
+                f"worker transition '{self.name.value}' resolved unknown target lifecycle state: {target_state}"
+            )
+        return target_state
+
+    def is_legal(self, latest_worker, transition):
+        if self.legality_checker is not None:
+            return self.legality_checker(latest_worker, transition)
+        return worker_lifecycle_state(latest_worker) in self.source_states
+
+    def apply_payload(self, reducer, transition):
+        _require_transition_payload(transition, self.payload_type)
+        return self.applier(reducer, transition)
+
+
+@dataclass(frozen=True)
 class WorkerTransitionResult:
     applied: bool
     worker: object
@@ -219,18 +275,28 @@ def _lifecycle_metadata(
     )
 
 
-def _transition_metadata(
+def _transition_spec(
     name,
     *,
     source_states=(),
     target_states=(),
+    payload_type=None,
+    payload_factory=None,
+    applier=None,
+    target_resolver=None,
     public_lifecycle_transition=True,
+    legality_checker=None,
 ):
-    return WorkerTransitionMetadata(
+    return WorkerTransitionSpec(
         name,
-        frozenset(source_states),
-        frozenset(target_states),
+        source_states,
+        payload_type,
+        payload_factory,
+        applier,
+        target_states=target_states,
+        target_resolver=target_resolver,
         public_lifecycle_transition=public_lifecycle_transition,
+        legality_checker=legality_checker,
     )
 
 
@@ -585,9 +651,25 @@ def worker_result_lifecycle_state(status):
     return worker_lifecycle_state_for_status_alias(status) or WORKER_LIFECYCLE_FAILED_TERMINAL
 
 
+def _active_transition_lifecycle_state(transition):
+    return worker_lifecycle_state_for_status_alias(WORKER_STATUS_ACTIVE)
+
+
 def _failed_transition_lifecycle_state(transition):
     payload = _require_transition_payload(transition, _FailedTransition)
     return worker_failed_lifecycle_state(retryable=payload.retryable, retry_available=payload.retry_available)
+
+
+def _dependency_blocked_transition_lifecycle_state(transition):
+    return worker_lifecycle_state_for_status_alias(WORKER_STATUS_BLOCKED)
+
+
+def _aborted_transition_lifecycle_state(transition):
+    return worker_lifecycle_state_for_status_alias(WORKER_STATUS_ABORTED)
+
+
+def _retry_scheduled_transition_lifecycle_state(transition):
+    return worker_lifecycle_state_for_public_state(WORKER_STATUS_ACTIVE, WORKER_ACTION_RETRY)
 
 
 def _timed_out_transition_lifecycle_state(transition):
@@ -1027,32 +1109,46 @@ def _apply_snapshot_applied_transition(reducer, transition):
     return worker
 
 
-WORKER_TRANSITION_METADATA = {
-    metadata.name: metadata
-    for metadata in (
-        _transition_metadata(
+WORKER_TRANSITION_DEFINITIONS = {
+    spec.name: spec
+    for spec in (
+        _transition_spec(
             WorkerTransitionName.PROVISIONED,
             source_states=frozenset({WORKER_LIFECYCLE_QUEUED, WORKER_LIFECYCLE_ACTIVE_WAIT})
             | WORKER_RETRYABLE_LIFECYCLE_STATES,
+            payload_type=_ProvisionedTransition,
+            payload_factory=_provisioned_transition_payload,
+            applier=_apply_provisioned_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.ACTIVE,
             source_states=frozenset({WORKER_LIFECYCLE_QUEUED, WORKER_LIFECYCLE_ACTIVE_WAIT})
             | WORKER_RETRYABLE_LIFECYCLE_STATES
             | WORKER_BLOCKED_LIFECYCLE_STATES,
             target_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
+            target_resolver=_active_transition_lifecycle_state,
+            payload_type=_ActiveTransition,
+            payload_factory=_active_transition_payload,
+            applier=_apply_active_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.ATTEMPT_STARTED,
             source_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
+            payload_type=_AttemptStartedTransition,
+            payload_factory=_attempt_started_transition_payload,
+            applier=_apply_attempt_started_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.FAILED,
             source_states=frozenset({WORKER_LIFECYCLE_QUEUED, WORKER_LIFECYCLE_ACTIVE_WAIT})
             | WORKER_RETRYABLE_LIFECYCLE_STATES,
             target_states=WORKER_FAILED_TARGET_LIFECYCLE_STATES,
+            target_resolver=_failed_transition_lifecycle_state,
+            payload_type=_FailedTransition,
+            payload_factory=_failed_transition_payload,
+            applier=_apply_failed_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.DEPENDENCY_BLOCKED,
             source_states=(
                 WORKER_LIFECYCLE_QUEUED,
@@ -1060,26 +1156,42 @@ WORKER_TRANSITION_METADATA = {
                 WORKER_LIFECYCLE_ACTIVE_RETRY,
             ),
             target_states=(WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,),
+            target_resolver=_dependency_blocked_transition_lifecycle_state,
+            payload_type=_DependencyBlockedTransition,
+            payload_factory=_dependency_blocked_transition_payload,
+            applier=_apply_dependency_blocked_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.ABORTED,
             source_states=frozenset({WORKER_LIFECYCLE_QUEUED, WORKER_LIFECYCLE_ACTIVE_WAIT})
             | WORKER_RETRYABLE_LIFECYCLE_STATES
             | WORKER_BLOCKED_LIFECYCLE_STATES
             | WORKER_ABORTED_LIFECYCLE_STATES,
             target_states=(WORKER_LIFECYCLE_ABORTED,),
+            target_resolver=_aborted_transition_lifecycle_state,
+            payload_type=_AbortedTransition,
+            payload_factory=_aborted_transition_payload,
+            applier=_apply_aborted_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.RETRY_SCHEDULED,
             source_states=WORKER_RETRY_SCHEDULE_SOURCE_LIFECYCLE_STATES,
             target_states=(WORKER_LIFECYCLE_ACTIVE_RETRY,),
+            target_resolver=_retry_scheduled_transition_lifecycle_state,
+            payload_type=_RetryScheduledTransition,
+            payload_factory=_retry_scheduled_transition_payload,
+            applier=_apply_retry_scheduled_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.TIMED_OUT,
             source_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
             target_states=WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES,
+            target_resolver=_timed_out_transition_lifecycle_state,
+            payload_type=_TimedOutTransition,
+            payload_factory=_timed_out_transition_payload,
+            applier=_apply_timed_out_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.RESULT_APPLIED,
             source_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
             target_states=(
@@ -1089,21 +1201,34 @@ WORKER_TRANSITION_METADATA = {
                 WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
                 WORKER_LIFECYCLE_ABORTED,
             ),
+            target_resolver=_result_applied_transition_lifecycle_state,
+            payload_type=_ResultAppliedTransition,
+            payload_factory=_result_applied_transition_payload,
+            applier=_apply_result_applied_transition,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.CLEANUP_UPDATED,
             source_states=WORKER_LIFECYCLE_STATES,
+            payload_type=_CleanupUpdatedTransition,
+            payload_factory=_cleanup_updated_transition_payload,
+            applier=_apply_cleanup_updated_transition,
             public_lifecycle_transition=False,
         ),
-        _transition_metadata(
+        _transition_spec(
             WorkerTransitionName.SNAPSHOT_APPLIED,
             source_states=WORKER_LIFECYCLE_STATES,
+            payload_type=_SnapshotAppliedTransition,
+            payload_factory=_snapshot_applied_transition_payload,
+            applier=_apply_snapshot_applied_transition,
             public_lifecycle_transition=False,
+            legality_checker=_snapshot_transition_is_legal,
         ),
     )
 }
 
-WORKER_TRANSITION_DEFINITIONS = WORKER_TRANSITION_METADATA
+WORKER_TRANSITION_METADATA = {
+    transition_name: spec.metadata for transition_name, spec in WORKER_TRANSITION_DEFINITIONS.items()
+}
 
 
 _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
@@ -1112,9 +1237,9 @@ _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
             source_state,
             *(
                 target_state
-                for metadata in WORKER_TRANSITION_METADATA.values()
-                if source_state in metadata.source_states
-                for target_state in metadata.target_states
+                for spec in WORKER_TRANSITION_DEFINITIONS.values()
+                if source_state in spec.source_states
+                for target_state in spec.target_states
             ),
         }
     )
@@ -1122,65 +1247,30 @@ _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
 }
 
 
-def _worker_transition_metadata(name):
+def _worker_transition_spec(name):
     if not isinstance(name, WorkerTransitionName):
         raise ValueError(f"unknown worker transition: {name}")
-    metadata = WORKER_TRANSITION_METADATA.get(name)
-    if metadata is None:
+    spec = WORKER_TRANSITION_DEFINITIONS.get(name)
+    if spec is None:
         raise ValueError(f"unknown worker transition: {name}")
-    return metadata
+    return spec
+
+
+def _worker_transition_metadata(name):
+    spec = _worker_transition_spec(name)
+    return WORKER_TRANSITION_METADATA[spec.name]
 
 
 def worker_transition_target_lifecycle_state(transition):
-    _worker_transition_metadata(transition.name)
-    if transition.name is WorkerTransitionName.ACTIVE:
-        return worker_lifecycle_state_for_status_alias(WORKER_STATUS_ACTIVE)
-    if transition.name is WorkerTransitionName.FAILED:
-        return _failed_transition_lifecycle_state(transition)
-    if transition.name is WorkerTransitionName.DEPENDENCY_BLOCKED:
-        return worker_lifecycle_state_for_status_alias(WORKER_STATUS_BLOCKED)
-    if transition.name is WorkerTransitionName.ABORTED:
-        return worker_lifecycle_state_for_status_alias(WORKER_STATUS_ABORTED)
-    if transition.name is WorkerTransitionName.RETRY_SCHEDULED:
-        return worker_lifecycle_state_for_public_state(WORKER_STATUS_ACTIVE, WORKER_ACTION_RETRY)
-    if transition.name is WorkerTransitionName.TIMED_OUT:
-        return _timed_out_transition_lifecycle_state(transition)
-    if transition.name is WorkerTransitionName.RESULT_APPLIED:
-        return _result_applied_transition_lifecycle_state(transition)
-    return None
+    return _worker_transition_spec(transition.name).target_lifecycle_state(transition)
 
 
 def worker_transition_is_legal(latest_worker, transition):
-    if transition.name is WorkerTransitionName.SNAPSHOT_APPLIED:
-        return _snapshot_transition_is_legal(latest_worker, transition)
-    return worker_lifecycle_state(latest_worker) in _worker_transition_metadata(transition.name).source_states
+    return _worker_transition_spec(transition.name).is_legal(latest_worker, transition)
 
 
 def apply_worker_transition_payload(reducer, transition):
-    _worker_transition_metadata(transition.name)
-    if transition.name is WorkerTransitionName.PROVISIONED:
-        return _apply_provisioned_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.ACTIVE:
-        return _apply_active_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.ATTEMPT_STARTED:
-        return _apply_attempt_started_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.FAILED:
-        return _apply_failed_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.DEPENDENCY_BLOCKED:
-        return _apply_dependency_blocked_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.ABORTED:
-        return _apply_aborted_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.RETRY_SCHEDULED:
-        return _apply_retry_scheduled_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.TIMED_OUT:
-        return _apply_timed_out_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.RESULT_APPLIED:
-        return _apply_result_applied_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.CLEANUP_UPDATED:
-        return _apply_cleanup_updated_transition(reducer, transition)
-    if transition.name is WorkerTransitionName.SNAPSHOT_APPLIED:
-        return _apply_snapshot_applied_transition(reducer, transition)
-    raise ValueError(f"unknown worker transition: {transition.name}")
+    return _worker_transition_spec(transition.name).apply_payload(reducer, transition)
 
 
 def _lifecycle_metadata_with_transition_views(lifecycle_metadata, transition_metadata):
@@ -1676,28 +1766,32 @@ class WorkerTransition:
         )
 
     @classmethod
+    def create(cls, name, worker_id, *payload_args, **payload_kwargs):
+        if not isinstance(name, WorkerTransitionName):
+            raise ValueError(f"unknown worker transition: {name}")
+        return cls(
+            worker_id,
+            name,
+            _worker_transition_spec(name).build_payload(*payload_args, **payload_kwargs),
+        )
+
+    @classmethod
     def provisioned(cls, worker):
         worker_id = worker_field(worker, "id")
-        return cls(worker_id, WorkerTransitionName.PROVISIONED, _provisioned_transition_payload(worker))
+        return cls.create(WorkerTransitionName.PROVISIONED, worker_id, worker)
 
     @classmethod
     def active(cls, worker_id, *, timeout_started_at=UNSET_TRANSITION_FIELD, clear_prompt_ids=False):
-        return cls(
-            worker_id,
+        return cls.create(
             WorkerTransitionName.ACTIVE,
-            _active_transition_payload(
-                timeout_started_at=timeout_started_at,
-                clear_prompt_ids=clear_prompt_ids,
-            ),
+            worker_id,
+            timeout_started_at=timeout_started_at,
+            clear_prompt_ids=clear_prompt_ids,
         )
 
     @classmethod
     def attempt_started(cls, worker_id, attempt):
-        return cls(
-            worker_id,
-            WorkerTransitionName.ATTEMPT_STARTED,
-            _attempt_started_transition_payload(attempt),
-        )
+        return cls.create(WorkerTransitionName.ATTEMPT_STARTED, worker_id, attempt)
 
     @classmethod
     def failed(
@@ -1711,30 +1805,24 @@ class WorkerTransition:
         timeout_started_at=UNSET_TRANSITION_FIELD,
         prompt_ids=(),
     ):
-        return cls(
-            worker_id,
+        return cls.create(
             WorkerTransitionName.FAILED,
-            _failed_transition_payload(
-                category,
-                reason,
-                retryable=retryable,
-                retry_available=retry_available,
-                timeout_started_at=timeout_started_at,
-                prompt_ids=prompt_ids,
-            ),
+            worker_id,
+            category,
+            reason,
+            retryable=retryable,
+            retry_available=retry_available,
+            timeout_started_at=timeout_started_at,
+            prompt_ids=prompt_ids,
         )
 
     @classmethod
     def dependency_blocked(cls, worker_id, blockers):
-        return cls(
-            worker_id,
-            WorkerTransitionName.DEPENDENCY_BLOCKED,
-            _dependency_blocked_transition_payload(blockers),
-        )
+        return cls.create(WorkerTransitionName.DEPENDENCY_BLOCKED, worker_id, blockers)
 
     @classmethod
     def aborted(cls, worker_id, abort):
-        return cls(worker_id, WorkerTransitionName.ABORTED, _aborted_transition_payload(abort))
+        return cls.create(WorkerTransitionName.ABORTED, worker_id, abort)
 
     @classmethod
     def retry_scheduled(
@@ -1747,16 +1835,14 @@ class WorkerTransition:
         timeout_started_at=UNSET_TRANSITION_FIELD,
         prompt_ids=(),
     ):
-        return cls(
-            worker_id,
+        return cls.create(
             WorkerTransitionName.RETRY_SCHEDULED,
-            _retry_scheduled_transition_payload(
-                category,
-                reason,
-                retry_count=retry_count,
-                timeout_started_at=timeout_started_at,
-                prompt_ids=prompt_ids,
-            ),
+            worker_id,
+            category,
+            reason,
+            retry_count=retry_count,
+            timeout_started_at=timeout_started_at,
+            prompt_ids=prompt_ids,
         )
 
     @classmethod
@@ -1771,40 +1857,36 @@ class WorkerTransition:
         manual_retry_required=False,
         timeout_started_at=UNSET_TRANSITION_FIELD,
     ):
-        return cls(
-            worker_id,
+        return cls.create(
             WorkerTransitionName.TIMED_OUT,
-            _timed_out_transition_payload(
-                reason,
-                status=status,
-                timed_out_at=timed_out_at,
-                retry_available=retry_available,
-                manual_retry_required=manual_retry_required,
-                timeout_started_at=timeout_started_at,
-            ),
+            worker_id,
+            reason,
+            status=status,
+            timed_out_at=timed_out_at,
+            retry_available=retry_available,
+            manual_retry_required=manual_retry_required,
+            timeout_started_at=timeout_started_at,
         )
 
     @classmethod
     def result_applied(cls, worker_id, result, *, prompt_ids=(), timeout_started_at=UNSET_TRANSITION_FIELD):
-        return cls(
-            worker_id,
+        return cls.create(
             WorkerTransitionName.RESULT_APPLIED,
-            _result_applied_transition_payload(
-                result,
-                prompt_ids=prompt_ids,
-                timeout_started_at=timeout_started_at,
-            ),
+            worker_id,
+            result,
+            prompt_ids=prompt_ids,
+            timeout_started_at=timeout_started_at,
         )
 
     @classmethod
     def cleanup_updated(cls, worker):
         worker_id = worker_field(worker, "id")
-        return cls(worker_id, WorkerTransitionName.CLEANUP_UPDATED, _cleanup_updated_transition_payload(worker))
+        return cls.create(WorkerTransitionName.CLEANUP_UPDATED, worker_id, worker)
 
     @classmethod
     def snapshot_applied(cls, worker):
         worker_id = _snapshot_worker_id(worker)
-        return cls(worker_id, WorkerTransitionName.SNAPSHOT_APPLIED, _snapshot_applied_transition_payload(worker))
+        return cls.create(WorkerTransitionName.SNAPSHOT_APPLIED, worker_id, worker)
 
 
 def _copy_present(value):
