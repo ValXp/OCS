@@ -18,7 +18,11 @@ from opencode_session.worker_state import (
     normalize_worker,
     normalize_worker_snapshot,
     schedule_worker_retry,
+    worker_lifecycle_source_states,
     worker_lifecycle_state,
+    worker_lifecycle_target_states,
+    worker_transition_is_legal,
+    worker_transition_target_lifecycle_state,
 )
 
 try:
@@ -335,25 +339,138 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         assert_worker_outcome(self, result_worker, status="done", action="collect", lifecycle="done_collect")
         self.assertEqual(result_worker["output_refs"], ["assistant:msg_assistant"])
 
-    def test_worker_transition_definitions_are_complete_and_cohesive(self):
-        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS, WorkerLifecycleReducer
+    def test_worker_transition_names_dispatch_through_public_transitions(self):
+        cases = (
+            (
+                WorkerTransitionName.PROVISIONED,
+                {"session_id": "ses_review", "agent": "build", "model": "openai/gpt-5.5"},
+                WorkerTransition.provisioned,
+                {"status": "queued", "action": "start", "lifecycle": "queued"},
+                {"session_id": "ses_review", "agent": "build", "model": "openai/gpt-5.5"},
+            ),
+            (
+                WorkerTransitionName.ACTIVE,
+                {},
+                mark_worker_active,
+                {"status": "active", "action": "wait", "lifecycle": "active_wait"},
+                {},
+            ),
+            (
+                WorkerTransitionName.ATTEMPT_STARTED,
+                {"status": "active"},
+                lambda worker: WorkerTransition.attempt_started(
+                    worker["id"],
+                    {"id": "attempt-1", "status": "active", "session_id": "ses_review"},
+                ),
+                {"status": "active", "action": "wait", "lifecycle": "active_wait"},
+                {"attempts": [{"id": "attempt-1", "status": "active", "session_id": "ses_review"}]},
+            ),
+            (
+                WorkerTransitionName.FAILED,
+                {"status": "active"},
+                lambda worker: mark_worker_failed(worker, "provider", "provider failed", retryable=False),
+                {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
+                {"failure_category": "provider", "failure_reason": "provider failed"},
+            ),
+            (
+                WorkerTransitionName.DEPENDENCY_BLOCKED,
+                {},
+                lambda worker: mark_dependency_blocked(worker, ["dependency:build"]),
+                {"status": "blocked", "action": "resolve_blocker", "lifecycle": "blocked_dependency"},
+                {"blockers": ["dependency:build"]},
+            ),
+            (
+                WorkerTransitionName.ABORTED,
+                {"status": "active"},
+                lambda worker: mark_worker_aborted(worker, {"accepted": True}),
+                {"status": "aborted", "action": "none", "lifecycle": "aborted"},
+                {"abort": {"accepted": True}},
+            ),
+            (
+                WorkerTransitionName.RETRY_SCHEDULED,
+                {
+                    "status": "failed",
+                    "failure_category": "provider",
+                    "retryable_failures": ["provider"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
+                },
+                lambda worker: schedule_worker_retry(worker, "provider", "try again"),
+                {"status": "active", "action": "retry", "lifecycle": "active_retry"},
+                {"retry_count": 1},
+            ),
+            (
+                WorkerTransitionName.TIMED_OUT,
+                {"status": "active"},
+                lambda worker: WorkerTransition.timed_out(
+                    worker["id"],
+                    "worker timed out",
+                    status="timeout",
+                    timed_out_at="2026-07-04T00:00:00Z",
+                ),
+                {"status": "timeout", "action": "none", "lifecycle": "timeout_terminal"},
+                {"timed_out_at": "2026-07-04T00:00:00Z", "failure_category": "timeout"},
+            ),
+            (
+                WorkerTransitionName.RESULT_APPLIED,
+                {"status": "active"},
+                lambda worker: WorkerTransition.result_applied(
+                    worker["id"],
+                    {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+                ),
+                {"status": "done", "action": "collect", "lifecycle": "done_collect"},
+                {"output_refs": ["assistant:msg_assistant"]},
+            ),
+            (
+                WorkerTransitionName.CLEANUP_UPDATED,
+                {"cleanup": {"requested": True, "deleted": False}},
+                WorkerTransition.cleanup_updated,
+                {"status": "queued", "action": "start", "lifecycle": "queued"},
+                {"cleanup": {"requested": True, "deleted": False}},
+            ),
+            (
+                WorkerTransitionName.SNAPSHOT_APPLIED,
+                {"status": "active", "prompt_ids": ["msg_initial"]},
+                lambda worker: WorkerTransition.snapshot_applied(
+                    normalize_worker_snapshot(
+                        {
+                            "id": worker["id"],
+                            "lifecycle_state": "done_collect",
+                            "prompt_ids": ["msg_done"],
+                            "result": {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+                            "output_refs": ["assistant:msg_assistant"],
+                        },
+                        worker["id"],
+                    )
+                ),
+                {"status": "done", "action": "collect", "lifecycle": "done_collect"},
+                {"prompt_ids": ["msg_initial", "msg_done"], "output_refs": ["assistant:msg_assistant"]},
+            ),
+        )
 
         self.assertEqual(set(WorkerTransitionName), set(WORKER_TRANSITION_METADATA))
-        self.assertEqual(set(WorkerTransitionName), set(_WORKER_TRANSITION_DEFINITIONS))
-        for transition_name, definition in _WORKER_TRANSITION_DEFINITIONS.items():
+        self.assertEqual(set(WorkerTransitionName), {case[0] for case in cases})
+        for transition_name, worker_fields, transition_factory, expected_outcome, expected_fields in cases:
             with self.subTest(transition=transition_name):
-                metadata = WORKER_TRANSITION_METADATA[transition_name]
-                self.assertIs(definition.metadata, metadata)
-                self.assertIs(definition.name, transition_name)
-                self.assertEqual(definition.source_states, metadata.source_states)
-                self.assertEqual(definition.target_states, metadata.target_states)
-                self.assertEqual(definition.target_lifecycle, metadata.target_lifecycle)
-                self.assertIs(definition.apply_transition, getattr(WorkerLifecycleReducer, metadata.apply_method))
-                self.assertTrue(callable(definition.apply_transition))
+                worker = normalize_worker(worker_fields, "review")
+                transition = transition_factory(worker)
+                target_lifecycle = worker_transition_target_lifecycle_state(transition)
+
+                self.assertIs(transition.name, transition_name)
+                self.assertIn(worker_lifecycle_state(worker), worker_lifecycle_source_states(transition_name))
+                self.assertTrue(worker_transition_is_legal(worker, transition))
+                if worker_lifecycle_target_states(transition_name):
+                    self.assertIn(target_lifecycle, worker_lifecycle_target_states(transition_name))
+                else:
+                    self.assertIsNone(target_lifecycle)
+
+                apply_worker_transition_to_worker(worker, transition)
+
+                assert_worker_outcome(self, worker, **expected_outcome)
+                for field_name, expected_value in expected_fields.items():
+                    self.assertEqual(worker[field_name], expected_value)
 
     def test_retry_transition_definition_carries_legality_target_and_behavior(self):
-        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS
-
         worker = normalize_worker(
             {
                 "status": "failed",
@@ -365,12 +482,12 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             "review",
         )
         transition = schedule_worker_retry(worker, "provider", "try again")
-        definition = _WORKER_TRANSITION_DEFINITIONS[transition.name]
-        target_lifecycle = definition.target_lifecycle_state(transition)
+        target_lifecycle = worker_transition_target_lifecycle_state(transition)
 
-        self.assertIn(worker_lifecycle_state(worker), definition.source_states)
+        self.assertIn(worker_lifecycle_state(worker), worker_lifecycle_source_states(transition.name))
+        self.assertTrue(worker_transition_is_legal(worker, transition))
         self.assertEqual(target_lifecycle, "active_retry")
-        self.assertIn(target_lifecycle, definition.target_states)
+        self.assertIn(target_lifecycle, worker_lifecycle_target_states(transition.name))
 
         apply_worker_transition_to_worker(worker, transition)
 

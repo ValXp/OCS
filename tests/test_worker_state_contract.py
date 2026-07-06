@@ -122,12 +122,10 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertIn("timeout_failed_terminal", WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES)
 
     def test_lifecycle_metadata_feeds_status_helpers_and_reducer_legality(self):
-        from opencode_session.commands.runs import _lifecycle_state_from_status_alias
-
         for status, lifecycle_state in WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS.items():
             with self.subTest(status=status):
                 self.assertEqual(worker_lifecycle_state_for_status_alias(status), lifecycle_state)
-                self.assertEqual(_lifecycle_state_from_status_alias(status), lifecycle_state)
+                self.assertEqual(worker_lifecycle_state(normalize_worker({"status": status}, "review")), lifecycle_state)
                 self.assertEqual(status_priority(status), WORKER_STATUS_PRIORITY_BY_STATUS[status])
 
         for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
