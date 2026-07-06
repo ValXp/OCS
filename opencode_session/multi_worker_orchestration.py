@@ -59,7 +59,8 @@ class DependencyOrderedSerialRunStartOutcome:
 
 @dataclass(frozen=True)
 class DependencyScheduleTick:
-    ready_worker_ids: tuple
+    next_worker_id: Optional[str]
+    eligible_worker_ids: tuple
     dependency_blocked_transitions: tuple
     has_pending_workers: bool
     blockers_by_worker_id: dict
@@ -70,8 +71,10 @@ class DependencySchedulePlanner:
         workers = workers if isinstance(workers, dict) else {}
         analysis = analyze_worker_dependencies(workers)
         blocked_worker_ids = set(analysis.blockers_by_worker_id)
+        eligible_worker_ids = analysis.ready_worker_ids
         return DependencyScheduleTick(
-            ready_worker_ids=analysis.ready_worker_ids,
+            next_worker_id=eligible_worker_ids[0] if eligible_worker_ids else None,
+            eligible_worker_ids=eligible_worker_ids,
             dependency_blocked_transitions=tuple(
                 _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
                 for worker_id in sorted(blocked_worker_ids)
@@ -110,7 +113,7 @@ class DurableDependencyScheduler:
 
 
 @dataclass
-class WorkerWaveExecutionOutcome:
+class NextWorkerExecutionOutcome:
     run: RunRecord
     first_error_outcome: Optional[WorkerExecutionOutcome] = None
     fail_fast_outcome: Optional[WorkerExecutionOutcome] = None
@@ -144,15 +147,15 @@ class DisposableSessionTracker:
         return cleanup_result.run, None
 
 
-class ReadyWorkerWaveExecutor:
+class NextEligibleWorkerExecutor:
     def __init__(self, core, *, persist_summary):
         self.core = core
         self.persist_summary = persist_summary
 
-    def execute_wave(
+    def execute_next(
         self,
         run,
-        ready_worker_ids,
+        worker_id,
         client,
         capabilities,
         *,
@@ -160,25 +163,24 @@ class ReadyWorkerWaveExecutor:
         execution_policy,
     ):
         first_error_outcome = None
-        attempt_workers = _workers_by_ids(run.get("workers", {}), ready_worker_ids)
-        while attempt_workers:
-            retry_workers = []
-            for worker in attempt_workers:
-                outcome = self._execute_single_worker(client, run, worker, capabilities)
-                run = outcome.run or run
-                current_worker = run.get("workers", {}).get(worker.get("id"), worker)
-                session_tracker.remember_worker_outcome(run, current_worker, outcome)
-                if outcome.kind == RETRY_SCHEDULED:
-                    retry_workers.append(current_worker)
-                    continue
-                if outcome.error is not None:
-                    if first_error_outcome is None:
-                        first_error_outcome = outcome
-                    if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                        return WorkerWaveExecutionOutcome(run, first_error_outcome, outcome)
+        worker = _worker_by_id(run.get("workers", {}), worker_id)
+        while worker is not None:
+            outcome = self._execute_single_worker(client, run, worker, capabilities)
+            run = outcome.run or run
+            current_worker = run.get("workers", {}).get(worker.get("id"), worker)
+            session_tracker.remember_worker_outcome(run, current_worker, outcome)
+            if outcome.kind == RETRY_SCHEDULED:
+                run = self.persist_summary(run)
+                worker = current_worker
+                continue
+            if outcome.error is not None:
+                if first_error_outcome is None:
+                    first_error_outcome = outcome
+                if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                    return NextWorkerExecutionOutcome(run, first_error_outcome, outcome)
             run = self.persist_summary(run)
-            attempt_workers = retry_workers
-        return WorkerWaveExecutionOutcome(run, first_error_outcome)
+            worker = None
+        return NextWorkerExecutionOutcome(run, first_error_outcome)
 
     def _execute_single_worker(self, client, run, worker, capabilities):
         return self.core.execute_worker(
@@ -219,7 +221,7 @@ class DependencyOrderedSerialRunOrchestrationService:
             executor=self.executor,
             now=self.now,
         )
-        self.wave_executor = ReadyWorkerWaveExecutor(self.core, persist_summary=self._persist_summary)
+        self.worker_executor = NextEligibleWorkerExecutor(self.core, persist_summary=self._persist_summary)
 
     def start(self, request):
         run = self.store.load_run(request.name)
@@ -261,7 +263,7 @@ class DependencyOrderedSerialRunOrchestrationService:
 
             client = probe_outcome.client
             run = self._activate_run(run)
-            execution_outcome = self._execute_ready_waves(
+            execution_outcome = self._execute_eligible_workers(
                 run,
                 schedule_tick,
                 client,
@@ -284,7 +286,7 @@ class DependencyOrderedSerialRunOrchestrationService:
         run, cleanup_error = session_tracker.cleanup(self.core, client, run)
         return cleanup_error or self._execution_outcome(run, first_error_outcome)
 
-    def _execute_ready_waves(
+    def _execute_eligible_workers(
         self,
         run,
         schedule_tick,
@@ -295,25 +297,25 @@ class DependencyOrderedSerialRunOrchestrationService:
         execution_policy,
     ):
         first_error_outcome = None
-        while schedule_tick.ready_worker_ids:
-            wave_outcome = self.wave_executor.execute_wave(
+        while schedule_tick.next_worker_id is not None:
+            worker_outcome = self.worker_executor.execute_next(
                 run,
-                schedule_tick.ready_worker_ids,
+                schedule_tick.next_worker_id,
                 client,
                 capabilities,
                 session_tracker=session_tracker,
                 execution_policy=execution_policy,
             )
-            run = wave_outcome.run
+            run = worker_outcome.run
             run, schedule_tick = self.scheduler.persist_next_tick(run)
             if first_error_outcome is None:
-                first_error_outcome = wave_outcome.first_error_outcome
-            if wave_outcome.fail_fast_outcome is not None:
-                return WorkerWaveExecutionOutcome(run, first_error_outcome, wave_outcome.fail_fast_outcome)
-        return WorkerWaveExecutionOutcome(run, first_error_outcome)
+                first_error_outcome = worker_outcome.first_error_outcome
+            if worker_outcome.fail_fast_outcome is not None:
+                return NextWorkerExecutionOutcome(run, first_error_outcome, worker_outcome.fail_fast_outcome)
+        return NextWorkerExecutionOutcome(run, first_error_outcome)
 
     def _outcome_if_no_ready_workers(self, run, schedule_tick):
-        if schedule_tick.ready_worker_ids:
+        if schedule_tick.next_worker_id is not None:
             return None
         return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
@@ -382,8 +384,9 @@ def schedule_dependency_ordered_tick(workers):
     return DependencySchedulePlanner().plan(workers)
 
 
-def _workers_by_ids(workers, worker_ids):
-    return [workers[worker_id] for worker_id in worker_ids if isinstance(workers.get(worker_id), dict)]
+def _worker_by_id(workers, worker_id):
+    worker = workers.get(worker_id) if isinstance(workers, dict) else None
+    return worker if isinstance(worker, dict) else None
 
 
 def _pending_prompted_workers(workers):

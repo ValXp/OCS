@@ -129,7 +129,8 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
         tick = schedule_dependency_ordered_tick(workers)
 
-        self.assertEqual(tick.ready_worker_ids, ("docs",))
+        self.assertEqual(tick.next_worker_id, "docs")
+        self.assertEqual(tick.eligible_worker_ids, ("docs",))
         self.assertEqual([transition.worker_id for transition in tick.dependency_blocked_transitions], ["review"])
         self.assertTrue(tick.has_pending_workers)
         self.assertEqual(workers["review"]["status"], "queued")
