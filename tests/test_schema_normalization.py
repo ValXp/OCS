@@ -4,7 +4,7 @@ from opencode_session.events import normalize_event
 from opencode_session.schema_admission_adapter import normalize_admission_record
 from opencode_session.schema_common import NormalizedEventRecord, PersistedRunRecord, WorkerSnapshotRecord
 from opencode_session.schema_event_adapter import normalize_event_record
-from opencode_session.schema_message_adapter import iter_normalized_message_records, normalize_message_record
+from opencode_session.schema_message_adapter import iter_normalized_message_records, message_value, normalize_message_record
 from opencode_session.schema_session_adapter import normalize_session_payload
 
 
@@ -107,7 +107,7 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(session["createdAt"], "2026-07-01T00:00:00Z")
         self.assertEqual(session["updatedAt"], "2026-07-01T00:00:03Z")
 
-    def test_session_route_adapter_is_selected_from_route_path(self):
+    def test_session_route_path_selects_api_boundary_normalization(self):
         payload = {"sessions": [{"sessionID": "ses_legacy", "name": "Legacy"}]}
 
         api_session = normalize_session_payload(payload, route_path="/api/session")["sessions"][0]
@@ -116,6 +116,34 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(api_session["schema_status"], "unknown")
         self.assertEqual(legacy_session["schema_status"], "known")
         self.assertEqual(legacy_session["id"], "ses_legacy")
+
+    def test_api_session_route_normalizes_explicit_api_shape(self):
+        payload = {
+            "data": [
+                {
+                    "id": "ses_api",
+                    "title": "API session",
+                    "directory": "/tmp/project",
+                    "agent": "build",
+                    "model": "openai/gpt-5.5",
+                    "usage": {"input": 4, "output": 6},
+                    "created": "2026-07-01T00:00:00Z",
+                    "updated": "2026-07-01T00:00:03Z",
+                }
+            ]
+        }
+
+        session = normalize_session_payload(payload, route_path="/api/session")["data"][0]
+
+        self.assertEqual(session["schema_status"], "known")
+        self.assertEqual(session["id"], "ses_api")
+        self.assertEqual(session["title"], "API session")
+        self.assertEqual(session["directory"], "/tmp/project")
+        self.assertEqual(session["agent"], "build")
+        self.assertEqual(session["model"], "openai/gpt-5.5")
+        self.assertEqual(session["tokens"], {"input": 4, "output": 6, "total": 10})
+        self.assertEqual(session["createdAt"], "2026-07-01T00:00:00Z")
+        self.assertEqual(session["updatedAt"], "2026-07-01T00:00:03Z")
 
     def test_normalizes_message_evidence_aliases(self):
         payload = {
@@ -239,6 +267,24 @@ class SchemaNormalizationTest(unittest.TestCase):
                 "raw": {"unexpected": True},
             },
         )
+
+    def test_message_error_only_shape_is_known_for_provider_failures(self):
+        message = {"data": {"reason": "quota exceeded"}}
+
+        self.assertEqual(
+            normalize_message_record(message),
+            {
+                "reason": "quota exceeded",
+                "id": None,
+                "role": None,
+                "status": None,
+                "raw_status": None,
+                "cost": None,
+                "tokens": None,
+                "text": "",
+            },
+        )
+        self.assertEqual(message_value(message, "error", "reason", "message"), "quota exceeded")
 
     def test_event_session_mismatch_is_explicit_but_watcher_boundary_filters_it(self):
         event = {
