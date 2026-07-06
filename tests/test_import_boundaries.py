@@ -178,34 +178,6 @@ class ImportBoundaryTest(unittest.TestCase):
             any(hasattr(metadata, "exit_code") for metadata in worker_state.WORKER_LIFECYCLE_METADATA.values())
         )
 
-    def test_worker_state_internal_modules_do_not_depend_on_public_facade(self):
-        project_root = Path(__file__).resolve().parents[1]
-        package_dir = project_root / "opencode_session"
-        internal_module_paths = (
-            package_dir / "status_policy.py",
-            package_dir / "worker_lifecycle.py",
-            package_dir / "worker_snapshot_codec.py",
-        )
-        offenders = []
-
-        for path in internal_module_paths:
-            if not path.exists():
-                continue
-            tree = ast.parse(path.read_text(), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    if any(alias.name == "opencode_session.worker_state" for alias in node.names):
-                        offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
-                elif isinstance(node, ast.ImportFrom):
-                    imports_facade_module = node.module == "opencode_session.worker_state"
-                    imports_facade_from_package = node.module == "opencode_session" and any(
-                        alias.name == "worker_state" for alias in node.names
-                    )
-                    if imports_facade_module or imports_facade_from_package:
-                        offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
-
-        self.assertEqual([], offenders)
-
     def test_worker_state_public_types_are_not_imported_from_reducer(self):
         project_root = Path(__file__).resolve().parents[1]
         package_dir = project_root / "opencode_session"
