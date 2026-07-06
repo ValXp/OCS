@@ -13,7 +13,13 @@ from opencode_session.worker_state import (
     refresh_run_summary,
     schedule_worker_retry,
 )
+from opencode_session.schema_common import Worker, WorkerSnapshotRecord
 from opencode_session.worker_domain import WorkerRecord, WorkerSchedulingState, WorkerTransition
+from opencode_session.worker_snapshot_codec import (
+    require_internal_worker,
+    deserialize_worker_record,
+    serialize_worker_snapshot,
+)
 
 try:
     from tests.worker_state_scenarios import WorkerScenario, assert_worker_outcome
@@ -90,6 +96,56 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["lifecycle_state"], "active_wait")
         self.assertEqual(worker["status"], "active")
         self.assertEqual(worker["next_eligible_action"], "wait")
+
+    def test_worker_model_requires_internal_lifecycle_status_and_action_fields(self):
+        required_keys = Worker.__required_keys__
+
+        self.assertIn("session_id", required_keys)
+        self.assertIn("lifecycle_state", required_keys)
+        self.assertIn("status", required_keys)
+        self.assertIn("next_eligible_action", required_keys)
+        self.assertEqual(WorkerSnapshotRecord.__required_keys__, frozenset())
+
+    def test_deserialize_worker_snapshot_hydrates_required_internal_fields(self):
+        worker = deserialize_worker_record(
+            {
+                "status": "active",
+                "next_eligible_action": "retry",
+                "dependencies": "build",
+            },
+            "review",
+        )
+
+        require_internal_worker(worker)
+        self.assertEqual(worker["id"], "review")
+        self.assertIsNone(worker["session_id"])
+        self.assertEqual(worker["dependencies"], [])
+        self.assertEqual(worker["lifecycle_state"], "active_retry")
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["next_eligible_action"], "retry")
+
+    def test_serialize_worker_snapshot_keeps_public_state_out_of_persisted_json(self):
+        worker = deserialize_worker_record(
+            {
+                "id": "review",
+                "session_id": "ses_review",
+                "lifecycle_state": "done_collect",
+                "status": "active",
+                "next_eligible_action": "retry",
+            },
+            "review",
+        )
+
+        snapshot = serialize_worker_snapshot(worker, "review")
+
+        self.assertEqual(snapshot["lifecycle_state"], "done_collect")
+        self.assertEqual(snapshot["session_id"], "ses_review")
+        self.assertNotIn("status", snapshot)
+        self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_internal_worker_guard_reports_missing_required_fields(self):
+        with self.assertRaisesRegex(ValueError, "session_id"):
+            require_internal_worker({"id": "review"})
 
     def test_mark_worker_active_sets_waiting_action_and_timeout_start(self):
         worker = normalize_worker({"timeout_seconds": 30}, "builder")

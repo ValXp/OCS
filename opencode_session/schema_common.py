@@ -89,6 +89,8 @@ class WorkerAttemptRecord(TypedDict, total=False):
     assistant_message_id: str
 
 
+# Persisted snapshots are intentionally sparse JSON. The storage boundary hydrates
+# them into Worker before core orchestration code sees a worker.
 class WorkerSnapshotRecord(TypedDict, total=False):
     id: str
     name: str
@@ -122,7 +124,49 @@ class WorkerSnapshotRecord(TypedDict, total=False):
     abort: JsonObject
 
 
-class WorkerRecordShape(WorkerSnapshotRecord, total=False):
+class WorkerRequiredFields(TypedDict):
+    id: str
+    role: Optional[str]
+    session_id: Optional[str]
+    agent: Optional[str]
+    model: Optional[str]
+    lifecycle_state: str
+    status: str
+    next_eligible_action: str
+    dependencies: List[str]
+    prompt_ids: List[str]
+    retry_count: int
+    retry_limit: int
+    retryable_failures: List[str]
+    timeout_seconds: Optional[float]
+    timeout_policy: str
+    timeout_started_at: JsonValue
+    timed_out_at: JsonValue
+    failure_category: Optional[str]
+    failure_reason: Optional[str]
+    last_failure_category: Optional[str]
+    last_failure_reason: Optional[str]
+    blockers: List[str]
+    output_refs: List[str]
+
+
+class Worker(WorkerRequiredFields, total=False):
+    name: str
+    title: str
+    prompt: str
+    error: str
+    failure_retryable: bool
+    manual_retry_required: bool
+    cleanup: JsonObject
+    abort: JsonObject
+    attempts: List[WorkerAttemptRecord]
+    result: JsonObject
+
+
+WORKER_REQUIRED_FIELD_NAMES = tuple(WorkerRequiredFields.__annotations__)
+
+
+class WorkerRecordShape(Worker):
     status: str
     next_eligible_action: str
 
@@ -152,7 +196,7 @@ class RunRecord(TypedDict, total=False):
     timeout_seconds: Optional[float]
     blockers: List[str]
     output_refs: List[str]
-    workers: Dict[str, WorkerRecordShape]
+    workers: Dict[str, Worker]
     created_at: JsonValue
     updated_at: JsonValue
 

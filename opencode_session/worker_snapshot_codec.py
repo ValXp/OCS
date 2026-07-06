@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 
+from opencode_session.schema_common import WORKER_REQUIRED_FIELD_NAMES
 from opencode_session.worker_lifecycle import (
     WORKER_LIFECYCLE_QUEUED,
     WORKER_LIFECYCLE_STATES,
@@ -85,7 +86,7 @@ class WorkerRecord:
     def default_fields(cls, worker_id):
         fields = cls.default_snapshot_fields(worker_id)
         fields.update(cls.public_state_fields(fields["lifecycle_state"]))
-        return fields
+        return require_internal_worker(fields)
 
     @classmethod
     def public_state(cls, lifecycle_state):
@@ -156,7 +157,7 @@ class WorkerRecord:
     def to_worker(self):
         normalized = self.to_snapshot()
         normalized.update(self.public_state_fields(normalized["lifecycle_state"]))
-        return normalized
+        return require_internal_worker(normalized)
 
     def serialized_public_state(self):
         return self.public_state_fields(self.lifecycle_state)
@@ -188,3 +189,10 @@ def snapshot_state_source(worker):
     if "status" in source or "next_eligible_action" in source:
         source.pop("lifecycle_state", None)
     return source
+
+
+def require_internal_worker(worker):
+    missing = [field_name for field_name in WORKER_REQUIRED_FIELD_NAMES if field_name not in worker]
+    if missing:
+        raise ValueError(f"internal worker missing required fields: {', '.join(missing)}")
+    return worker
