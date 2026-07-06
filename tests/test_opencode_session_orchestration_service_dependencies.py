@@ -267,12 +267,14 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
 
             def seed_stale_metadata(run):
                 worker = run["workers"]["review"]
-                worker.set_field("error", "previous failure")
-                worker.set_field("failure_category", "api")
-                worker.set_field("failure_reason", "previous failure")
-                worker.set_field("failure_retryable", False)
-                worker.set_field("last_failure_category", "api")
-                worker.set_field("last_failure_reason", "previous failure")
+                worker.update_canonical_fields(
+                    error="previous failure",
+                    failure_category="api",
+                    failure_reason="previous failure",
+                    failure_retryable=False,
+                    last_failure_category="api",
+                    last_failure_reason="previous failure",
+                )
 
             scenario.store.update_run(RUN_NAME, seed_stale_metadata)
             executions = []

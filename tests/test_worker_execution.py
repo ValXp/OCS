@@ -644,7 +644,7 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker.set_field("timeout_seconds", 1)
+            worker.update_canonical_fields(timeout_seconds=1)
             client = FakeClient(["ses_initial"])
             executions = []
 
@@ -678,8 +678,7 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker.set_field("retry_limit", 1)
-            worker.set_field("retryable_failures", ["provider"])
+            worker.update_canonical_fields(retry_limit=1, retryable_failures=["provider"])
             client = FakeClient(["ses_initial"])
             executions = []
 
@@ -716,9 +715,7 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker.set_field("timeout_seconds", 0.05)
-            worker.set_field("retry_limit", 1)
-            worker.set_field("retryable_failures", ["timeout"])
+            worker.update_canonical_fields(timeout_seconds=0.05, retry_limit=1, retryable_failures=["timeout"])
             client = FakeClient(["ses_initial", "ses_unused"])
 
             def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
@@ -818,9 +815,7 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker.set_field("timeout_seconds", 0.05)
-            worker.set_field("retry_limit", 1)
-            worker.set_field("retryable_failures", ["timeout"])
+            worker.update_canonical_fields(timeout_seconds=0.05, retry_limit=1, retryable_failures=["timeout"])
             client = FakeClient(["ses_initial", "ses_retry"])
 
             def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
@@ -864,9 +859,7 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker.set_field("timeout_seconds", 0.05)
-            worker.set_field("retry_limit", 1)
-            worker.set_field("retryable_failures", ["timeout"])
+            worker.update_canonical_fields(timeout_seconds=0.05, retry_limit=1, retryable_failures=["timeout"])
             client = FakeClient(["ses_initial", "ses_retry"])
 
             def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):

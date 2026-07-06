@@ -116,7 +116,7 @@ def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
     merged_values = []
     for source in (latest_worker, worker_record):
         if isinstance(source, WorkerRecord):
-            values = source.field(field_name)
+            values = getattr(source, field_name, None)
         else:
             values = source.get(field_name) if isinstance(source, Mapping) else None
         if not isinstance(values, list):

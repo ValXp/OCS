@@ -194,11 +194,11 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         })
 
         first_step = plan_dependency_ordered_serial_step(workers)
-        workers["build"].set_field("lifecycle_state", "done_collect")
+        workers["build"].update_canonical_fields(lifecycle_state="done_collect")
         second_step = plan_dependency_ordered_serial_step(workers)
-        workers["review"].set_field("lifecycle_state", "done_collect")
+        workers["review"].update_canonical_fields(lifecycle_state="done_collect")
         third_step = plan_dependency_ordered_serial_step(workers)
-        workers["deploy"].set_field("lifecycle_state", "done_collect")
+        workers["deploy"].update_canonical_fields(lifecycle_state="done_collect")
         final_step = plan_dependency_ordered_serial_step(workers)
 
         self.assertEqual(first_step.worker_id, "build")

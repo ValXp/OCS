@@ -317,7 +317,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 model="openai/gpt-5.5",
             )
             build_worker = run["workers"]["build"]
-            build_worker.set_field("session_id", "ses_created_from_stale_snapshot")
+            build_worker.set_session("ses_created_from_stale_snapshot")
             result = {
                 "session_id": "ses_created_from_stale_snapshot",
                 "status": "done",

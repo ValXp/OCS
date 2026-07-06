@@ -57,27 +57,28 @@ def upsert_worker_record(run, worker_id, changes, *, now):
             raise RunRecordError(
                 f"worker '{worker_id}' updates must use lifecycle_state, not {public_field_name}"
             )
-    for key in (
-        "role",
-        "session_id",
-        "agent",
-        "model",
-        "prompt",
-        "retry_count",
-        "retry_limit",
-        "timeout_seconds",
-        "timeout_policy",
-    ):
-        if changes.get(key) is not None:
-            worker.set_field(key, changes[key])
     if changes.get("lifecycle_state") is not None:
         lifecycle_state = changes["lifecycle_state"]
         if lifecycle_state not in WORKER_LIFECYCLE_STATES:
             raise RunRecordError(f"worker '{worker_id}' has invalid lifecycle_state: {lifecycle_state}")
-        worker.set_field("lifecycle_state", lifecycle_state)
-    for key in ("dependencies", "prompt_ids", "retryable_failures", "blockers", "output_refs"):
-        if changes.get(key) is not None:
-            worker.set_field(key, changes[key])
+    worker.update_canonical_fields(
+        skip_none=True,
+        role=changes.get("role"),
+        session_id=changes.get("session_id"),
+        agent=changes.get("agent"),
+        model=changes.get("model"),
+        prompt=changes.get("prompt"),
+        retry_count=changes.get("retry_count"),
+        retry_limit=changes.get("retry_limit"),
+        timeout_seconds=changes.get("timeout_seconds"),
+        timeout_policy=changes.get("timeout_policy"),
+        lifecycle_state=changes.get("lifecycle_state"),
+        dependencies=changes.get("dependencies"),
+        prompt_ids=changes.get("prompt_ids"),
+        retryable_failures=changes.get("retryable_failures"),
+        blockers=changes.get("blockers"),
+        output_refs=changes.get("output_refs"),
+    )
 
     workers[worker_id] = hydrate_worker_record(worker, worker_id)
     run["updated_at"] = now

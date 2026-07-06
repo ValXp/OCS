@@ -89,7 +89,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                     }
                 )
                 updated_run = deepcopy(run)
-                updated_run["workers"][worker_field(worker, "id")].set_field("lifecycle_state", "done_collect")
+                updated_run["workers"][worker.worker_id].update_canonical_fields(lifecycle_state="done_collect")
                 return WorkerExecutionOutcome("completed", run=updated_run)
 
         class RecordingSessionTracker:
@@ -163,11 +163,13 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                 if self.calls > 1:
                     test_case.fail("selected serial worker execution should not retry inline")
                 updated_run = deepcopy(run)
-                updated_worker = updated_run["workers"][worker_field(worker, "id")]
-                updated_worker.set_field("lifecycle_state", "active_retry")
-                updated_worker.set_field("retry_count", 1)
-                updated_worker.set_field("last_failure_category", "provider")
-                updated_worker.set_field("last_failure_reason", "transient provider outage")
+                updated_worker = updated_run["workers"][worker.worker_id]
+                updated_worker.update_canonical_fields(
+                    lifecycle_state="active_retry",
+                    retry_count=1,
+                    last_failure_category="provider",
+                    last_failure_reason="transient provider outage",
+                )
                 return WorkerExecutionOutcome("retry_scheduled", failure_category="provider", run=updated_run)
 
         class RecordingSessionTracker:

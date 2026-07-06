@@ -65,7 +65,7 @@ def _worker_fields(worker):
 
 def _raw_worker_field(worker, field_name, default=None):
     if isinstance(worker, WorkerRecord):
-        return worker.field(field_name, default)
+        return worker._compat_field(field_name, default)
     if isinstance(worker, Mapping):
         return worker.get(field_name, default)
     return default

@@ -4,7 +4,7 @@ from opencode_session.formatting import (
     format_table as _format_table,
 )
 from opencode_session.schema_helpers import tokens_total as _tokens_total
-from opencode_session.worker_state import worker_field, worker_output_dict
+from opencode_session.worker_state import worker_output_dict
 
 
 def format_run_compact(run):
@@ -38,10 +38,10 @@ def format_run_compact(run):
 
 
 def format_worker_result_compact(worker):
-    result = worker_field(worker, "result")
+    result = worker.result
     fields = [
-        ("worker", worker_field(worker, "id")),
-        ("role", worker_field(worker, "role")),
+        ("worker", worker.worker_id),
+        ("role", worker.role),
         ("session", result["session_id"]),
         ("status", result["status"]),
         ("user", result["message_ids"]["user"]),

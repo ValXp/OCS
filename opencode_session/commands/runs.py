@@ -13,7 +13,6 @@ from opencode_session.run_record import run_record_for_output
 from opencode_session.run_services import RunCommandService, RunStartRequest, RunWorkerSessionNotFound
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root
 from opencode_session.session_lifecycle import format_abort_compact
-from opencode_session.worker_state import worker_field
 
 def add_run_parser(subparsers, *, add_server_argument, positive_float, handler):
     parser = subparsers.add_parser("run", help="manage local orchestration runs")
@@ -206,7 +205,7 @@ def _collect_run_results(args, service, **_context):
     if collection.worker is not None:
         return _print_single_worker_result(args, collection.worker)
     data = [
-        {"worker": worker_field(worker, "id"), "role": worker_field(worker, "role"), "result": worker_field(worker, "result")}
+        {"worker": worker.worker_id, "role": worker.role, "result": worker.result}
         for worker in collection.workers
     ]
     return render_command_result(
@@ -216,7 +215,7 @@ def _collect_run_results(args, service, **_context):
 
 
 def _print_single_worker_result(args, worker):
-    result = worker_field(worker, "result")
+    result = worker.result
     return render_command_result(args, result, compact=_format_run_compact(result))
 
 
@@ -241,8 +240,8 @@ def _steer_run_worker(args, service, *, print_error, unavailable_exit, unsupport
     admission = result.admission
     return render_command_result(
         args,
-        {"run": run["name"], "worker": worker_field(worker, "id"), "admission": admission},
-        compact=f"run={_compact_value(run['name'])} worker={_compact_value(worker_field(worker, 'id'))} {format_admission_compact(admission)}",
+        {"run": run["name"], "worker": worker.worker_id, "admission": admission},
+        compact=f"run={_compact_value(run['name'])} worker={_compact_value(worker.worker_id)} {format_admission_compact(admission)}",
     )
 
 
@@ -258,8 +257,8 @@ def _abort_run_worker(args, service, *, print_error, unavailable_exit, **_contex
     abort = result.abort
     return render_command_result(
         args,
-        {"run": run["name"], "worker": worker_field(worker, "id"), "abort": abort},
-        compact=f"run={_compact_value(run['name'])} worker={_compact_value(worker_field(worker, 'id'))} {format_abort_compact(abort)}",
+        {"run": run["name"], "worker": worker.worker_id, "abort": abort},
+        compact=f"run={_compact_value(run['name'])} worker={_compact_value(worker.worker_id)} {format_abort_compact(abort)}",
     )
 
 

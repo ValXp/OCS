@@ -1421,12 +1421,12 @@ def _worker_fields(worker):
 
 
 def worker_field(worker, field_name, default=None):
-    """Compatibility accessor for dynamic persisted fields; core invariants use WorkerRecord properties."""
-    return _require_worker_record(worker).field(field_name, default)
+    """Boundary accessor for dynamic persisted fields; core code uses WorkerRecord properties."""
+    return _require_worker_record(worker)._compat_field(field_name, default)
 
 
 def worker_has_field(worker, field_name):
-    return _require_worker_record(worker).has_field(field_name)
+    return _require_worker_record(worker)._has_compat_field(field_name)
 
 
 def is_worker_record(worker):
@@ -1516,6 +1516,9 @@ def is_dependency_blockable_worker(worker):
     return WorkerSchedulingState.from_worker(worker).can_block_for_dependency()
 
 
+_UNSET_WORKER_UPDATE = object()
+
+
 @dataclass(init=False)
 class WorkerRecord:
     """Hydrated worker domain object with explicit serialization boundaries."""
@@ -1551,7 +1554,7 @@ class WorkerRecord:
     abort: Optional[dict] = None
     attempts: list = dataclass_field(default_factory=list)
     result: Optional[dict] = None
-    extras: dict = dataclass_field(default_factory=dict)
+    _extras: dict = dataclass_field(default_factory=dict, repr=False)
     _present_optional_fields: set = dataclass_field(default_factory=set, repr=False)
 
     __iter__ = None
@@ -1559,7 +1562,7 @@ class WorkerRecord:
     def __init__(self, worker_id, fields=None, *, allow_extra_fields=False):
         self._reset_fields(worker_id)
         if fields is not None:
-            self.merge_fields(fields, allow_extra_fields=allow_extra_fields)
+            self._merge_fields(fields, allow_extra_fields=allow_extra_fields)
         if not self.id:
             self._set_canonical_field("id", worker_id)
 
@@ -1573,7 +1576,7 @@ class WorkerRecord:
 
     def _reset_fields(self, worker_id):
         defaults = self.default_snapshot_fields(worker_id)
-        self.extras = {}
+        self._extras = {}
         self._present_optional_fields = set()
         for field_name in WORKER_REQUIRED_FIELD_NAMES:
             setattr(self, field_name, deepcopy(defaults[field_name]))
@@ -1587,7 +1590,7 @@ class WorkerRecord:
             if field_name not in self._present_optional_fields:
                 return default
             return getattr(self, field_name)
-        return self.extras.get(field_name, default)
+        return self._extras.get(field_name, default)
 
     def _list_field(self, field_name: str) -> list:
         value = self._raw_field(field_name)
@@ -1630,23 +1633,19 @@ class WorkerRecord:
             return
         if not allow_extra_fields:
             raise ValueError(f"unknown worker field: {field_name}")
-        self.extras[field_name] = deepcopy(value)
+        self._extras[field_name] = deepcopy(value)
 
-    def field(self, field_name: str, default: object = None) -> object:
+    def _compat_field(self, field_name: str, default: object = None) -> object:
         return self._raw_field(field_name, default)
 
-    def has_field(self, field_name: str) -> bool:
+    def _has_compat_field(self, field_name: str) -> bool:
         if field_name in WORKER_REQUIRED_FIELD_NAMES:
             return True
         if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             return field_name in self._present_optional_fields
-        return field_name in self.extras
+        return field_name in self._extras
 
-    def set_field(self, field_name, value):
-        self._set_field_value(field_name, value)
-        return self
-
-    def remove_field(self, field_name):
+    def _remove_field(self, field_name):
         if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             setattr(self, field_name, None)
             self._present_optional_fields.discard(field_name)
@@ -1654,10 +1653,10 @@ class WorkerRecord:
             default_value = self.default_snapshot_fields(self.worker_id)[field_name]
             self._set_canonical_field(field_name, default_value)
         else:
-            self.extras.pop(field_name, None)
+            self._extras.pop(field_name, None)
         return self
 
-    def merge_fields(self, fields=None, *, allow_extra_fields=False, **kwargs):
+    def _merge_fields(self, fields=None, *, allow_extra_fields=False, **kwargs):
         if fields is not None:
             for field_name, value in _worker_fields(fields).items():
                 self._set_field_value(field_name, value, allow_extra_fields=allow_extra_fields)
@@ -1670,7 +1669,7 @@ class WorkerRecord:
         worker_id = self.worker_id
         allow_extra_fields = isinstance(fields, WorkerRecord)
         self._reset_fields(worker_id)
-        self.merge_fields(fields, allow_extra_fields=allow_extra_fields)
+        self._merge_fields(fields, allow_extra_fields=allow_extra_fields)
         return self
 
     @classmethod
@@ -1724,6 +1723,114 @@ class WorkerRecord:
         prompt = self.prompt
         return prompt is not None and bool(str(prompt))
 
+    def update_canonical_fields(
+        self,
+        *,
+        skip_none=False,
+        role=_UNSET_WORKER_UPDATE,
+        session_id=_UNSET_WORKER_UPDATE,
+        agent=_UNSET_WORKER_UPDATE,
+        model=_UNSET_WORKER_UPDATE,
+        prompt=_UNSET_WORKER_UPDATE,
+        lifecycle_state=_UNSET_WORKER_UPDATE,
+        dependencies=_UNSET_WORKER_UPDATE,
+        prompt_ids=_UNSET_WORKER_UPDATE,
+        retry_count=_UNSET_WORKER_UPDATE,
+        retry_limit=_UNSET_WORKER_UPDATE,
+        retryable_failures=_UNSET_WORKER_UPDATE,
+        timeout_seconds=_UNSET_WORKER_UPDATE,
+        timeout_policy=_UNSET_WORKER_UPDATE,
+        timeout_started_at=_UNSET_WORKER_UPDATE,
+        timed_out_at=_UNSET_WORKER_UPDATE,
+        failure_category=_UNSET_WORKER_UPDATE,
+        failure_reason=_UNSET_WORKER_UPDATE,
+        last_failure_category=_UNSET_WORKER_UPDATE,
+        last_failure_reason=_UNSET_WORKER_UPDATE,
+        blockers=_UNSET_WORKER_UPDATE,
+        output_refs=_UNSET_WORKER_UPDATE,
+        error=_UNSET_WORKER_UPDATE,
+        failure_retryable=_UNSET_WORKER_UPDATE,
+        manual_retry_required=_UNSET_WORKER_UPDATE,
+        cleanup=_UNSET_WORKER_UPDATE,
+        abort=_UNSET_WORKER_UPDATE,
+        attempts=_UNSET_WORKER_UPDATE,
+        result=_UNSET_WORKER_UPDATE,
+    ):
+        for field_name, value in (
+            ("role", role),
+            ("session_id", session_id),
+            ("agent", agent),
+            ("model", model),
+            ("prompt", prompt),
+            ("lifecycle_state", lifecycle_state),
+            ("dependencies", dependencies),
+            ("prompt_ids", prompt_ids),
+            ("retry_count", retry_count),
+            ("retry_limit", retry_limit),
+            ("retryable_failures", retryable_failures),
+            ("timeout_seconds", timeout_seconds),
+            ("timeout_policy", timeout_policy),
+            ("timeout_started_at", timeout_started_at),
+            ("timed_out_at", timed_out_at),
+            ("failure_category", failure_category),
+            ("failure_reason", failure_reason),
+            ("last_failure_category", last_failure_category),
+            ("last_failure_reason", last_failure_reason),
+            ("blockers", blockers),
+            ("output_refs", output_refs),
+            ("error", error),
+            ("failure_retryable", failure_retryable),
+            ("manual_retry_required", manual_retry_required),
+            ("cleanup", cleanup),
+            ("abort", abort),
+            ("attempts", attempts),
+            ("result", result),
+        ):
+            if value is _UNSET_WORKER_UPDATE or (skip_none and value is None):
+                continue
+            self._set_canonical_field(field_name, value)
+        return self
+
+    def new_attempt_record(self, *, started_at, created_session_ids=()):
+        attempts = self.attempts if isinstance(self.attempts, list) else []
+        return {
+            "id": f"attempt-{len(attempts) + 1}",
+            "session_id": self.session_id,
+            "created_session_ids": list(created_session_ids),
+            "status": "active",
+            "started_at": started_at,
+            "finished_at": None,
+        }
+
+    def append_attempt(self, attempt):
+        if not attempt:
+            return self
+        attempts = self.attempts if isinstance(self.attempts, list) else []
+        attempt = deepcopy(attempt)
+        if any(isinstance(existing, dict) and existing.get("id") == attempt.get("id") for existing in attempts):
+            return self
+        self._set_canonical_field("attempts", [*deepcopy(attempts), attempt])
+        return self
+
+    def finalize_attempt(self, attempt_id, fields):
+        if not attempt_id:
+            return self
+        fields = deepcopy(fields) if isinstance(fields, dict) else {}
+        attempts = self.attempts if isinstance(self.attempts, list) else []
+        finalized = []
+        found = False
+        for attempt in attempts:
+            if isinstance(attempt, dict) and attempt.get("id") == attempt_id:
+                updated = deepcopy(attempt)
+                updated.update(fields)
+                finalized.append(updated)
+                found = True
+            else:
+                finalized.append(deepcopy(attempt))
+        if found:
+            self._set_canonical_field("attempts", finalized)
+        return self
+
     def retry_available(self, category=None) -> bool:
         if self.failure_retryable is False:
             return False
@@ -1757,12 +1864,12 @@ class WorkerRecord:
         for field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             if field_name in self._present_optional_fields:
                 normalized[field_name] = self._canonical_field_value(field_name, getattr(self, field_name))
-        for field_name in self.extras:
+        for field_name in self._extras:
             if field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
                 raise ValueError(f"worker public field '{field_name}' is output-only; use lifecycle_state")
             if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES:
                 raise ValueError(f"worker extra field conflicts with canonical field: {field_name}")
-        normalized.update(deepcopy(self.extras))
+        normalized.update(deepcopy(self._extras))
         return normalized
 
     def to_worker(self):
@@ -2183,7 +2290,7 @@ def _worker_id(worker):
 
 def _timeout_started_at_or_unset(worker):
     worker = _require_worker_record(worker)
-    return worker.timeout_started_at if worker.has_field("timeout_started_at") else UNSET_TRANSITION_FIELD
+    return worker.timeout_started_at
 
 
 def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):

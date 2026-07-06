@@ -1,5 +1,6 @@
 from collections.abc import Mapping, MutableMapping
 from dataclasses import fields, is_dataclass
+import inspect
 import unittest
 
 from opencode_session.worker_storage_adapter import (
@@ -9,6 +10,8 @@ from opencode_session.worker_storage_adapter import (
     worker_snapshot_transition,
     worker_snapshot_transition_patch,
 )
+from opencode_session import run_formatting, run_record, worker_attempt_log
+from opencode_session.commands import runs as run_commands
 from opencode_session.worker_state import (
     aggregate_run_status,
     WorkerRecord,
@@ -33,6 +36,7 @@ from opencode_session.worker_state import (
     schedule_worker_retry,
     serialize_worker_snapshot,
     status_priority,
+    worker_has_field,
     worker_has_prompt,
     worker_lifecycle_state,
     worker_lifecycle_state_for_public_state,
@@ -284,13 +288,13 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertIsInstance(worker, WorkerRecord)
         self.assertNotIsInstance(worker, dict)
-        self.assertEqual(worker.field("id"), "review")
-        self.assertEqual(worker.field("dependencies"), [])
-        self.assertEqual(worker.field("prompt_ids"), [])
-        self.assertEqual(worker.field("timeout_policy"), "timeout")
+        self.assertEqual(worker.worker_id, "review")
+        self.assertEqual(worker.dependencies, [])
+        self.assertEqual(worker.prompt_ids, [])
+        self.assertEqual(worker.timeout_policy, "timeout")
         self.assertEqual(worker.lifecycle_state, "failed_retry")
-        self.assertIsNone(worker.field("status"))
-        self.assertIsNone(worker.field("next_eligible_action"))
+        self.assertIsNone(worker_field(worker, "status"))
+        self.assertIsNone(worker_field(worker, "next_eligible_action"))
         self.assertEqual(worker_output_field(worker, "status"), "failed")
         self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
 
@@ -314,8 +318,7 @@ class WorkerStateContractTest(unittest.TestCase):
                     normalize_worker(fields, "review")
 
         record = WorkerRecord.default_fields("review")
-        with self.assertRaisesRegex(ValueError, "unknown worker field"):
-            record.set_field("unknown_plugin_state", {"attempt": 2})
+        self.assertFalse(hasattr(record, "set_field"))
 
     def test_worker_execution_eligibility_derives_canonical_action(self):
         queued = normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "queued"}, "build")
@@ -456,7 +459,7 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertIsInstance(record, WorkerRecord)
         self.assertNotIsInstance(record, dict)
-        self.assertEqual(record.field("prompt_ids"), ["msg_previous", "msg_new"])
+        self.assertEqual(record.prompt_ids, ["msg_previous", "msg_new"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_previous"])
 
     def test_worker_record_is_not_mapping_hybrid(self):
@@ -473,15 +476,36 @@ class WorkerStateContractTest(unittest.TestCase):
         for method_name in ("get", "setdefault", "pop", "update", "clear"):
             self.assertFalse(hasattr(record, method_name), method_name)
 
+    def test_worker_record_generic_instance_api_is_private_storage_plumbing(self):
+        record = WorkerRecord.default_fields("review")
+
+        for method_name in ("field", "set_field", "merge_fields", "has_field", "remove_field"):
+            self.assertFalse(hasattr(record, method_name), method_name)
+        self.assertFalse(hasattr(record, "extras"))
+
+        self.assertEqual(record.worker_id, "review")
+        self.assertEqual(worker_field(record, "id"), "review")
+        self.assertTrue(worker_has_field(record, "id"))
+
+    def test_core_callers_use_explicit_worker_record_methods(self):
+        attempt_source = inspect.getsource(worker_attempt_log)
+
+        self.assertNotIn("_worker_get", attempt_source)
+        self.assertNotIn("_worker_set", attempt_source)
+        self.assertNotIn("set_field", inspect.getsource(run_record.upsert_worker_record))
+        self.assertNotIn("worker_field", inspect.getsource(run_commands._collect_run_results))
+        self.assertNotIn("worker_field", inspect.getsource(run_commands._print_single_worker_result))
+        self.assertNotIn("worker_field", inspect.getsource(run_formatting.format_worker_result_compact))
+
     def test_worker_record_explicit_api_replaces_dict_mutation(self):
         record = WorkerRecord.default_fields("review")
 
-        record.set_field("prompt", "Review the change")
+        record.update_canonical_fields(prompt="Review the change")
         record.remember_prompt_id("msg_review")
         snapshot = record.to_snapshot()
 
-        self.assertEqual(record.field("prompt"), "Review the change")
-        self.assertEqual(record.field("prompt_ids"), ["msg_review"])
+        self.assertEqual(record.prompt, "Review the change")
+        self.assertEqual(record.prompt_ids, ["msg_review"])
         self.assertIsNone(worker_field(record, "status"))
         self.assertEqual(worker_output_field(record, "status"), "queued")
         self.assertNotIn("status", snapshot)
@@ -531,18 +555,19 @@ class WorkerStateContractTest(unittest.TestCase):
             "result",
             "cleanup",
             "abort",
-            "extras",
         ):
             with self.subTest(field_name=field_name):
                 self.assertIn(field_name, dataclass_field_names)
+        self.assertIn("_extras", dataclass_field_names)
+        self.assertNotIn("extras", dataclass_field_names)
 
         self.assertEqual(record.worker_id, "review")
         self.assertEqual(record.role, "reviewer")
         self.assertEqual(record.prompt, "Review the change")
         self.assertEqual(record.lifecycle_state, "active_wait")
-        self.assertEqual(record.extras, {"custom_persisted": {"kept": True}})
-        self.assertIsNone(record.field("status"))
-        self.assertIsNone(record.field("next_eligible_action"))
+        self.assertEqual(record.to_snapshot()["custom_persisted"], {"kept": True})
+        self.assertIsNone(worker_field(record, "status"))
+        self.assertIsNone(worker_field(record, "next_eligible_action"))
 
     def test_worker_record_unknown_persisted_fields_round_trip_through_extras(self):
         record = hydrate_worker_record(
@@ -557,15 +582,14 @@ class WorkerStateContractTest(unittest.TestCase):
         snapshot = record.to_snapshot()
         round_tripped = hydrate_worker_record(snapshot, "review")
 
-        self.assertEqual(record.extras, {"unknown_plugin_state": {"attempt": 2}})
         self.assertEqual(snapshot["unknown_plugin_state"], {"attempt": 2})
-        self.assertEqual(round_tripped.extras, {"unknown_plugin_state": {"attempt": 2}})
-        self.assertEqual(round_tripped.field("unknown_plugin_state"), {"attempt": 2})
+        self.assertEqual(round_tripped.to_snapshot()["unknown_plugin_state"], {"attempt": 2})
+        self.assertEqual(worker_field(round_tripped, "unknown_plugin_state"), {"attempt": 2})
         self.assertNotIn("unknown_plugin_state", WorkerRecord.default_snapshot_fields("review"))
 
     def test_worker_record_mutation_updates_hydrated_object_without_sync(self):
         worker = WorkerRecord.default_fields("review")
-        worker.set_field("prompt", "Review the change")
+        worker.update_canonical_fields(prompt="Review the change")
         workers = {"review": worker}
 
         record = apply_worker_transition(workers, mark_worker_active(worker))
@@ -576,7 +600,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertIs(workers["review"], worker)
         self.assertEqual(worker.lifecycle_state, "active_wait")
         self.assertEqual(worker_output_field(worker, "status"), "active")
-        self.assertEqual(worker.field("prompt_ids"), ["msg_review"])
+        self.assertEqual(worker.prompt_ids, ["msg_review"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
     def test_hydration_adapter_derives_legacy_public_state(self):
@@ -589,9 +613,9 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
 
-        self.assertEqual(worker.field("id"), "review")
-        self.assertIsNone(worker.field("session_id"))
-        self.assertEqual(worker.field("dependencies"), [])
+        self.assertEqual(worker.worker_id, "review")
+        self.assertIsNone(worker.session_id)
+        self.assertEqual(worker.dependencies, [])
         assert_worker_outcome(self, worker, status="active", action="retry", lifecycle="active_retry")
 
     def test_serialize_worker_snapshot_keeps_public_state_out_of_persisted_json(self):

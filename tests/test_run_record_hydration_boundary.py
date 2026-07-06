@@ -5,7 +5,7 @@ from typing import Dict, get_type_hints
 from opencode_session.run_record import normalize_run, normalize_run_for_storage, run_record_for_output
 from opencode_session.schema_run import HydratedRunRecord, PersistedRunRecord, RunRecord
 from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
-from opencode_session.worker_state import WorkerRecord, worker_output_field
+from opencode_session.worker_state import WorkerRecord, worker_field, worker_output_field
 
 
 class RunRecordHydrationBoundaryTest(unittest.TestCase):
@@ -36,9 +36,9 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
 
         self.assertIsInstance(worker, WorkerRecord)
         self.assertNotIsInstance(worker, dict)
-        self.assertEqual(worker.field("id"), "review")
-        self.assertIsNone(worker.field("status"))
-        self.assertIsNone(worker.field("next_eligible_action"))
+        self.assertEqual(worker.worker_id, "review")
+        self.assertIsNone(worker_field(worker, "status"))
+        self.assertIsNone(worker_field(worker, "next_eligible_action"))
         self.assertEqual(worker.lifecycle_state, "active_wait")
         self.assertEqual(worker_output_field(worker, "status"), "active")
         self.assertEqual(worker_output_field(worker, "next_eligible_action"), "wait")
@@ -65,8 +65,8 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
 
         self.assertIsInstance(worker, WorkerRecord)
         self.assertEqual(worker.lifecycle_state, "active_retry")
-        self.assertIsNone(worker.field("status"))
-        self.assertIsNone(worker.field("next_eligible_action"))
+        self.assertIsNone(worker_field(worker, "status"))
+        self.assertIsNone(worker_field(worker, "next_eligible_action"))
         self.assertEqual(output["status"], "active")
         self.assertEqual(output["next_eligible_action"], "retry")
 
@@ -136,8 +136,8 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         output = run_record_for_output(run)
         output_worker = output["workers"]["review"]
 
-        self.assertIsNone(worker.field("status"))
-        self.assertIsNone(worker.field("next_eligible_action"))
+        self.assertIsNone(worker_field(worker, "status"))
+        self.assertIsNone(worker_field(worker, "next_eligible_action"))
         self.assertNotIn("status", worker.to_snapshot())
         self.assertNotIn("next_eligible_action", worker.to_snapshot())
         self.assertEqual(output_worker["lifecycle_state"], "active_wait")
