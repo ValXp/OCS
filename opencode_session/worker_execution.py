@@ -6,7 +6,7 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
-from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationJournal
+from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationRecovery
 from opencode_session.schema_common import RunRecord, Worker
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
@@ -34,7 +34,7 @@ from opencode_session.worker_state import (
 
 WORKER_SESSION_JOURNAL_FIELD = "worker_session_journal"
 WORKER_SESSION_CREATE_KIND = "worker_session_create"
-_WORKER_SESSION_JOURNAL = RemoteMutationJournal(WORKER_SESSION_JOURNAL_FIELD)
+_WORKER_SESSION_RECOVERY = RemoteMutationRecovery(WORKER_SESSION_JOURNAL_FIELD)
 
 
 @dataclass
@@ -70,7 +70,7 @@ class WorkerSessionCreationJournal:
         self.persist_run_mutation = persist_run_mutation
         self.now = now
         self.id_factory = id_factory or _new_worker_session_journal_id
-        self.journal = PersistedRemoteMutationJournal(
+        self.transactions = PersistedRemoteMutationJournal(
             WORKER_SESSION_JOURNAL_FIELD,
             self.persist_run_mutation,
             now=self.now,
@@ -96,7 +96,7 @@ class WorkerSessionCreationJournal:
         if model is not None:
             entry["model"] = model
 
-        updated_run = self.journal.record_intent(run, entry)
+        updated_run = self._transaction(intent).record_intent(run, entry)
         return updated_run, _latest_worker(updated_run, worker), intent
 
     def record_created(self, run, worker, intent, session_id, *, agent=None, model=None):
@@ -122,9 +122,8 @@ class WorkerSessionCreationJournal:
                 latest_record.remember_session_for_cleanup(session_id)
             sync_worker_record(latest_worker, latest_record)
 
-        updated_run = self.journal.mark_applied(
+        updated_run = self._transaction(intent).mark_applied(
             run,
-            intent.id,
             fields,
             before_mark=update_worker,
             missing_entry=missing_entry,
@@ -138,8 +137,20 @@ class WorkerSessionCreationJournal:
         return self._remove_best_effort(run, worker, intent, operation="finalize_worker_session_create")
 
     def _remove_best_effort(self, run, worker, intent, *, operation):
-        updated_run = self.journal.finalize_best_effort(run, intent.id, operation=operation)
+        transaction = self._transaction(intent)
+        if operation == "discard_worker_session_create":
+            updated_run = transaction.discard_intent_best_effort(run)
+        else:
+            updated_run = transaction.finalize_best_effort(run)
         return updated_run, _latest_worker(updated_run, worker)
+
+    def _transaction(self, intent):
+        return self.transactions.transaction(
+            intent.id,
+            WORKER_SESSION_CREATE_KIND,
+            discard_operation="discard_worker_session_create",
+            finalize_operation="finalize_worker_session_create",
+        )
 
 
 class WorkerExecutionExecutor:
@@ -456,15 +467,15 @@ def recoverable_created_worker_sessions_by_worker(run):
                 continue
             for session_id in _string_list(cleanup.get("sessions")):
                 _append_unique_session_id(session_ids_by_worker.setdefault(worker_id, []), session_id)
-    for entry in _worker_session_journal_entries(run):
-        if entry.get("kind") != WORKER_SESSION_CREATE_KIND or not entry.get("cleanup_requested"):
-            continue
-        worker_id = entry.get("worker_id")
-        if not worker_id:
-            continue
-        session_ids = list(_string_list(entry.get("created_session_ids")))
-        if entry.get("session_id"):
-            session_ids.append(entry["session_id"])
+    recovered_session_ids_by_worker = _WORKER_SESSION_RECOVERY.values_by_owner(
+        run,
+        kind=WORKER_SESSION_CREATE_KIND,
+        owner_field="worker_id",
+        list_fields=("created_session_ids",),
+        value_fields=("session_id",),
+        required_fields={"cleanup_requested": True},
+    )
+    for worker_id, session_ids in recovered_session_ids_by_worker.items():
         for session_id in session_ids:
             _append_unique_session_id(session_ids_by_worker.setdefault(worker_id, []), session_id)
     return {worker_id: session_ids for worker_id, session_ids in session_ids_by_worker.items() if session_ids}
@@ -489,10 +500,6 @@ def _ensure_latest_worker(run, worker_id):
         worker = WorkerRecord.default_fields(worker_id)
         workers[worker_id] = worker
     return worker
-
-
-def _worker_session_journal_entries(run):
-    return _WORKER_SESSION_JOURNAL.pending_entries(run)
 
 
 def _remember_worker_session_for_cleanup(worker, session_id):

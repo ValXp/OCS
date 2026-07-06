@@ -12,7 +12,7 @@ from opencode_session.multi_worker_orchestration import (
     workers_in_dependency_order,
 )
 from opencode_session.prompt_admission import admit_prompt
-from opencode_session.remote_journal import PersistedRemoteMutationJournal
+from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationRecovery
 from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord, Worker
@@ -21,6 +21,7 @@ from opencode_session.worker_state import mark_worker_aborted, sync_worker_recor
 
 
 REMOTE_MUTATION_JOURNAL_FIELD = "remote_mutation_journal"
+_REMOTE_MUTATION_RECOVERY = RemoteMutationRecovery(REMOTE_MUTATION_JOURNAL_FIELD)
 
 
 @dataclass
@@ -135,12 +136,11 @@ class RunCommandService:
         configure_client_route_plan(client, capabilities)
         prompt_message_id = message_id or _new_prompt_message_id()
         mutation_id = _new_remote_mutation_id()
+        transaction = self._remote_transaction(mutation_id, "steer_prompt")
 
         def prompt_intent(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
             return {
-                "id": mutation_id,
-                "kind": "steer_prompt",
                 "worker_id": worker_id,
                 "session_id": latest_worker["session_id"],
                 "message_id": prompt_message_id,
@@ -148,7 +148,7 @@ class RunCommandService:
                 "text": text,
             }
 
-        run = self.remote_mutations.record_intent_from(run, prompt_intent)
+        run = transaction.record_intent_from(run, prompt_intent)
         try:
             result = admit_prompt(
                 client,
@@ -159,11 +159,7 @@ class RunCommandService:
                 message_id=prompt_message_id,
             )
         except Exception:
-            self.remote_mutations.discard_intent_best_effort(
-                run,
-                mutation_id,
-                operation="discard_remote_mutation",
-            )
+            transaction.discard_intent_best_effort(run)
             raise
         admission = result.record
         admitted_message_id = admission["message_id"]
@@ -174,7 +170,7 @@ class RunCommandService:
             latest_record.remember_prompt_id(admitted_message_id)
             sync_worker_record(latest_worker, latest_record)
 
-        run = self.remote_mutations.finalize(run, mutation_id, before_finalize=record_prompt_admission)
+        run = transaction.finalize(run, before_finalize=record_prompt_admission)
         return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
 
     def abort_worker(self, name, worker_id):
@@ -182,25 +178,20 @@ class RunCommandService:
         worker = _run_worker_with_session(run, worker_id)
         client = self.client_factory(run["server_url"])
         mutation_id = _new_remote_mutation_id()
+        transaction = self._remote_transaction(mutation_id, "abort_worker")
 
         def abort_intent(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
             return {
-                "id": mutation_id,
-                "kind": "abort_worker",
                 "worker_id": worker_id,
                 "session_id": latest_worker["session_id"],
             }
 
-        run = self.remote_mutations.record_intent_from(run, abort_intent)
+        run = transaction.record_intent_from(run, abort_intent)
         try:
             response = client.abort_session_response(worker["session_id"])
         except Exception as error:
-            self.remote_mutations.discard_intent_best_effort(
-                run,
-                mutation_id,
-                operation="discard_remote_mutation",
-            )
+            transaction.discard_intent_best_effort(run)
             if isinstance(error, OpenCodeApiError) and is_session_not_found_error(error):
                 raise RunWorkerSessionNotFound(worker["session_id"]) from error
             raise
@@ -213,8 +204,16 @@ class RunCommandService:
             sync_worker_record(latest_worker, latest_record)
             refresh_orchestration_run_summary(latest_run)
 
-        run = self.remote_mutations.finalize(run, mutation_id, before_finalize=mark_aborted)
+        run = transaction.finalize(run, before_finalize=mark_aborted)
         return RunAbortResult(run=run, worker=run["workers"][worker_id], abort=abort, raw_body=response.body)
+
+    def _remote_transaction(self, mutation_id, kind):
+        return self.remote_mutations.transaction(
+            mutation_id,
+            kind,
+            discard_operation="discard_remote_mutation",
+            finalize_operation="finalize_remote_mutation",
+        )
 
     def _persist_run_mutation(self, run, mutator):
         return self._update_run(run["name"], mutator)
@@ -231,6 +230,10 @@ class RunWorkerSessionNotFound(Exception):
     def __init__(self, session_id):
         super().__init__(f"session not found: {session_id}")
         self.session_id = session_id
+
+
+def recoverable_remote_mutation_entries(run, *, kind=None):
+    return _REMOTE_MUTATION_RECOVERY.pending_entries(run, kind=kind)
 
 
 def _worker_result(run, worker_id):

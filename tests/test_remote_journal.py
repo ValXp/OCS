@@ -1,6 +1,10 @@
 import unittest
 
-from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationJournal
+from opencode_session.remote_journal import (
+    PersistedRemoteMutationJournal,
+    RemoteMutationJournal,
+    RemoteMutationRecovery,
+)
 
 
 class RemoteMutationJournalTest(unittest.TestCase):
@@ -81,6 +85,91 @@ class RemoteMutationJournalTest(unittest.TestCase):
         )
 
         self.assertEqual(run["journal"][0]["session_id"], "ses_latest")
+
+    def test_transaction_records_identity_and_lifecycle(self):
+        run = {"name": "demo", "workers": {"worker": {"session_id": "ses_old"}}}
+
+        def persist_run_mutation(run, mutator):
+            run["workers"]["worker"]["session_id"] = "ses_latest"
+            mutator(run)
+            return run
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+        transaction = journal.transaction(
+            "mutation-1",
+            "prompt",
+            discard_operation="discard_remote_mutation",
+            finalize_operation="finalize_remote_mutation",
+        )
+
+        run = transaction.record_intent_from(
+            run,
+            lambda latest_run: {
+                "session_id": latest_run["workers"]["worker"]["session_id"],
+                "message_id": "msg_1",
+            },
+        )
+        run = transaction.mark_applied(run, {"status": "applied"})
+        self.assertEqual(
+            run["journal"],
+            [
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "session_id": "ses_latest",
+                    "message_id": "msg_1",
+                    "status": "applied",
+                }
+            ],
+        )
+
+        run = transaction.finalize(run)
+
+        self.assertNotIn("journal", run)
+
+    def test_recovery_collects_unique_values_by_owner_from_pending_transactions(self):
+        run = {
+            "journal": [
+                {
+                    "id": "mutation-1",
+                    "kind": "worker_session_create",
+                    "worker_id": "worker",
+                    "cleanup_requested": True,
+                    "created_session_ids": ["ses_1", "", "ses_2"],
+                    "session_id": "ses_1",
+                },
+                {
+                    "id": "mutation-2",
+                    "kind": "worker_session_create",
+                    "worker_id": "worker",
+                    "cleanup_requested": False,
+                    "session_id": "ses_skipped",
+                },
+                {
+                    "id": "mutation-3",
+                    "kind": "steer_prompt",
+                    "worker_id": "worker",
+                    "session_id": "ses_other_kind",
+                },
+            ]
+        }
+        recovery = RemoteMutationRecovery("journal")
+
+        self.assertEqual(
+            recovery.values_by_owner(
+                run,
+                kind="worker_session_create",
+                owner_field="worker_id",
+                list_fields=("created_session_ids",),
+                value_fields=("session_id",),
+                required_fields={"cleanup_requested": True},
+            ),
+            {"worker": ["ses_1", "ses_2"]},
+        )
 
 
 if __name__ == "__main__":

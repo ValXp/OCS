@@ -14,6 +14,7 @@ from opencode_session.worker_execution import (
     ensure_worker_session,
     execute_worker_attempts,
     provision_worker_session,
+    recoverable_created_worker_sessions_by_worker,
 )
 from opencode_session.worker_state import WorkerRecord, apply_worker_transition, ensure_worker
 
@@ -191,6 +192,56 @@ class WorkerExecutionTest(unittest.TestCase):
                 "error_type": "RuntimeError",
                 "message": "forced cleanup failure",
                 "recorded_at": "2026-07-05T00:00:00Z",
+            },
+        )
+
+    def test_recoverable_created_worker_sessions_merges_cleanup_and_journal_transactions(self):
+        run = {
+            "workers": {
+                "worker": {
+                    "cleanup": {
+                        "deleted": False,
+                        "sessions": ["ses_worker_cleanup", "ses_duplicate"],
+                    }
+                },
+                "deleted": {
+                    "cleanup": {
+                        "deleted": True,
+                        "sessions": ["ses_deleted"],
+                    }
+                },
+            },
+            WORKER_SESSION_JOURNAL_FIELD: [
+                {
+                    "id": "worker-session-intent-1",
+                    "kind": "worker_session_create",
+                    "worker_id": "worker",
+                    "cleanup_requested": True,
+                    "created_session_ids": ["ses_duplicate", "ses_created"],
+                    "session_id": "ses_created",
+                },
+                {
+                    "id": "worker-session-intent-2",
+                    "kind": "worker_session_create",
+                    "worker_id": "other",
+                    "cleanup_requested": True,
+                    "session_id": "ses_other",
+                },
+                {
+                    "id": "worker-session-intent-3",
+                    "kind": "worker_session_create",
+                    "worker_id": "skipped",
+                    "cleanup_requested": False,
+                    "session_id": "ses_skipped",
+                },
+            ],
+        }
+
+        self.assertEqual(
+            recoverable_created_worker_sessions_by_worker(run),
+            {
+                "worker": ["ses_worker_cleanup", "ses_duplicate", "ses_created"],
+                "other": ["ses_other"],
             },
         )
 

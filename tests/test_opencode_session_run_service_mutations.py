@@ -2,7 +2,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from opencode_session.run_services import REMOTE_MUTATION_JOURNAL_FIELD, RunCommandService
+from opencode_session.run_services import (
+    REMOTE_MUTATION_JOURNAL_FIELD,
+    RunCommandService,
+    recoverable_remote_mutation_entries,
+)
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_state import WorkerRecord
 
@@ -185,6 +189,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(journal["kind"], "steer_prompt")
         self.assertEqual(journal["message_id"], "msg_steer_1")
         self.assertEqual(journal["text"], "Continue with the plan")
+        self.assertEqual(recoverable_remote_mutation_entries(run, kind="steer_prompt"), (journal,))
 
     def test_steer_marks_journal_when_discard_cleanup_fails_after_remote_error(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -302,6 +307,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "abort_worker")
         self.assertEqual(journal["session_id"], "ses_plan")
+        self.assertEqual(recoverable_remote_mutation_entries(run, kind="abort_worker"), (journal,))
 
     def test_abort_marks_journal_when_discard_cleanup_fails_after_remote_error(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
