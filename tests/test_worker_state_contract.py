@@ -7,11 +7,17 @@ from opencode_session.worker_state import (
     PUBLIC_WORKER_STATE_BY_LIFECYCLE,
     TERMINAL_WORKER_STATUSES,
     WORKER_EXIT_CODE_BY_STATUS,
+    WORKER_LIFECYCLE_DIMENSIONS_BY_STATE,
     WORKER_LIFECYCLE_METADATA,
+    WORKER_LIFECYCLE_STATE_BY_DIMENSIONS,
     WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS,
     WORKER_LIFECYCLE_STATES,
     WORKER_STATUS_PRIORITY_BY_STATUS,
+    WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES,
     WORKER_TRANSITION_METADATA,
+    WorkerLifecycleAction,
+    WorkerLifecycleDimensions,
+    WorkerLifecycleStatus,
     WorkerRecord,
     deserialize_worker_record,
     exit_code_for_run,
@@ -26,8 +32,10 @@ from opencode_session.worker_state import (
     status_priority,
     worker_lifecycle_source_states,
     worker_lifecycle_state,
+    worker_lifecycle_state_for_dimensions,
     worker_lifecycle_state_for_status_alias,
     worker_lifecycle_target_states,
+    worker_timeout_lifecycle_state,
     worker_record_for_mutation,
 )
 
@@ -46,6 +54,17 @@ class WorkerStateContractTest(unittest.TestCase):
                 lifecycle_state: (metadata.status, metadata.next_eligible_action)
                 for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
             },
+        )
+        self.assertEqual(
+            WORKER_LIFECYCLE_DIMENSIONS_BY_STATE,
+            {
+                lifecycle_state: metadata.dimensions
+                for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
+            },
+        )
+        self.assertEqual(
+            WORKER_LIFECYCLE_STATE_BY_DIMENSIONS,
+            {metadata.dimensions: lifecycle_state for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()},
         )
         self.assertEqual(
             TERMINAL_WORKER_STATUSES,
@@ -73,6 +92,36 @@ class WorkerStateContractTest(unittest.TestCase):
         )
         self.assertEqual(WORKER_STATUS_PRIORITY_BY_STATUS, _metadata_by_status("status_priority"))
         self.assertEqual(WORKER_EXIT_CODE_BY_STATUS, _metadata_by_status("exit_code", skip_none=True))
+
+    def test_timeout_failed_retry_and_terminal_lifecycles_derive_from_dimensions(self):
+        retry_dimensions = WorkerLifecycleDimensions(
+            WorkerLifecycleStatus.FAILED,
+            WorkerLifecycleAction.RETRY,
+            retryable=True,
+            timeout_origin=True,
+        )
+        terminal_dimensions = WorkerLifecycleDimensions(
+            WorkerLifecycleStatus.FAILED,
+            WorkerLifecycleAction.RETRY,
+            retryable=False,
+            timeout_origin=True,
+        )
+
+        self.assertEqual(worker_lifecycle_state_for_dimensions(retry_dimensions), "timeout_failed_retry")
+        self.assertEqual(worker_lifecycle_state_for_dimensions(terminal_dimensions), "timeout_failed_terminal")
+        self.assertEqual(worker_timeout_lifecycle_state("failed", True), "timeout_failed_retry")
+        self.assertEqual(worker_timeout_lifecycle_state("failed", False), "timeout_failed_terminal")
+
+        retry_metadata = WORKER_LIFECYCLE_METADATA["timeout_failed_retry"]
+        terminal_metadata = WORKER_LIFECYCLE_METADATA["timeout_failed_terminal"]
+        self.assertEqual(retry_metadata.dimensions, retry_dimensions)
+        self.assertEqual(terminal_metadata.dimensions, terminal_dimensions)
+        self.assertEqual(retry_metadata.next_eligible_action, "retry")
+        self.assertEqual(terminal_metadata.next_eligible_action, "none")
+        self.assertTrue(retry_metadata.retryable)
+        self.assertFalse(terminal_metadata.retryable)
+        self.assertIn("timeout_failed_retry", WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES)
+        self.assertIn("timeout_failed_terminal", WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES)
 
     def test_lifecycle_metadata_feeds_status_helpers_and_reducer_legality(self):
         from opencode_session.commands.runs import _lifecycle_state_from_status_alias
