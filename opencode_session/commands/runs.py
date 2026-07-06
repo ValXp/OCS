@@ -68,7 +68,7 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
         "--execution-policy",
         choices=("fail-fast", "continue"),
         default="fail-fast",
-        help="whether independent ready workers stop on the first failure or continue serially",
+        help="whether serial worker execution stops on the first failure or continues to the next dependency-eligible worker",
     )
     run_start_parser.add_argument("--cleanup", action="store_true", help="delete a session created by this start after it reaches done")
 

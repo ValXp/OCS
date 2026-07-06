@@ -8,8 +8,8 @@ from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
     EXECUTION_POLICY_FAIL_FAST,
-    NextEligibleWorkerExecutor,
-    schedule_dependency_ordered_tick,
+    SelectedSerialWorkerExecutor,
+    plan_dependency_ordered_serial_step,
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore, RunStoreError
@@ -201,7 +201,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
         self.assertEqual(analysis.ready_worker_ids, ("retry", "start"))
 
-    def test_schedule_tick_returns_serial_next_worker_and_block_transitions_without_mutation(self):
+    def test_serial_step_selects_one_worker_and_block_transitions_without_mutation(self):
         workers = {
             "build": {"id": "build", "prompt": "Build", "lifecycle_state": "failed_terminal", "status": "failed"},
             "docs": {"id": "docs", "prompt": "Docs", "lifecycle_state": "queued", "status": "queued"},
@@ -215,19 +215,51 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             },
         }
 
-        tick = schedule_dependency_ordered_tick(workers)
+        step = plan_dependency_ordered_serial_step(workers)
 
-        self.assertEqual(tick.next_worker_id, "docs")
-        self.assertFalse(hasattr(tick, "eligible_worker_ids"))
-        self.assertEqual([transition.worker_id for transition in tick.dependency_blocked_transitions], ["review"])
-        self.assertTrue(tick.has_pending_workers)
+        self.assertEqual(step.worker_id, "docs")
+        self.assertFalse(hasattr(step, "ready_worker_ids"))
+        self.assertFalse(hasattr(step, "eligible_worker_ids"))
+        self.assertEqual([transition.worker_id for transition in step.dependency_blocked_transitions], ["review"])
         self.assertEqual(workers["review"]["status"], "queued")
 
         latest_workers = {"review": dict(workers["review"])}
-        apply_worker_transition(latest_workers, tick.dependency_blocked_transitions[0])
+        apply_worker_transition(latest_workers, step.dependency_blocked_transitions[0])
 
         self.assertEqual(latest_workers["review"]["status"], "blocked")
         self.assertEqual(latest_workers["review"]["blockers"], ["dependency:build"])
+
+    def test_serial_step_advances_one_worker_at_a_time_as_dependencies_finish(self):
+        workers = {
+            "build": {"id": "build", "prompt": "Build", "lifecycle_state": "queued", "status": "queued"},
+            "review": {
+                "id": "review",
+                "prompt": "Review",
+                "lifecycle_state": "queued",
+                "status": "queued",
+                "dependencies": ["build"],
+            },
+            "deploy": {
+                "id": "deploy",
+                "prompt": "Deploy",
+                "lifecycle_state": "queued",
+                "status": "queued",
+                "dependencies": ["review"],
+            },
+        }
+
+        first_step = plan_dependency_ordered_serial_step(workers)
+        workers["build"].update({"lifecycle_state": "done_collect", "status": "done"})
+        second_step = plan_dependency_ordered_serial_step(workers)
+        workers["review"].update({"lifecycle_state": "done_collect", "status": "done"})
+        third_step = plan_dependency_ordered_serial_step(workers)
+        workers["deploy"].update({"lifecycle_state": "done_collect", "status": "done"})
+        final_step = plan_dependency_ordered_serial_step(workers)
+
+        self.assertEqual(first_step.worker_id, "build")
+        self.assertEqual(second_step.worker_id, "review")
+        self.assertEqual(third_step.worker_id, "deploy")
+        self.assertIsNone(final_step.worker_id)
 
 
 class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
@@ -305,7 +337,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         core = DirectCore()
         session_tracker = RecordingSessionTracker()
 
-        outcome = NextEligibleWorkerExecutor(core).execute_next(
+        outcome = SelectedSerialWorkerExecutor(core).execute_next(
             run,
             "worker",
             client,
