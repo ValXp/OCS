@@ -1,8 +1,9 @@
 import uuid
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_profile import OpenCodeServerProfile, server_profile_from_capabilities
 from opencode_session.formatting import compact_value
-from opencode_session.schema_admission_adapter import admission_response_fields, normalize_admission_record
+from opencode_session.schema_admission_adapter import admission_response_fields
 from opencode_session.schema_common import first_present as _first_present
 
 
@@ -30,15 +31,16 @@ def admit_prompt(client, capabilities, session_id, text, delivery, *, message_id
     if not capabilities["v2_prompt_support"]:
         raise PromptAdmissionUnsupported(_unsupported_prompt_capability_message())
 
+    profile = server_profile_from_capabilities(capabilities)
     message_id = message_id or f"msg_{uuid.uuid4().hex}"
-    prompt_path = capabilities["route_availability"]["v2_prompt"]["path"]
-    payload = prompt_admission_payload(message_id, text, delivery, prompt_path)
+    prompt_path = profile.route_plan["v2_prompt"]
+    payload = profile.prompt_admission_payload(message_id, text, delivery)
     try:
         response = client.admit_prompt_response(session_id, payload, prompt_path)
     except OpenCodeApiError as error:
         if is_idempotent_admission_replay(error, message_id):
             return PromptAdmissionResult(
-                record=admission_record(session_id, delivery, message_id, error.data, capabilities=capabilities),
+                record=admission_record(session_id, delivery, message_id, error.data, capabilities=capabilities, profile=profile),
                 body=error.body or "",
                 message_id=message_id,
                 payload=payload,
@@ -55,25 +57,24 @@ def admit_prompt(client, capabilities, session_id, text, delivery, *, message_id
         ) from error
 
     return PromptAdmissionResult(
-        record=admission_record(session_id, delivery, message_id, response.data, capabilities=capabilities),
+        record=admission_record(session_id, delivery, message_id, response.data, capabilities=capabilities, profile=profile),
         body=response.body,
         message_id=message_id,
         payload=payload,
     )
 
 
-def admission_record(session_id, delivery, message_id, data, *, capabilities):
-    return normalize_admission_record(session_id, delivery, message_id, data, capabilities=capabilities)
+def admission_record(session_id, delivery, message_id, data, *, capabilities, profile=None):
+    profile = profile or server_profile_from_capabilities(capabilities)
+    return profile.normalize_admission_record(session_id, delivery, message_id, data, capabilities=capabilities)
 
 
 def prompt_admission_payload(message_id, text, delivery, prompt_path):
-    if prompt_path.split("?", 1)[0].rstrip("/") == "/api/session/{sessionID}/prompt":
-        return {"id": message_id, "prompt": {"text": text}, "delivery": delivery}
-    return {
-        "messageID": message_id,
-        "parts": [{"type": "text", "text": text}],
-        "delivery": delivery,
-    }
+    return OpenCodeServerProfile.from_route_plan({"v2_prompt": prompt_path}).prompt_admission_payload(
+        message_id,
+        text,
+        delivery,
+    )
 
 
 def format_admission_compact(admission):

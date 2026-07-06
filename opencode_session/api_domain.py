@@ -1,8 +1,20 @@
-from urllib.parse import quote
-
 from opencode_session.api_routes import session_prompt_path
 from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiResponse
 from opencode_session.schema_session_adapter import normalize_session_payload
+
+
+DEFAULT_PROFILE_ENDPOINTS = frozenset(
+    {
+        "session_abort",
+        "session_fork",
+        "session_children",
+        "permissions",
+        "permission_reply",
+        "questions",
+        "question_reply",
+        "question_reject",
+    }
+)
 
 
 class OpenCodeDomainClient:
@@ -16,10 +28,18 @@ class OpenCodeDomainClient:
 
     @route_plan.setter
     def route_plan(self, route_plan):
-        self._routes.route_plan = route_plan
+        self._routes.configure(route_plan)
+
+    @property
+    def server_profile(self):
+        return self._routes.server_profile
 
     def configure_route_plan(self, route_plan):
         self._routes.configure(route_plan)
+        return self
+
+    def configure_server_profile(self, profile):
+        self._routes.configure(profile)
         return self
 
     def get_json(self, path, *, timeout=None, deadline=None):
@@ -72,21 +92,21 @@ class OpenCodeDomainClient:
         if metadata is not None:
             payload["metadata"] = metadata
         response = self.post_response(self._route_path("session_collection"), payload)
-        return with_session_payload(response, self.route_plan)
+        return with_session_payload(response, self.server_profile)
 
     def list_sessions(self):
         return self.list_sessions_response().data
 
     def list_sessions_response(self):
         response = self.get_response(self._route_path("session_collection"))
-        return with_session_payload(response, self.route_plan)
+        return with_session_payload(response, self.server_profile)
 
     def get_session(self, session_id):
         return self.get_session_response(session_id).data
 
     def get_session_response(self, session_id):
         response = self.get_response(self._route_path("session_item", session_id=session_id))
-        return with_session_payload(response, self.route_plan)
+        return with_session_payload(response, self.server_profile)
 
     def delete_session(self, session_id):
         return self.delete_session_response(session_id).data
@@ -95,17 +115,17 @@ class OpenCodeDomainClient:
         return self.delete_response(self._route_path("session_item", session_id=session_id))
 
     def abort_session_response(self, session_id):
-        return self.post_response(f"session/{quote(session_id, safe='')}/abort", {})
+        return self.post_response(self._route_path("session_abort", session_id=session_id), {})
 
     def fork_session_response(self, session_id, *, message_id=None):
         payload = {}
         if message_id is not None:
             payload["messageID"] = message_id
-        return self.post_response(f"session/{quote(session_id, safe='')}/fork", payload)
+        return self.post_response(self._route_path("session_fork", session_id=session_id), payload)
 
     def list_child_sessions_response(self, session_id):
-        response = self.get_response(f"session/{quote(session_id, safe='')}/children")
-        return with_session_payload(response, route_path="/session")
+        response = self.get_response(self._route_path("session_children", session_id=session_id))
+        return with_session_payload(response, self.server_profile, endpoint="session_children")
 
     def run_session_response(self, session_id, message, *, timeout=None, deadline=None):
         return self.post_response(
@@ -141,27 +161,35 @@ class OpenCodeDomainClient:
         return self.post_response(session_prompt_path(wait_path, session_id), {}, deadline=deadline)
 
     def list_permissions_response(self):
-        return self.get_response("permission")
+        return self.get_response(self._route_path("permissions"))
 
     def reply_permission_response(self, request_id, reply, *, message=None):
         payload = {"reply": reply}
         if message is not None:
             payload["message"] = message
-        return self.post_response(f"permission/{quote(request_id, safe='')}/reply", payload)
+        return self.post_response(self._route_path("permission_reply", request_id=request_id), payload)
 
     def list_questions_response(self):
-        return self.get_response("question")
+        return self.get_response(self._route_path("questions"))
 
     def answer_question_response(self, request_id, answers):
-        return self.post_response(f"question/{quote(request_id, safe='')}/reply", {"answers": answers})
+        return self.post_response(self._route_path("question_reply", request_id=request_id), {"answers": answers})
 
     def reject_question_response(self, request_id):
-        return self.post_response(f"question/{quote(request_id, safe='')}/reject", {})
+        return self.post_response(self._route_path("question_reject", request_id=request_id), {})
 
-    def _route_path(self, name, *, session_id=None):
-        return self._routes.path(name, session_id=session_id)
+    def _route_path(self, name, *, session_id=None, request_id=None):
+        return self._routes.path(
+            name,
+            session_id=session_id,
+            request_id=request_id,
+            allow_default=name in DEFAULT_PROFILE_ENDPOINTS,
+        )
 
 
-def with_session_payload(response, route_plan=None, *, route_path=None):
-    data = normalize_session_payload(response.data, route_plan=route_plan, route_path=route_path)
+def with_session_payload(response, route_plan=None, *, route_path=None, endpoint="session_collection"):
+    if route_path is None and hasattr(route_plan, "normalize_session_payload"):
+        data = route_plan.normalize_session_payload(response.data, endpoint=endpoint)
+    else:
+        data = normalize_session_payload(response.data, route_plan=route_plan, route_path=route_path)
     return OpenCodeApiResponse(data, response.body)

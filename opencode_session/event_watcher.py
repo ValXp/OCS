@@ -34,9 +34,18 @@ class SessionEventWatcher:
         for raw_event in self.client.stream_events(self.event_path, **stream_kwargs):
             if stop_event is not None and stop_event.is_set():
                 break
-            event = normalize_event(raw_event, self.session_id, route_path=self.event_path)
+            profile = self._event_profile()
+            event = normalize_event(raw_event, self.session_id, route_path=self.event_path, profile=profile)
             if event is not None:
                 yield event
+
+    def _event_profile(self):
+        profile = getattr(self.client, "server_profile", None)
+        if profile is None:
+            return None
+        if profile.route_plan.get("events") != self.event_path:
+            return None
+        return profile
 
 
 class BackgroundSessionEventWatcher:

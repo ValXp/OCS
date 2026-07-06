@@ -48,8 +48,11 @@ def iter_event_stream(lines):
         yield event
 
 
-def normalize_event(event, target_session_id=None, *, route_path=None):
-    normalized = normalize_event_record(event, target_session_id, route_path=route_path)
+def normalize_event(event, target_session_id=None, *, route_path=None, profile=None):
+    if profile is not None:
+        normalized = profile.normalize_event_record(event, target_session_id)
+    else:
+        normalized = normalize_event_record(event, target_session_id, route_path=route_path)
     if normalized.get("kind") == "ignored":
         return None
     return normalized

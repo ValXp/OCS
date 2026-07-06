@@ -1,30 +1,22 @@
-from urllib.parse import quote
-
+from opencode_session.api_profile import DEFAULT_ROUTE_PLAN, OpenCodeServerProfile, render_route_path
 from opencode_session.api_transport import OpenCodeApiError
-
-
-DEFAULT_ROUTE_PLAN = {
-    "session_collection": "/api/session",
-    "session_item": "/api/session/{sessionID}",
-    "blocking_message": "/session/{sessionID}/message",
-    "legacy_run": "/session/{sessionID}/run",
-    "legacy_reply": "/session/{sessionID}/reply",
-}
 
 
 class OpenCodeRoutePlanner:
     def __init__(self):
         self.route_plan = None
+        self.server_profile = None
 
     def configure(self, route_plan):
-        self.route_plan = {**DEFAULT_ROUTE_PLAN, **(route_plan or {})}
+        self.server_profile = OpenCodeServerProfile.from_route_plan(route_plan)
+        self.route_plan = self.server_profile.route_plan
         return self
 
-    def path(self, name, *, session_id=None):
-        route_plan = self.require_route_plan()
+    def path(self, name, *, session_id=None, request_id=None, allow_default=False):
+        route_plan = DEFAULT_ROUTE_PLAN if allow_default and self.route_plan is None else self.require_route_plan()
         path = route_plan.get(name) or DEFAULT_ROUTE_PLAN[name]
-        if session_id is not None:
-            path = session_prompt_path(path, session_id)
+        if session_id is not None or request_id is not None:
+            path = render_route_path(path, session_id=session_id, request_id=request_id)
         return path.lstrip("/")
 
     def require_route_plan(self):
@@ -37,8 +29,4 @@ class OpenCodeRoutePlanner:
 
 
 def session_prompt_path(prompt_path, session_id):
-    path = prompt_path.lstrip("/")
-    quoted_session_id = quote(session_id, safe="")
-    for placeholder in ("{sessionID}", ":sessionID", "{id}", ":id"):
-        path = path.replace(placeholder, quoted_session_id)
-    return path
+    return render_route_path(prompt_path, session_id=session_id).lstrip("/")

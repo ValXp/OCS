@@ -1,6 +1,7 @@
 import argparse
 import unittest
 
+from opencode_session.api_profile import OpenCodeServerProfile
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 
@@ -139,6 +140,65 @@ class CapabilityProbeCliTest(unittest.TestCase):
             },
         )
 
+    def test_server_profile_selects_api_routes_and_adapters(self):
+        profile = OpenCodeServerProfile.from_openapi_doc(
+            {
+                "openapi": "3.1.0",
+                "paths": {
+                    "/api/session": {"get": {}, "post": {}},
+                    "/api/session/{sessionID}/prompt": {"post": {}},
+                    "/api/event": {"get": {}},
+                    "/session/{sessionID}/message": {"post": {}},
+                },
+            },
+            health={"status": "ok", "version": "2.0.0"},
+        )
+
+        session_payload = {"sessions": [{"sessionID": "ses_legacy", "name": "Legacy"}]}
+        event = {"event": "session.status", "payload": {"sessionID": "ses_1", "status": "completed"}}
+
+        self.assertEqual(profile.health, "ok")
+        self.assertEqual(profile.version, "2.0.0")
+        self.assertEqual(profile.route_plan["session_collection"], "/api/session")
+        self.assertEqual(profile.adapter("session_collection").version, "api-v1")
+        self.assertEqual(profile.adapter("events").version, "api-v1")
+        self.assertEqual(profile.adapter("blocking_message").version, "session-message")
+        self.assertEqual(profile.normalize_session_payload(session_payload)["sessions"][0]["schema_status"], "unknown")
+        self.assertEqual(profile.normalize_event_record(event, "ses_1")["schema_status"], "unknown")
+        self.assertEqual(
+            profile.prompt_admission_payload("msg_1", "PONG", "queue"),
+            {"id": "msg_1", "prompt": {"text": "PONG"}, "delivery": "queue"},
+        )
+
+    def test_server_profile_selects_legacy_routes_and_adapters(self):
+        profile = OpenCodeServerProfile.from_openapi_doc(
+            {
+                "openapi": "3.1.0",
+                "paths": {
+                    "/session": {"get": {}, "post": {}},
+                    "/session/{sessionID}/prompt_async": {"post": {}},
+                    "/event": {"get": {}},
+                    "/session/{sessionID}/run": {"post": {}},
+                    "/session/{sessionID}/reply": {"post": {}},
+                },
+            }
+        )
+
+        session_payload = {"sessions": [{"sessionID": "ses_legacy", "name": "Legacy"}]}
+        event = {"event": "session.status", "payload": {"sessionID": "ses_1", "status": "completed"}}
+
+        self.assertEqual(profile.route_plan["session_collection"], "/session")
+        self.assertEqual(profile.route_plan["session_item"], "/session/{sessionID}")
+        self.assertEqual(profile.adapter("session_collection").version, "legacy")
+        self.assertEqual(profile.adapter("events").version, "legacy")
+        self.assertEqual(profile.adapter("legacy_run").version, "legacy-run-reply")
+        self.assertEqual(profile.normalize_session_payload(session_payload)["sessions"][0]["id"], "ses_legacy")
+        self.assertEqual(profile.normalize_event_record(event, "ses_1")["kind"], "status")
+        self.assertEqual(
+            profile.prompt_admission_payload("msg_1", "PONG", "queue"),
+            {"messageID": "msg_1", "parts": [{"type": "text", "text": "PONG"}], "delivery": "queue"},
+        )
+
     def test_detected_session_route_plan_drives_client_session_routes(self):
         doc = {
             "openapi": "3.1.0",
@@ -166,6 +226,7 @@ class CapabilityProbeCliTest(unittest.TestCase):
             requests = list(server.requests)
 
         self.assertEqual(capabilities["route_plan"]["session_collection"], "/session")
+        self.assertEqual(client.server_profile.adapter("session_collection").version, "legacy")
         self.assertEqual(created.data["id"], "ses_1")
         self.assertEqual(listed.data["sessions"][0]["id"], "ses_1")
         self.assertEqual(inspected.data["id"], "ses_1")
@@ -179,6 +240,54 @@ class CapabilityProbeCliTest(unittest.TestCase):
                 ("GET", "/session"),
                 ("GET", "/session/ses_1"),
                 ("DELETE", "/session/ses_1"),
+            ],
+        )
+
+    def test_profile_route_plan_drives_auxiliary_domain_endpoints(self):
+        with FakeOpenCodeServer() as server:
+            server.json("POST", "/custom/ses_1/abort", {"id": "ses_1", "aborted": True})
+            server.json("POST", "/custom/ses_1/fork", {"id": "ses_child"})
+            server.json("GET", "/custom/ses_1/children", {"children": [{"sessionID": "ses_child", "name": "Child"}]})
+            server.json("GET", "/custom/permission", {"permissions": []})
+            server.json("POST", "/custom/permission/perm_1/reply", {"id": "perm_1", "reply": "allow"})
+            server.json("GET", "/custom/question", {"questions": []})
+            server.json("POST", "/custom/question/q_1/reply", {"id": "q_1", "answers": ["yes"]})
+            server.json("POST", "/custom/question/q_1/reject", {"id": "q_1", "rejected": True})
+            client = OpenCodeApiClient(server.url).configure_route_plan(
+                {
+                    "session_abort": "/custom/{sessionID}/abort",
+                    "session_fork": "/custom/{sessionID}/fork",
+                    "session_children": "/custom/{sessionID}/children",
+                    "permissions": "/custom/permission",
+                    "permission_reply": "/custom/permission/{requestID}/reply",
+                    "questions": "/custom/question",
+                    "question_reply": "/custom/question/{requestID}/reply",
+                    "question_reject": "/custom/question/{requestID}/reject",
+                }
+            )
+
+            client.abort_session_response("ses_1")
+            client.fork_session_response("ses_1", message_id="msg_1")
+            children = client.list_child_sessions_response("ses_1")
+            client.list_permissions_response()
+            client.reply_permission_response("perm_1", "allow")
+            client.list_questions_response()
+            client.answer_question_response("q_1", ["yes"])
+            client.reject_question_response("q_1")
+            requests = list(server.requests)
+
+        self.assertEqual(children.data["children"][0]["id"], "ses_child")
+        self.assertEqual(
+            [(method, path) for method, path, _payload in requests],
+            [
+                ("POST", "/custom/ses_1/abort"),
+                ("POST", "/custom/ses_1/fork"),
+                ("GET", "/custom/ses_1/children"),
+                ("GET", "/custom/permission"),
+                ("POST", "/custom/permission/perm_1/reply"),
+                ("GET", "/custom/question"),
+                ("POST", "/custom/question/q_1/reply"),
+                ("POST", "/custom/question/q_1/reject"),
             ],
         )
 

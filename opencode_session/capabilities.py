@@ -1,10 +1,15 @@
-SESSION_PATHS = ["/api/session", "/session"]
-PROMPT_PATHS = ["/api/session/{sessionID}/prompt", "/session/{sessionID}/prompt_async"]
-WAIT_PATHS = ["/api/session/{sessionID}/wait"]
-EVENT_PATHS = ["/api/event", "/event", "/global/event"]
-SESSION_MESSAGE_PATH = "/session/{sessionID}/message"
-LEGACY_RUN_PATH = "/session/{sessionID}/run"
-LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
+from opencode_session.api_profile import (
+    EVENT_PATHS,
+    LEGACY_REPLY_PATH,
+    LEGACY_RUN_PATH,
+    PROMPT_PATHS,
+    SESSION_MESSAGE_PATH,
+    SESSION_PATHS,
+    WAIT_PATHS,
+    OpenCodeServerProfile,
+    route_plan_from_availability,
+    server_profile_from_capabilities,
+)
 
 
 def detect_capabilities(client, *, deadline=None):
@@ -14,66 +19,19 @@ def detect_capabilities(client, *, deadline=None):
 
 
 def configure_client_route_plan(client, capabilities):
-    route_plan = capabilities.get("route_plan") if isinstance(capabilities, dict) else None
+    profile = server_profile_from_capabilities(capabilities)
+    configure_profile = getattr(client, "configure_server_profile", None)
+    if callable(configure_profile):
+        configure_profile(profile)
+        return client
     configure = getattr(client, "configure_route_plan", None)
     if callable(configure):
-        configure(route_plan)
+        configure(profile.route_plan)
     return client
 
 
 def capabilities_from_openapi_doc(doc, *, health=None):
-    health = health or {}
-    paths = doc.get("paths") or {}
-
-    session_path, session_available = _first_available_route(paths, SESSION_PATHS, "post")
-    prompt_path, prompt_available = _first_available_route(paths, PROMPT_PATHS, "post")
-    wait_path, wait_available = _first_available_route(paths, WAIT_PATHS, "post")
-    if not wait_available and prompt_available and _query_parameter_available(paths, prompt_path, "post", "wait"):
-        wait_path = f"{prompt_path}?wait=true"
-        wait_available = True
-    event_path, events_available = _first_available_route(paths, EVENT_PATHS, "get")
-    blocking_message_available = _route_available(paths, SESSION_MESSAGE_PATH, "post")
-    legacy_run_available = _route_available(paths, LEGACY_RUN_PATH, "post")
-    legacy_reply_available = _route_available(paths, LEGACY_REPLY_PATH, "post")
-    legacy_fallback_available = legacy_run_available and legacy_reply_available
-
-    route_availability = {
-        "session": _route(session_path, "POST", session_available),
-        "v2_prompt": _route(prompt_path, "POST", prompt_available),
-        "v2_wait": _route(wait_path, "POST", wait_available),
-        "events": _route(event_path, "GET", events_available),
-        "blocking_message": _route(SESSION_MESSAGE_PATH, "POST", blocking_message_available),
-        "legacy_run": _route(LEGACY_RUN_PATH, "POST", legacy_run_available),
-        "legacy_reply": _route(LEGACY_REPLY_PATH, "POST", legacy_reply_available),
-    }
-    route_plan = route_plan_from_availability(route_availability)
-
-    return {
-        "health": _health_status(health),
-        "version": str(health.get("version") or health.get("serverVersion") or "unknown"),
-        "route_availability": route_availability,
-        "route_plan": route_plan,
-        "v2_prompt_support": prompt_available,
-        "v2_wait_support": wait_available,
-        "event_support": events_available,
-        "blocking_message_available": blocking_message_available,
-        "blocking_execution_available": blocking_message_available or legacy_fallback_available,
-        "legacy_fallback_available": legacy_fallback_available,
-    }
-
-
-def route_plan_from_availability(route_availability):
-    session_path = _planned_route_path(route_availability, "session", SESSION_PATHS[0])
-    return {
-        "session_collection": session_path,
-        "session_item": _session_item_path(session_path),
-        "v2_prompt": _planned_route_path(route_availability, "v2_prompt", PROMPT_PATHS[0]),
-        "v2_wait": _planned_route_path(route_availability, "v2_wait", WAIT_PATHS[0]),
-        "events": _planned_route_path(route_availability, "events", EVENT_PATHS[0]),
-        "blocking_message": _planned_route_path(route_availability, "blocking_message", SESSION_MESSAGE_PATH),
-        "legacy_run": _planned_route_path(route_availability, "legacy_run", LEGACY_RUN_PATH),
-        "legacy_reply": _planned_route_path(route_availability, "legacy_reply", LEGACY_REPLY_PATH),
-    }
+    return OpenCodeServerProfile.from_openapi_doc(doc, health=health).to_capabilities()
 
 
 def format_compact(capabilities):
@@ -114,61 +72,3 @@ def unsupported_reasons(capabilities):
             "POST /session/{sessionID}/run + POST /session/{sessionID}/reply"
         )
     return reasons
-
-
-def _planned_route_path(route_availability, name, fallback):
-    route = route_availability.get(name) or {}
-    if route.get("available") and route.get("path"):
-        return route["path"]
-    return fallback
-
-
-def _session_item_path(session_collection_path):
-    return f"{session_collection_path.rstrip('/')}/{{sessionID}}"
-
-
-def _route(path, method, available):
-    return {"path": path, "method": method, "available": available}
-
-
-def _first_available_route(paths, candidates, method):
-    for path in candidates:
-        if _route_available(paths, path, method):
-            return path, True
-    return candidates[0], False
-
-
-def _route_available(paths, path, method):
-    for candidate in _path_variants(path):
-        route = paths.get(candidate) or {}
-        if method.lower() in {key.lower() for key in route.keys()}:
-            return True
-    return False
-
-
-def _query_parameter_available(paths, path, method, name):
-    for candidate in _path_variants(path):
-        operation = (paths.get(candidate) or {}).get(method.lower()) or {}
-        parameters = operation.get("parameters") or []
-        if any(parameter.get("name") == name for parameter in parameters):
-            return True
-    return False
-
-
-def _path_variants(path):
-    variants = [path]
-    colon = path.replace("{sessionID}", ":sessionID")
-    if colon not in variants:
-        variants.append(colon)
-    legacy_id = path.replace("{sessionID}", "{id}")
-    if legacy_id not in variants:
-        variants.append(legacy_id)
-    return variants
-
-
-def _health_status(health):
-    if "status" in health:
-        return str(health["status"])
-    if health.get("healthy") is True or health.get("ok") is True:
-        return "ok"
-    return "unknown"
