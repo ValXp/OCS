@@ -7,6 +7,7 @@ from opencode_session.worker_storage_adapter import (
     normalize_worker_snapshot_for_storage,
 )
 from opencode_session.worker_state import (
+    _WORKER_LIFECYCLE_TABLE,
     EXECUTABLE_WORKER_ACTIONS,
     FAILED_DEPENDENCY_STATUSES,
     PUBLIC_WORKER_STATE_BY_LIFECYCLE,
@@ -18,6 +19,7 @@ from opencode_session.worker_state import (
     WORKER_LIFECYCLE_STATES,
     WORKER_STATUS_PRIORITY_BY_STATUS,
     WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES,
+    WORKER_TRANSITION_DEFINITIONS,
     WORKER_TRANSITION_METADATA,
     WorkerLifecycleAction,
     WorkerLifecycleDimensions,
@@ -55,7 +57,26 @@ except ModuleNotFoundError:
 
 class WorkerStateContractTest(unittest.TestCase):
     def test_lifecycle_metadata_derives_public_status_policy_and_flags(self):
+        rows_by_state = {row.state: row for row in _WORKER_LIFECYCLE_TABLE}
+
+        self.assertEqual(WORKER_LIFECYCLE_STATES, frozenset(rows_by_state))
+        self.assertEqual(
+            {status.value for status in WorkerLifecycleStatus},
+            {row.status for row in _WORKER_LIFECYCLE_TABLE},
+        )
+        self.assertEqual(
+            {action.value for action in WorkerLifecycleAction},
+            {row.action for row in _WORKER_LIFECYCLE_TABLE},
+        )
         self.assertEqual(WORKER_LIFECYCLE_STATES, frozenset(WORKER_LIFECYCLE_METADATA))
+        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items():
+            with self.subTest(lifecycle_state=lifecycle_state):
+                row = rows_by_state[lifecycle_state]
+                self.assertEqual(metadata.status, row.status)
+                self.assertEqual(metadata.retryable, row.retryable)
+                self.assertEqual(metadata.timeout_origin, row.timeout_origin)
+                self.assertEqual(metadata.source_transitions, row.source_transitions)
+                self.assertEqual(metadata.target_transitions, row.target_transitions)
         self.assertEqual(
             PUBLIC_WORKER_STATE_BY_LIFECYCLE,
             {
@@ -145,21 +166,33 @@ class WorkerStateContractTest(unittest.TestCase):
                 self.assertEqual(worker_lifecycle_source_states(transition_name), metadata.source_states)
                 self.assertEqual(worker_lifecycle_target_states(transition_name), metadata.target_states)
 
-    def test_lifecycle_transition_views_are_derived_from_transition_metadata(self):
-        source_transitions_by_state = {lifecycle_state: set() for lifecycle_state in WORKER_LIFECYCLE_METADATA}
-        target_transitions_by_state = {lifecycle_state: set() for lifecycle_state in WORKER_LIFECYCLE_METADATA}
+    def test_transition_legality_is_derived_from_lifecycle_model(self):
         for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
             if not metadata.public_lifecycle_transition:
                 continue
-            for lifecycle_state in metadata.source_states:
-                source_transitions_by_state[lifecycle_state].add(transition_name)
-            for lifecycle_state in metadata.target_states:
-                target_transitions_by_state[lifecycle_state].add(transition_name)
 
-        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items():
-            with self.subTest(lifecycle_state=lifecycle_state):
-                self.assertEqual(metadata.source_transitions, frozenset(source_transitions_by_state[lifecycle_state]))
-                self.assertEqual(metadata.target_transitions, frozenset(target_transitions_by_state[lifecycle_state]))
+            expected_source_states = frozenset(
+                lifecycle_state
+                for lifecycle_state, lifecycle_metadata in WORKER_LIFECYCLE_METADATA.items()
+                if transition_name in lifecycle_metadata.source_transitions
+            )
+            expected_target_states = frozenset(
+                lifecycle_state
+                for lifecycle_state, lifecycle_metadata in WORKER_LIFECYCLE_METADATA.items()
+                if transition_name in lifecycle_metadata.target_transitions
+            )
+
+            with self.subTest(transition=transition_name):
+                self.assertEqual(
+                    WORKER_TRANSITION_DEFINITIONS[transition_name].source_states,
+                    expected_source_states,
+                )
+                self.assertEqual(
+                    WORKER_TRANSITION_DEFINITIONS[transition_name].target_states,
+                    expected_target_states,
+                )
+                self.assertEqual(metadata.source_states, expected_source_states)
+                self.assertEqual(metadata.target_states, expected_target_states)
 
     def test_normalize_worker_applies_defaults_and_derives_next_action(self):
         worker = normalize_worker(
