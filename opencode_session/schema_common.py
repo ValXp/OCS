@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, TypedDict, Union
+from typing import Any, Dict, List, Optional, Protocol, TypedDict, Union
 
 
 JsonValue = Union[None, bool, int, float, str, List["JsonValue"], Dict[str, "JsonValue"]]
@@ -162,6 +162,44 @@ class Worker(WorkerRequiredFields, total=False):
     result: JsonObject
 
 
+class HydratedWorker(Protocol):
+    """Runtime worker record hydrated from a persisted snapshot."""
+
+    @property
+    def worker_id(self) -> str: ...
+
+    @property
+    def lifecycle_state(self) -> str: ...
+
+    @property
+    def status(self) -> str: ...
+
+    @property
+    def next_eligible_action(self) -> str: ...
+
+    def field(self, field_name: str, default: Any = None) -> Any: ...
+
+    def set_field(self, field_name: str, value: Any) -> "HydratedWorker": ...
+
+    def merge_fields(self, fields: Any = None, **kwargs: Any) -> "HydratedWorker": ...
+
+    def apply_transition(self, transition: Any) -> "HydratedWorker": ...
+
+    def remember_prompt_id(self, prompt_id: Optional[str]) -> "HydratedWorker": ...
+
+    def set_session(
+        self,
+        session_id: Optional[str],
+        *,
+        agent: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> "HydratedWorker": ...
+
+    def to_public_dict(self) -> Worker: ...
+
+    def to_snapshot(self) -> WorkerSnapshotRecord: ...
+
+
 WORKER_REQUIRED_FIELD_NAMES = tuple(WorkerRequiredFields.__annotations__)
 
 
@@ -185,7 +223,7 @@ class PersistedRunRecord(TypedDict, total=False):
     updated_at: JsonValue
 
 
-class RunRecord(TypedDict, total=False):
+class HydratedRunRecord(TypedDict, total=False):
     name: str
     run_id: str
     directory: str
@@ -195,9 +233,12 @@ class RunRecord(TypedDict, total=False):
     timeout_seconds: Optional[float]
     blockers: List[str]
     output_refs: List[str]
-    workers: Dict[str, Worker]
+    workers: Dict[str, HydratedWorker]
     created_at: JsonValue
     updated_at: JsonValue
+
+
+RunRecord = HydratedRunRecord
 
 
 class CapabilitiesRecord(TypedDict, total=False):

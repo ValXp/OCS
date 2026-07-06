@@ -123,6 +123,21 @@ class ImportBoundaryTest(unittest.TestCase):
 
         self.assertTrue(hasattr(run_record, "normalize_run"))
 
+    def test_schema_common_hydrated_types_do_not_import_worker_state(self):
+        blocked = BlockedModuleFinder({"opencode_session.worker_state"})
+        with temporarily_unimported(
+            "opencode_session.schema_common",
+            "opencode_session.worker_state",
+        ):
+            sys.meta_path.insert(0, blocked)
+            try:
+                schema_common = importlib.import_module("opencode_session.schema_common")
+            finally:
+                sys.meta_path.remove(blocked)
+
+        self.assertTrue(hasattr(schema_common, "HydratedRunRecord"))
+        self.assertTrue(hasattr(schema_common, "HydratedWorker"))
+
     def test_worker_state_is_canonical_worker_state_surface(self):
         with temporarily_unimported(
             "opencode_session.worker_lifecycle_reducer",

@@ -6,7 +6,7 @@ from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.cli_policy import EX_UNAVAILABLE
 from opencode_session.run_start_policy import blocking_execution_start_error
-from opencode_session.schema_common import CapabilitiesRecord, RunRecord, Worker
+from opencode_session.schema_common import CapabilitiesRecord, HydratedWorker, RunRecord
 from opencode_session.worker_cleanup_recovery import (
     cleanup_created_worker_sessions,
     recoverable_created_worker_sessions_by_worker,
@@ -34,7 +34,7 @@ class CapabilityProbeOutcome:
 @dataclass
 class PersistedTransitionOutcome:
     run: RunRecord
-    worker: Optional[Worker] = None
+    worker: Optional[HydratedWorker] = None
 
 
 @dataclass

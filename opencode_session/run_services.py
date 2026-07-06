@@ -22,7 +22,7 @@ from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_record import RunRecordError, upsert_worker_record
 from opencode_session.run_store import RunStoreError
 from opencode_session.status import short_status
-from opencode_session.schema_common import NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord, Worker
+from opencode_session.schema_common import HydratedWorker, NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 from opencode_session.worker_state import (
     is_worker_mapping,
@@ -103,21 +103,21 @@ class RunStartRequest:
 @dataclass
 class RunCollectResult:
     run: RunRecord
-    worker: Optional[Worker] = None
-    workers: Sequence[Worker] = ()
+    worker: Optional[HydratedWorker] = None
+    workers: Sequence[HydratedWorker] = ()
 
 
 @dataclass
 class RunSteerResult:
     run: RunRecord
-    worker: Worker
+    worker: HydratedWorker
     admission: NormalizedAdmissionRecord
 
 
 @dataclass
 class RunAbortResult:
     run: RunRecord
-    worker: Worker
+    worker: HydratedWorker
     abort: NormalizedAbortRecord
     raw_body: str
 

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationOperation
-from opencode_session.schema_common import RunRecord, Worker
+from opencode_session.schema_common import HydratedWorker, RunRecord
 from opencode_session.session_ids import require_session_id
 from opencode_session.worker_state import (
     WorkerRecord,
@@ -84,7 +84,7 @@ class WorkerSessionCreatedRecord:
 @dataclass
 class WorkerSessionProvisioning:
     run: RunRecord
-    worker: Worker
+    worker: HydratedWorker
     outcome: WorkerSessionOutcome
     intent: Optional[WorkerSessionCreationIntent] = None
 
