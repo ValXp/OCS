@@ -12,8 +12,8 @@ from opencode_session.multi_worker_orchestration import (
     schedule_dependency_ordered_tick,
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
-from opencode_session.run_store import RunStore
-from opencode_session.worker_execution import WorkerExecutionOutcome
+from opencode_session.run_store import RunStore, RunStoreError
+from opencode_session.worker_execution import WORKER_SESSION_JOURNAL_FIELD, WorkerExecutionOutcome
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import apply_worker_transition
 
@@ -196,6 +196,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 session_id=None,
                 agent=None,
                 model=None,
+                cleanup_requested=False,
                 stop_after_retry=False,
             ):
                 self.calls.append(
@@ -208,6 +209,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                         "session_id": session_id,
                         "agent": agent,
                         "model": model,
+                        "cleanup_requested": cleanup_requested,
                         "stop_after_retry": stop_after_retry,
                     }
                 )
@@ -244,6 +246,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertIsNone(core.calls[0]["session_id"])
         self.assertEqual(core.calls[0]["agent"], "build")
         self.assertEqual(core.calls[0]["model"], "openai/gpt-5.5")
+        self.assertFalse(core.calls[0]["cleanup_requested"])
         self.assertTrue(core.calls[0]["stop_after_retry"])
         self.assertEqual(session_tracker.remembered[0][1]["status"], "done")
         self.assertEqual(session_tracker.remembered[0][2], "completed")
@@ -304,6 +307,103 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(attempt.get("result_status"), "done")
         self.assertEqual(attempt.get("user_message_id"), "msg_user")
         self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
+
+    def test_start_persists_worker_session_creation_intent_before_remote_create(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker(
+                "demo",
+                "worker",
+                role="worker",
+                prompt="Finish the worker task",
+                agent="build",
+                model="openai/gpt-5.5",
+            )
+            observed_intent = {}
+            test_case = self
+
+            class InspectingCreateClient(FakeClient):
+                def create_session_response(self, directory, *, agent=None, model=None):
+                    persisted_run = store.load_run("demo")
+                    journal = persisted_run[WORKER_SESSION_JOURNAL_FIELD]
+                    test_case.assertEqual(len(journal), 1)
+                    observed_intent["entry"] = deepcopy(journal[0])
+                    return super().create_session_response(directory, agent=agent, model=model)
+
+            client = InspectingCreateClient(["ses_initial"])
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
+
+            service = DependencyOrderedSerialRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker"))
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(
+            client.requests,
+            [("create", directory, "build", "openai/gpt-5.5"), ("execute", "ses_initial", "Finish the worker task")],
+        )
+        entry = observed_intent["entry"]
+        self.assertEqual(entry["kind"], "worker_session_create")
+        self.assertEqual(entry["status"], "intent")
+        self.assertEqual(entry["worker_id"], "worker")
+        self.assertEqual(entry["directory"], directory)
+        self.assertEqual(entry["agent"], "build")
+        self.assertEqual(entry["model"], "openai/gpt-5.5")
+        self.assertFalse(entry["cleanup_requested"])
+        self.assertNotIn("session_id", entry)
+        self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
+
+    def test_start_persistence_failure_after_session_creation_leaves_cleanup_metadata(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            inner_store = RunStore(store_root)
+            inner_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            inner_store.upsert_worker("demo", "worker", role="worker", prompt="Finish the worker task")
+            store = FailAfterCreatedSessionJournalStore(inner_store)
+            client = FakeClient(["ses_initial"])
+            service = DependencyOrderedSerialRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=lambda *args, **kwargs: self.fail("worker should not execute after persistence failure"),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            with self.assertRaisesRegex(RunStoreError, "forced update failure after session creation"):
+                service.start(
+                    DependencyOrderedSerialRunStartRequest(
+                        name="demo",
+                        worker_id="worker",
+                        role="worker",
+                        cleanup=True,
+                    )
+                )
+            run = inner_store.load_run("demo")
+
+        self.assertEqual(client.requests, [("create", directory, None, None)])
+        self.assertTrue(store.failed)
+        journal = run[WORKER_SESSION_JOURNAL_FIELD]
+        self.assertEqual(len(journal), 1)
+        entry = journal[0]
+        self.assertEqual(entry["kind"], "worker_session_create")
+        self.assertEqual(entry["status"], "created")
+        self.assertEqual(entry["worker_id"], "worker")
+        self.assertEqual(entry["session_id"], "ses_initial")
+        self.assertEqual(entry["created_session_ids"], ["ses_initial"])
+        self.assertTrue(entry["cleanup_requested"])
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker["session_id"], "ses_initial")
+        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_initial"]})
 
     def test_command_service_start_passes_injected_dependencies_to_orchestration(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -874,6 +974,38 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(review["last_failure_category"], "api")
         self.assertEqual(review["last_failure_reason"], "previous failure")
         self.assertEqual(review["next_eligible_action"], "collect")
+
+
+class FailAfterCreatedSessionJournalStore:
+    def __init__(self, store):
+        self.store = store
+        self.failed = False
+
+    def __getattr__(self, name):
+        return getattr(self.store, name)
+
+    def update_run(self, name, mutator):
+        def fail_after_created_journal(run):
+            should_fail = not self.failed and _has_created_session_journal(run)
+            result = mutator(run)
+            if should_fail:
+                self.failed = True
+                raise RunStoreError("forced update failure after session creation")
+            return result
+
+        return self.store.update_run(name, fail_after_created_journal)
+
+
+def _has_created_session_journal(run):
+    journal = run.get(WORKER_SESSION_JOURNAL_FIELD)
+    if not isinstance(journal, list):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get("kind") == "worker_session_create"
+        and entry.get("status") == "created"
+        for entry in journal
+    )
 
 
 if __name__ == "__main__":

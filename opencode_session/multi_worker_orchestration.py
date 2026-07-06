@@ -11,7 +11,11 @@ from opencode_session.run_persistence import (
     persist_run_summary,
     persist_worker_transitions,
 )
-from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
+from opencode_session.run_start_core import (
+    RunStartCore,
+    recoverable_cleanup_sessions,
+    remember_created_worker_sessions,
+)
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import RunRecord
@@ -137,9 +141,12 @@ class DisposableSessionTracker:
         )
 
     def cleanup(self, core, client, run):
-        if not self.enabled or client is None or not self.created_session_ids_by_worker:
+        if not self.enabled or client is None:
             return run, None
-        cleanup_result = core.cleanup_created_workers(client, run, self.created_session_ids_by_worker)
+        session_ids_by_worker = recoverable_cleanup_sessions(self.created_session_ids_by_worker, run)
+        if not session_ids_by_worker:
+            return run, None
+        cleanup_result = core.cleanup_created_workers(client, run, session_ids_by_worker)
         if cleanup_result.error is not None:
             return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
                 cleanup_result.run,
@@ -166,7 +173,7 @@ class NextEligibleWorkerExecutor:
         first_error_outcome = None
         worker = _worker_by_id(run.get("workers", {}), worker_id)
         while worker is not None:
-            outcome = self._execute_single_worker(client, run, worker, capabilities)
+            outcome = self._execute_single_worker(client, run, worker, capabilities, session_tracker)
             run = outcome.run or run
             current_worker = run.get("workers", {}).get(worker.get("id"), worker)
             session_tracker.remember_worker_outcome(run, current_worker, outcome)
@@ -181,7 +188,7 @@ class NextEligibleWorkerExecutor:
             worker = None
         return NextWorkerExecutionOutcome(run, first_error_outcome)
 
-    def _execute_single_worker(self, client, run, worker, capabilities):
+    def _execute_single_worker(self, client, run, worker, capabilities, session_tracker):
         return self.core.execute_worker(
             client,
             run,
@@ -190,6 +197,7 @@ class NextEligibleWorkerExecutor:
             capabilities,
             agent=worker.get("agent"),
             model=worker.get("model"),
+            cleanup_requested=getattr(session_tracker, "enabled", False),
             stop_after_retry=True,
         )
 
@@ -218,6 +226,7 @@ class DependencyOrderedSerialRunOrchestrationService:
             client_factory=self.client_factory,
             capability_detector=self.capability_detector,
             executor=self.executor,
+            persist_run_mutation=self._persist_mutation,
             now=self.now,
         )
         self.worker_executor = NextEligibleWorkerExecutor(self.core)

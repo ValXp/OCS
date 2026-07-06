@@ -8,7 +8,9 @@ from opencode_session.run_start_policy import blocking_execution_start_error
 from opencode_session.schema_common import CapabilitiesRecord, RunRecord, Worker
 from opencode_session.worker_execution import (
     WorkerExecutionExecutor,
+    WorkerSessionCreationJournal,
     cleanup_created_worker_sessions,
+    recoverable_created_worker_sessions_by_worker,
 )
 from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition
 
@@ -62,6 +64,7 @@ class RunStartCore:
         client_factory=OpenCodeApiClient,
         capability_detector=detect_capabilities,
         executor=execute_blocking_prompt,
+        persist_run_mutation=None,
         now,
     ):
         self.persist_worker_transition = persist_worker_transition
@@ -69,11 +72,13 @@ class RunStartCore:
         self.client_factory = client_factory
         self.capability_detector = capability_detector
         self.executor = executor
+        self.persist_run_mutation = persist_run_mutation
         self.now = now
         self.worker_executor = WorkerExecutionExecutor(
             apply_transition=self._persist_worker_execution_transition,
             executor=self.executor,
             now=self.now,
+            session_journal=self._worker_session_journal(),
         )
 
     def probe_capabilities(self, run):
@@ -93,6 +98,7 @@ class RunStartCore:
         session_id=None,
         agent=None,
         model=None,
+        cleanup_requested=False,
         stop_after_retry=False,
     ):
         return self.worker_executor.execute(
@@ -105,6 +111,7 @@ class RunStartCore:
             agent=agent,
             model=model,
             create_session=True,
+            cleanup_requested=cleanup_requested,
             stop_after_retry=stop_after_retry,
         )
 
@@ -139,9 +146,27 @@ class RunStartCore:
         persisted = self._persist_transition(run, transition)
         return persisted.run, persisted.worker or worker
 
+    def _worker_session_journal(self):
+        if self.persist_run_mutation is None:
+            return None
+        return WorkerSessionCreationJournal(self.persist_run_mutation, now=self.now)
+
 
 def remember_created_worker_sessions(created_session_ids_by_worker, worker, session_ids):
     if not session_ids:
         return
     worker.setdefault("cleanup", {"requested": True, "deleted": False})
-    created_session_ids_by_worker.setdefault(worker.get("id"), []).extend(session_ids)
+    remembered_session_ids = created_session_ids_by_worker.setdefault(worker.get("id"), [])
+    for session_id in session_ids:
+        if session_id not in remembered_session_ids:
+            remembered_session_ids.append(session_id)
+
+
+def recoverable_cleanup_sessions(created_session_ids_by_worker, run):
+    merged = {worker_id: list(session_ids) for worker_id, session_ids in created_session_ids_by_worker.items()}
+    for worker_id, session_ids in recoverable_created_worker_sessions_by_worker(run).items():
+        remembered = merged.setdefault(worker_id, [])
+        for session_id in session_ids:
+            if session_id not in remembered:
+                remembered.append(session_id)
+    return {worker_id: session_ids for worker_id, session_ids in merged.items() if session_ids}
