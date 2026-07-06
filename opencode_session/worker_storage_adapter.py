@@ -4,26 +4,23 @@ from copy import deepcopy
 from opencode_session.status import short_status
 from opencode_session.worker_state import (
     PUBLIC_WORKER_STATE_FIELD_NAMES,
-    WORKER_ACTION_NONE,
-    WORKER_ACTION_RESOLVE_BLOCKER,
-    WORKER_ACTION_RETRY,
     WORKER_LIFECYCLE_QUEUED,
     WORKER_LIFECYCLE_STATES,
     WORKER_LIST_FIELDS,
     WORKER_OPTIONAL_LIST_FIELDS,
     WORKER_STATUS_ABORTED,
-    WORKER_STATUS_ACTIVE,
-    WORKER_STATUS_DONE,
     WORKER_STATUS_FAILED,
-    WORKER_STATUS_QUEUED,
     WORKER_STATUS_TIMEOUT,
     WORKER_TIMEOUT_POLICY_STATUSES,
     WorkerSnapshotTransitionPatch,
     WorkerRecord,
     WorkerTransition,
     is_blocked_status,
+    worker_failed_lifecycle_state,
     worker_lifecycle_state_for_public_state,
     worker_lifecycle_state_for_status_alias,
+    worker_retry_available,
+    worker_timeout_lifecycle_state,
 )
 
 
@@ -53,6 +50,7 @@ STORAGE_WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELDS = (
     "manual_retry_required",
 )
 STORAGE_WORKER_ACCEPTED_ABORT_PASSTHROUGH_FIELDS = ("cleanup",)
+_LEGACY_LIFECYCLE_PROJECTION_WORKER_ID = "__legacy_worker__"
 
 
 def _worker_fields(worker):
@@ -71,83 +69,65 @@ def _raw_worker_field(worker, field_name, default=None):
     return default
 
 
-def _legacy_worker_retry_available(worker, category=None):
-    if not isinstance(worker, Mapping):
-        return False
-    if _raw_worker_field(worker, "failure_retryable") is False:
-        return False
-    retryable = set(_raw_worker_field(worker, "retryable_failures") or [])
-    if not retryable:
-        return False
-    if category is None:
-        category = _raw_worker_field(worker, "failure_category") or _raw_worker_field(worker, "last_failure_category")
-    if category and category not in retryable and "all" not in retryable:
-        return False
+def _legacy_worker_record_for_lifecycle_projection(worker):
+    fields = _worker_fields(worker)
+    for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
+        fields.pop(public_field_name, None)
+    worker_id = fields.get("id") or _LEGACY_LIFECYCLE_PROJECTION_WORKER_ID
+    fields["id"] = str(worker_id)
+    if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
+        fields["lifecycle_state"] = WORKER_LIFECYCLE_QUEUED
+    _coerce_legacy_retry_budget_for_lifecycle_projection(fields)
+    for field_name in (*WORKER_LIST_FIELDS, *WORKER_OPTIONAL_LIST_FIELDS):
+        if field_name in fields and not isinstance(fields[field_name], list):
+            fields[field_name] = []
+    if "timeout_policy" in fields:
+        timeout_policy = short_status(fields["timeout_policy"])
+        fields["timeout_policy"] = (
+            timeout_policy if timeout_policy in WORKER_TIMEOUT_POLICY_STATUSES else WORKER_STATUS_TIMEOUT
+        )
+    return WorkerRecord.from_worker(fields, fields["id"], allow_extra_fields=True)
+
+
+def _coerce_legacy_retry_budget_for_lifecycle_projection(fields):
     try:
-        retry_count = int(_raw_worker_field(worker, "retry_count") or 0)
-        retry_limit = int(_raw_worker_field(worker, "retry_limit") or 0)
+        fields["retry_count"] = int(fields.get("retry_count") or 0)
+        fields["retry_limit"] = int(fields.get("retry_limit") or 0)
     except (TypeError, ValueError):
-        return False
-    return retry_count < retry_limit
+        fields["retry_count"] = 0
+        fields["retry_limit"] = 0
 
 
 def _lifecycle_state_from_legacy_public_worker_state(worker):
     worker = worker if isinstance(worker, Mapping) else {}
     status = short_status(_raw_worker_field(worker, "status"))
-    if status == WORKER_STATUS_QUEUED:
-        return worker_lifecycle_state_for_status_alias(status)
-    if status == WORKER_STATUS_ACTIVE:
-        if _raw_worker_field(worker, "next_eligible_action") == WORKER_ACTION_RETRY:
-            return worker_lifecycle_state_for_public_state(status, WORKER_ACTION_RETRY)
-        return worker_lifecycle_state_for_status_alias(status)
-    if is_blocked_status(status):
-        timeout_origin = _raw_worker_field(
-            worker,
-            "failure_category",
-        ) == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(
-            _raw_worker_field(worker, "blockers") or []
-        )
-        return worker_lifecycle_state_for_public_state(
+    projected_worker = _legacy_worker_record_for_lifecycle_projection(worker)
+    if _legacy_worker_timeout_origin(worker, status):
+        return worker_timeout_lifecycle_state(
             status,
-            WORKER_ACTION_RESOLVE_BLOCKER,
-            timeout_origin=timeout_origin,
+            worker_retry_available(projected_worker, WORKER_STATUS_TIMEOUT),
         )
-    if status == WORKER_STATUS_DONE:
-        return worker_lifecycle_state_for_status_alias(status)
     if status == WORKER_STATUS_FAILED:
-        if _raw_worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT:
-            return worker_lifecycle_state_for_public_state(
-                status,
-                (
-                    WORKER_ACTION_RETRY
-                    if _legacy_worker_retry_available(worker, WORKER_STATUS_TIMEOUT)
-                    else WORKER_ACTION_NONE
-                ),
-                timeout_origin=True,
-            )
-        return worker_lifecycle_state_for_public_state(
-            status,
-            WORKER_ACTION_RETRY if _legacy_worker_retry_available(worker) else WORKER_ACTION_NONE,
+        return worker_failed_lifecycle_state(
+            retryable=True,
+            retry_available=worker_retry_available(projected_worker),
         )
+    return (
+        worker_lifecycle_state_for_public_state(status, _raw_worker_field(worker, "next_eligible_action"))
+        or worker_lifecycle_state_for_status_alias(status)
+        or WORKER_LIFECYCLE_QUEUED
+    )
+
+
+def _legacy_worker_timeout_origin(worker, status):
     if status == WORKER_STATUS_TIMEOUT:
-        return worker_lifecycle_state_for_public_state(
-            status,
-            (
-                WORKER_ACTION_RETRY
-                if _legacy_worker_retry_available(worker, WORKER_STATUS_TIMEOUT)
-                else WORKER_ACTION_NONE
-            ),
-            timeout_origin=True,
-        )
-    if status == WORKER_STATUS_ABORTED:
-        if _raw_worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT:
-            return worker_lifecycle_state_for_public_state(
-                status,
-                WORKER_ACTION_NONE,
-                timeout_origin=True,
-            )
-        return worker_lifecycle_state_for_status_alias(status)
-    return WORKER_LIFECYCLE_QUEUED
+        return True
+    if status in {WORKER_STATUS_ABORTED, WORKER_STATUS_FAILED}:
+        return _raw_worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT
+    return is_blocked_status(status) and (
+        _raw_worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT
+        or WORKER_STATUS_TIMEOUT in set(_raw_worker_field(worker, "blockers") or [])
+    )
 
 
 def canonicalize_legacy_worker_record(worker, worker_id=None):

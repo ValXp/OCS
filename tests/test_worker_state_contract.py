@@ -39,6 +39,7 @@ from opencode_session.worker_state import (
     worker_has_field,
     worker_has_prompt,
     worker_lifecycle_state,
+    worker_failed_lifecycle_state,
     worker_lifecycle_state_for_public_state,
     worker_lifecycle_state_for_status_alias,
     worker_field,
@@ -417,6 +418,113 @@ class WorkerStateContractTest(unittest.TestCase):
                 self.assertEqual(next_eligible_worker_action(record), expected_action)
                 self.assertEqual(next_eligible_action(record), expected_action)
                 self.assertEqual(is_executable_worker(record), executable)
+
+    def test_storage_adapter_projects_legacy_public_statuses_through_canonical_lifecycle_policy(self):
+        cases = (
+            (
+                "active retry action",
+                {
+                    "id": "active_retry",
+                    "prompt": "Retry",
+                    "status": "active",
+                    "next_eligible_action": "retry",
+                },
+                worker_lifecycle_state_for_public_state("active", "retry"),
+                "active",
+                "retry",
+            ),
+            (
+                "failed retry budget",
+                {
+                    "id": "failed_retry",
+                    "prompt": "Retry",
+                    "status": "failed",
+                    "failure_category": "provider",
+                    "retryable_failures": ["provider"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
+                },
+                worker_failed_lifecycle_state(retryable=True, retry_available=True),
+                "failed",
+                "retry",
+            ),
+            (
+                "failed retry disabled by failure_retryable",
+                {
+                    "id": "failed_terminal",
+                    "prompt": "Retry",
+                    "status": "failed",
+                    "failure_category": "provider",
+                    "retryable_failures": ["provider"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
+                    "failure_retryable": False,
+                },
+                worker_failed_lifecycle_state(retryable=True, retry_available=False),
+                "failed",
+                "none",
+            ),
+            (
+                "timeout failure retry budget",
+                {
+                    "id": "timeout_failed_retry",
+                    "prompt": "Retry",
+                    "status": "failed",
+                    "failure_category": "timeout",
+                    "retryable_failures": ["timeout"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
+                },
+                worker_timeout_lifecycle_state("failed", True),
+                "failed",
+                "retry",
+            ),
+            (
+                "blocked timeout origin",
+                {
+                    "id": "blocked_timeout",
+                    "prompt": "Unblock",
+                    "status": "blocked",
+                    "blockers": ["timeout"],
+                },
+                worker_timeout_lifecycle_state("blocked", False),
+                "blocked",
+                "resolve_blocker",
+            ),
+            (
+                "malformed retry budget remains terminal",
+                {
+                    "id": "malformed_retry_budget",
+                    "prompt": "Investigate",
+                    "status": "failed",
+                    "failure_category": "provider",
+                    "retryable_failures": ["provider"],
+                    "retry_count": "bad",
+                    "retry_limit": 1,
+                },
+                worker_failed_lifecycle_state(retryable=True, retry_available=False),
+                "failed",
+                "none",
+            ),
+        )
+
+        for name, worker, expected_lifecycle, expected_status, expected_action in cases:
+            with self.subTest(name=name):
+                canonical = canonicalize_legacy_worker_record(worker)
+                snapshot = normalize_worker_snapshot_for_storage(worker, worker["id"])
+                record = hydrate_worker_record(worker, worker["id"])
+
+                self.assertEqual(canonical["lifecycle_state"], expected_lifecycle)
+                self.assertEqual(snapshot["lifecycle_state"], expected_lifecycle)
+                self.assertNotIn("status", snapshot)
+                self.assertNotIn("next_eligible_action", snapshot)
+                assert_worker_outcome(
+                    self,
+                    record,
+                    status=expected_status,
+                    action=expected_action,
+                    lifecycle=expected_lifecycle,
+                )
 
     def test_core_worker_record_helpers_reject_raw_mappings(self):
         worker = {"id": "review", "prompt": "Review", "lifecycle_state": "queued"}
