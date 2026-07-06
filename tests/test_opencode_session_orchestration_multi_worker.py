@@ -7,10 +7,13 @@ from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
+    EXECUTION_POLICY_FAIL_FAST,
+    NextEligibleWorkerExecutor,
     schedule_dependency_ordered_tick,
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore
+from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import apply_worker_transition
 
@@ -144,7 +147,87 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
 
 class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
-    def test_start_persists_worker_attempt_events_in_order_before_provider_call(self):
+    def test_next_eligible_worker_executor_delegates_to_core_direct_execution(self):
+        run = {
+            "workers": {
+                "worker": {
+                    "id": "worker",
+                    "prompt": "Finish the worker task",
+                    "agent": "build",
+                    "model": "openai/gpt-5.5",
+                }
+            }
+        }
+        client = object()
+
+        class DirectCore:
+            def __init__(self):
+                self.calls = []
+
+            def execute_worker(
+                self,
+                client,
+                run,
+                worker,
+                prompt,
+                capabilities,
+                *,
+                session_id=None,
+                agent=None,
+                model=None,
+                stop_after_retry=False,
+            ):
+                self.calls.append(
+                    {
+                        "client": client,
+                        "run": run,
+                        "worker": worker,
+                        "prompt": prompt,
+                        "capabilities": capabilities,
+                        "session_id": session_id,
+                        "agent": agent,
+                        "model": model,
+                        "stop_after_retry": stop_after_retry,
+                    }
+                )
+                updated_run = deepcopy(run)
+                updated_run["workers"][worker["id"]]["status"] = "done"
+                return WorkerExecutionOutcome("completed", run=updated_run)
+
+        class RecordingSessionTracker:
+            def __init__(self):
+                self.remembered = []
+
+            def remember_worker_outcome(self, run, fallback_worker, outcome):
+                self.remembered.append((run, fallback_worker, outcome.kind))
+
+        core = DirectCore()
+        session_tracker = RecordingSessionTracker()
+
+        outcome = NextEligibleWorkerExecutor(core).execute_next(
+            run,
+            "worker",
+            client,
+            CAPABILITIES,
+            session_tracker=session_tracker,
+            execution_policy=EXECUTION_POLICY_FAIL_FAST,
+        )
+
+        self.assertEqual(outcome.run["workers"]["worker"]["status"], "done")
+        self.assertEqual(len(core.calls), 1)
+        self.assertIs(core.calls[0]["client"], client)
+        self.assertIs(core.calls[0]["run"], run)
+        self.assertIs(core.calls[0]["worker"], run["workers"]["worker"])
+        self.assertEqual(core.calls[0]["prompt"], "Finish the worker task")
+        self.assertEqual(core.calls[0]["capabilities"], CAPABILITIES)
+        self.assertIsNone(core.calls[0]["session_id"])
+        self.assertEqual(core.calls[0]["agent"], "build")
+        self.assertEqual(core.calls[0]["model"], "openai/gpt-5.5")
+        self.assertTrue(core.calls[0]["stop_after_retry"])
+        self.assertEqual(session_tracker.remembered[0][1]["status"], "done")
+        self.assertEqual(session_tracker.remembered[0][2], "completed")
+
+    def test_start_persists_worker_attempt_transitions_in_order_before_provider_call(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)
             store.create_run("demo", directory=directory, server_url="http://opencode.example")

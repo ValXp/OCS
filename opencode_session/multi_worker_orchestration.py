@@ -17,7 +17,6 @@ from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import RunRecord
 from opencode_session.worker_execution import (
     RETRY_SCHEDULED,
-    WorkerExecutionCheckpoint,
     WorkerExecutionOutcome,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
@@ -153,9 +152,8 @@ class DisposableSessionTracker:
 
 
 class NextEligibleWorkerExecutor:
-    def __init__(self, core, *, persist_worker_transition):
+    def __init__(self, core):
         self.core = core
-        self.persist_worker_transition = persist_worker_transition
 
     def execute_next(
         self,
@@ -186,10 +184,9 @@ class NextEligibleWorkerExecutor:
         return NextWorkerExecutionOutcome(run, first_error_outcome)
 
     def _execute_single_worker(self, client, run, worker, capabilities):
-        current_run = run
-        events = self.core.worker_execution_events(
+        return self.core.execute_worker(
             client,
-            current_run,
+            run,
             worker,
             _worker_prompt(worker),
             capabilities,
@@ -197,27 +194,6 @@ class NextEligibleWorkerExecutor:
             model=worker.get("model"),
             stop_after_retry=True,
         )
-        checkpoint = None
-        while True:
-            try:
-                event = events.send(checkpoint) if checkpoint is not None else next(events)
-            except StopIteration:
-                break
-            checkpoint = None
-            if event.transition is not None:
-                result = self.persist_worker_transition(current_run, event.transition)
-                current_run = result.run
-                persisted_worker = (
-                    result.workers[0]
-                    if result.workers
-                    else result.run.get("workers", {}).get(event.transition.worker_id)
-                )
-                checkpoint = WorkerExecutionCheckpoint(current_run, persisted_worker)
-                continue
-            if event.outcome is not None:
-                event.outcome.run = current_run
-                return event.outcome
-        raise RuntimeError("worker execution completed without an outcome")
 
 
 class DependencyOrderedSerialRunOrchestrationService:
@@ -246,10 +222,7 @@ class DependencyOrderedSerialRunOrchestrationService:
             executor=self.executor,
             now=self.now,
         )
-        self.worker_executor = NextEligibleWorkerExecutor(
-            self.core,
-            persist_worker_transition=self._persist_worker_transition,
-        )
+        self.worker_executor = NextEligibleWorkerExecutor(self.core)
 
     def start(self, request):
         run = self.store.load_run(request.name)
