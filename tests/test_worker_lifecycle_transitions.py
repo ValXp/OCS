@@ -80,7 +80,6 @@ TRANSITION_CASES = (
         "terminal failure records prompt ids",
         {
             "lifecycle_state": "active_wait",
-            "next_eligible_action": "wait",
             "failure_retryable": False,
             "prompt_ids": ["msg_previous"],
         },
@@ -98,7 +97,6 @@ TRANSITION_CASES = (
         "retryable failure remains retry eligible",
         {
             "lifecycle_state": "active_wait",
-            "next_eligible_action": "wait",
             "retryable_failures": ["provider"],
             "retry_count": 0,
             "retry_limit": 1,
@@ -692,7 +690,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         self.assertEqual(worker_field(worker, "prompt_ids"), [])
 
     def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
-        worker = normalize_worker({"lifecycle_state": "active_wait", "next_eligible_action": "wait"}, "planner")
+        worker = normalize_worker({"lifecycle_state": "active_wait"}, "planner")
 
         apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": False}))
 

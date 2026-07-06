@@ -303,8 +303,8 @@ class WorkerStateContractTest(unittest.TestCase):
                 "session_id": "ses_review",
                 "prompt": "Review",
                 "lifecycle_state": "failed_retry",
-                "retry_count": "1",
-                "retry_limit": "2",
+                "retry_count": 1,
+                "retry_limit": 2,
                 "retryable_failures": ["provider"],
                 "failure_category": "provider",
                 "timeout_seconds": 45,
@@ -331,8 +331,8 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(transition.payload.retry_count, 2)
         self.assertEqual(transition.payload.timeout_started_at, "2026-07-04T00:00:00Z")
 
-    def test_normalize_worker_applies_defaults_and_derives_next_action(self):
-        worker = normalize_worker(
+    def test_hydration_boundary_normalizes_malformed_legacy_worker_record(self):
+        worker = hydrate_worker_record(
             {
                 "id": "",
                 "lifecycle_state": "failed_retry",
@@ -357,11 +357,34 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker_output_field(worker, "status"), "failed")
         self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
 
+    def test_core_worker_record_rejects_invalid_canonical_values(self):
+        cases = (
+            ({"id": ""}, "worker id"),
+            ({"lifecycle_state": "missing"}, "lifecycle_state"),
+            ({"retry_count": "1"}, "retry_count"),
+            ({"retry_limit": None}, "retry_limit"),
+            ({"dependencies": "build"}, "dependencies"),
+            ({"attempts": "attempt-1"}, "attempts"),
+            ({"timeout_policy": "waiting"}, "timeout_policy"),
+            ({"status": "done"}, "output-only"),
+            ({"next_eligible_action": "collect"}, "output-only"),
+            ({"unknown_plugin_state": {"attempt": 2}}, "unknown worker field"),
+        )
+
+        for fields, message in cases:
+            with self.subTest(fields=fields):
+                with self.assertRaisesRegex((TypeError, ValueError), message):
+                    normalize_worker(fields, "review")
+
+        record = WorkerRecord.default_fields("review")
+        with self.assertRaisesRegex(ValueError, "unknown worker field"):
+            record.set_field("unknown_plugin_state", {"attempt": 2})
+
     def test_worker_execution_eligibility_derives_canonical_action(self):
         queued = normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "queued"}, "build")
         waiting = normalize_worker({"id": "review", "prompt": "Review", "lifecycle_state": "active_wait"}, "review")
         retrying = normalize_worker({"id": "test", "prompt": "Test", "lifecycle_state": "active_retry"}, "test")
-        stale_action = normalize_worker(
+        stale_action = hydrate_worker_record(
             {
                 "id": "docs",
                 "prompt": "Docs",
@@ -470,8 +493,8 @@ class WorkerStateContractTest(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "WorkerRecord"):
                 helper()
 
-    def test_deserialize_worker_derives_public_state_from_lifecycle(self):
-        worker = deserialize_worker_record(
+    def test_hydration_boundary_strips_stale_public_state_from_canonical_lifecycle(self):
+        worker = hydrate_worker_record(
             {
                 "lifecycle_state": "active_wait",
                 "status": "failed",
@@ -528,7 +551,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
     def test_worker_record_canonical_fields_are_explicit_dataclass_fields(self):
-        record = normalize_worker(
+        record = hydrate_worker_record(
             {
                 "id": "review",
                 "role": "reviewer",
@@ -585,7 +608,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertIsNone(record.field("next_eligible_action"))
 
     def test_worker_record_unknown_persisted_fields_round_trip_through_extras(self):
-        record = normalize_worker(
+        record = hydrate_worker_record(
             {
                 "id": "review",
                 "role": "reviewer",
@@ -595,7 +618,7 @@ class WorkerStateContractTest(unittest.TestCase):
         )
 
         snapshot = record.to_snapshot()
-        round_tripped = deserialize_worker_record(snapshot, "review")
+        round_tripped = hydrate_worker_record(snapshot, "review")
 
         self.assertEqual(record.extras, {"unknown_plugin_state": {"attempt": 2}})
         self.assertEqual(snapshot["unknown_plugin_state"], {"attempt": 2})
@@ -635,7 +658,7 @@ class WorkerStateContractTest(unittest.TestCase):
         assert_worker_outcome(self, worker, status="active", action="retry", lifecycle="active_retry")
 
     def test_serialize_worker_snapshot_keeps_public_state_out_of_persisted_json(self):
-        worker = deserialize_worker_record(
+        worker = hydrate_worker_record(
             {
                 "id": "review",
                 "session_id": "ses_review",
@@ -654,7 +677,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
-    def test_serialize_worker_snapshot_trusts_lifecycle_not_public_status(self):
+    def test_storage_snapshot_trusts_lifecycle_not_public_status(self):
         worker = {
             "id": "review",
             "lifecycle_state": "active_wait",
@@ -662,15 +685,26 @@ class WorkerStateContractTest(unittest.TestCase):
             "next_eligible_action": "collect",
         }
 
-        snapshot = serialize_worker_snapshot(worker, "review")
+        snapshot = normalize_worker_snapshot_for_storage(worker, "review")
 
-        self.assertEqual(worker_lifecycle_state(normalize_worker(worker, "review")), "active_wait")
         self.assertEqual(snapshot["lifecycle_state"], "active_wait")
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
-    def test_normalize_worker_snapshot_trusts_lifecycle_over_stale_public_status(self):
-        snapshot = normalize_worker_snapshot(
+    def test_core_snapshot_serialization_rejects_public_state_fields(self):
+        with self.assertRaisesRegex(ValueError, "output-only"):
+            normalize_worker_snapshot(
+                {
+                    "id": "review",
+                    "lifecycle_state": "active_wait",
+                    "status": "done",
+                    "next_eligible_action": "collect",
+                },
+                "review",
+            )
+
+    def test_storage_worker_snapshot_normalizes_stale_public_status(self):
+        snapshot = normalize_worker_snapshot_for_storage(
             {
                 "id": "review",
                 "lifecycle_state": "active_wait",

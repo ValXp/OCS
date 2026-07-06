@@ -2,6 +2,7 @@ import unittest
 
 from opencode_session.multi_worker_orchestration import plan_dependency_ordered_serial_step
 from opencode_session.run_persistence import persist_worker_transitions
+from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import (
     WorkerTransitionError,
@@ -207,7 +208,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
 
 def _hydrated_workers(workers):
-    return {worker_id: normalize_worker(worker, worker_id) for worker_id, worker in workers.items()}
+    return {worker_id: hydrate_worker_record(worker, worker_id) for worker_id, worker in workers.items()}
 
 
 if __name__ == "__main__":

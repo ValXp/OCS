@@ -9,17 +9,19 @@ from opencode_session.worker_state import (
     WORKER_ACTION_RETRY,
     WORKER_LIFECYCLE_QUEUED,
     WORKER_LIFECYCLE_STATES,
+    WORKER_LIST_FIELDS,
+    WORKER_OPTIONAL_LIST_FIELDS,
     WORKER_STATUS_ABORTED,
     WORKER_STATUS_ACTIVE,
     WORKER_STATUS_DONE,
     WORKER_STATUS_FAILED,
     WORKER_STATUS_QUEUED,
     WORKER_STATUS_TIMEOUT,
+    WORKER_TIMEOUT_POLICY_STATUSES,
     WorkerSnapshotTransitionPatch,
     WorkerRecord,
     WorkerTransition,
     is_blocked_status,
-    serialize_worker_snapshot,
     worker_lifecycle_state_for_public_state,
     worker_lifecycle_state_for_status_alias,
 )
@@ -148,21 +150,53 @@ def _lifecycle_state_from_legacy_public_worker_state(worker):
     return WORKER_LIFECYCLE_QUEUED
 
 
-def canonicalize_legacy_worker_record(worker):
+def canonicalize_legacy_worker_record(worker, worker_id=None):
     fields = _worker_fields(worker)
+    if worker_id:
+        fields["id"] = str(worker_id)
+    elif "id" in fields and not fields["id"]:
+        fields.pop("id", None)
+    elif "id" in fields and not isinstance(fields["id"], str):
+        fields["id"] = str(fields["id"])
     if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
         fields["lifecycle_state"] = _lifecycle_state_from_legacy_public_worker_state(fields)
     for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
         fields.pop(public_field_name, None)
+    for field_name in ("retry_count", "retry_limit"):
+        if field_name in fields:
+            fields[field_name] = _coerced_storage_int(fields[field_name])
+    for field_name in (*WORKER_LIST_FIELDS, *WORKER_OPTIONAL_LIST_FIELDS):
+        if field_name in fields and not isinstance(fields[field_name], list):
+            fields[field_name] = []
+    if "timeout_policy" in fields:
+        timeout_policy = short_status(fields["timeout_policy"])
+        fields["timeout_policy"] = (
+            timeout_policy if timeout_policy in WORKER_TIMEOUT_POLICY_STATUSES else WORKER_STATUS_TIMEOUT
+        )
     return fields
 
 
 def hydrate_worker_record(worker, worker_id):
-    return WorkerRecord.from_worker(canonicalize_legacy_worker_record(worker), worker_id).to_worker()
+    return WorkerRecord.from_worker(
+        canonicalize_legacy_worker_record(worker, worker_id),
+        worker_id,
+        allow_extra_fields=True,
+    ).to_worker()
 
 
 def normalize_worker_snapshot_for_storage(worker, worker_id):
-    return serialize_worker_snapshot(canonicalize_legacy_worker_record(worker), worker_id)
+    return WorkerRecord.from_worker(
+        canonicalize_legacy_worker_record(worker, worker_id),
+        worker_id,
+        allow_extra_fields=True,
+    ).to_snapshot()
+
+
+def _coerced_storage_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def worker_snapshot_transition_patch(worker, worker_id=None):

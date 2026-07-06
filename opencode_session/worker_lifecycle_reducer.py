@@ -37,7 +37,11 @@ class WorkerLifecycleReducer:
         _finalize_worker_attempt(worker, transition.attempt_finalization)
         return WorkerTransitionResult(
             applied=True,
-            worker=WorkerRecord.from_worker(worker, self.record.worker_id or transition.worker_id).to_worker(),
+            worker=WorkerRecord.from_worker(
+                worker,
+                self.record.worker_id or transition.worker_id,
+                allow_extra_fields=True,
+            ).to_worker(),
         )
 
     def _copy_latest(self):

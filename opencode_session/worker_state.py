@@ -658,6 +658,14 @@ WORKER_LIST_FIELDS = (
     "output_refs",
 )
 WORKER_OPTIONAL_LIST_FIELDS = ("attempts",)
+WORKER_TIMEOUT_POLICY_STATUSES = frozenset(
+    (
+        WORKER_STATUS_TIMEOUT,
+        WORKER_STATUS_BLOCKED,
+        WORKER_STATUS_FAILED,
+        WORKER_STATUS_ABORTED,
+    )
+)
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
 PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("status", "next_eligible_action"))
@@ -1548,12 +1556,12 @@ class WorkerRecord:
 
     __iter__ = None
 
-    def __init__(self, worker_id, fields=None):
+    def __init__(self, worker_id, fields=None, *, allow_extra_fields=False):
         self._reset_fields(worker_id)
         if fields is not None:
-            self.merge_fields(fields)
+            self.merge_fields(fields, allow_extra_fields=allow_extra_fields)
         if not self.id:
-            self.id = worker_id
+            self._set_canonical_field("id", worker_id)
 
     def __repr__(self):
         return f"{type(self).__name__}({self.worker_id!r}, {self.to_snapshot()!r})"
@@ -1585,24 +1593,28 @@ class WorkerRecord:
         value = self._raw_field(field_name)
         return value if isinstance(value, list) else []
 
-    def _coerced_int_field(self, value):
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-
     def _canonical_field_value(self, field_name, value):
         value = deepcopy(value)
         if field_name == "id":
-            return value or self.worker_id
+            if not isinstance(value, str) or not value:
+                raise ValueError("worker id must be a non-empty string")
+            return value
         if field_name == "lifecycle_state":
-            return value if value in WORKER_LIFECYCLE_STATES else WORKER_LIFECYCLE_QUEUED
+            if value not in WORKER_LIFECYCLE_STATES:
+                raise ValueError(f"worker lifecycle_state must be canonical: {value}")
+            return value
         if field_name in ("retry_count", "retry_limit"):
-            return self._coerced_int_field(value)
+            if type(value) is not int:
+                raise TypeError(f"worker {field_name} must be an int")
+            return value
         if field_name in WORKER_LIST_FIELDS or field_name in WORKER_OPTIONAL_LIST_FIELDS:
-            return value if isinstance(value, list) else []
+            if not isinstance(value, list):
+                raise TypeError(f"worker {field_name} must be a list")
+            return value
         if field_name == "timeout_policy":
-            return value or WORKER_STATUS_TIMEOUT
+            if value not in WORKER_TIMEOUT_POLICY_STATUSES:
+                raise ValueError(f"worker timeout_policy must be canonical: {value}")
+            return value
         return value
 
     def _set_canonical_field(self, field_name, value):
@@ -1610,12 +1622,14 @@ class WorkerRecord:
         if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             self._present_optional_fields.add(field_name)
 
-    def _set_field_value(self, field_name, value):
+    def _set_field_value(self, field_name, value, *, allow_extra_fields=False):
         if field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
-            return
+            raise ValueError(f"worker public field '{field_name}' is output-only; use lifecycle_state")
         if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES:
             self._set_canonical_field(field_name, value)
             return
+        if not allow_extra_fields:
+            raise ValueError(f"unknown worker field: {field_name}")
         self.extras[field_name] = deepcopy(value)
 
     def field(self, field_name: str, default: object = None) -> object:
@@ -1643,26 +1657,28 @@ class WorkerRecord:
             self.extras.pop(field_name, None)
         return self
 
-    def merge_fields(self, fields=None, **kwargs):
+    def merge_fields(self, fields=None, *, allow_extra_fields=False, **kwargs):
         if fields is not None:
             for field_name, value in _worker_fields(fields).items():
-                self._set_field_value(field_name, value)
+                self._set_field_value(field_name, value, allow_extra_fields=allow_extra_fields)
         if kwargs:
             for field_name, value in kwargs.items():
-                self._set_field_value(field_name, value)
+                self._set_field_value(field_name, value, allow_extra_fields=allow_extra_fields)
         return self
 
     def replace_fields(self, fields):
         worker_id = self.worker_id
+        allow_extra_fields = isinstance(fields, WorkerRecord)
         self._reset_fields(worker_id)
-        self.merge_fields(fields)
+        self.merge_fields(fields, allow_extra_fields=allow_extra_fields)
         return self
 
     @classmethod
-    def from_worker(cls, worker, worker_id=None):
+    def from_worker(cls, worker, worker_id=None, *, allow_extra_fields=False):
+        source_is_record = isinstance(worker, WorkerRecord)
         fields = _worker_fields(worker)
         resolved_worker_id = fields.get("id") or worker_id
-        return cls(resolved_worker_id, fields)
+        return cls(resolved_worker_id, fields, allow_extra_fields=allow_extra_fields or source_is_record)
 
     @classmethod
     def default_snapshot_fields(cls, worker_id):
@@ -1737,34 +1753,21 @@ class WorkerRecord:
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
         for field_name in WORKER_REQUIRED_FIELD_NAMES:
-            normalized[field_name] = deepcopy(getattr(self, field_name))
+            normalized[field_name] = self._canonical_field_value(field_name, getattr(self, field_name))
         for field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             if field_name in self._present_optional_fields:
-                normalized[field_name] = deepcopy(getattr(self, field_name))
+                normalized[field_name] = self._canonical_field_value(field_name, getattr(self, field_name))
+        for field_name in self.extras:
+            if field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
+                raise ValueError(f"worker public field '{field_name}' is output-only; use lifecycle_state")
+            if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES:
+                raise ValueError(f"worker extra field conflicts with canonical field: {field_name}")
         normalized.update(deepcopy(self.extras))
-        for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
-            normalized.pop(public_field_name, None)
-        normalized["id"] = normalized.get("id") or self.worker_id
-        for key in WORKER_LIST_FIELDS:
-            value = normalized.get(key)
-            normalized[key] = value if isinstance(value, list) else []
-        for key in WORKER_OPTIONAL_LIST_FIELDS:
-            if key in normalized:
-                value = normalized.get(key)
-                normalized[key] = value if isinstance(value, list) else []
-        if normalized.get("retry_count") is None:
-            normalized["retry_count"] = 0
-        if normalized.get("retry_limit") is None:
-            normalized["retry_limit"] = 0
-        if not normalized.get("timeout_policy"):
-            normalized["timeout_policy"] = WORKER_STATUS_TIMEOUT
-        if normalized.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
-            normalized["lifecycle_state"] = WORKER_LIFECYCLE_QUEUED
         return normalized
 
     def to_worker(self):
         normalized = self.to_snapshot()
-        return type(self).from_worker(require_internal_worker(normalized), self.worker_id)
+        return type(self).from_worker(require_internal_worker(normalized), self.worker_id, allow_extra_fields=True)
 
     def set_session(self, session_id, *, agent=None, model=None):
         self._set_canonical_field("session_id", session_id)

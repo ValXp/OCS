@@ -70,23 +70,20 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         self.assertEqual(output["status"], "active")
         self.assertEqual(output["next_eligible_action"], "retry")
 
-    def test_worker_state_core_does_not_infer_legacy_public_status(self):
-        from opencode_session.worker_state import normalize_worker, worker_lifecycle_state
+    def test_worker_state_core_rejects_legacy_public_status(self):
+        from opencode_session.worker_state import normalize_worker
 
-        worker = normalize_worker(
-            {
-                "id": "review",
-                "role": "review",
-                "prompt": "Review the change",
-                "status": "done",
-                "next_eligible_action": "collect",
-            },
-            "review",
-        )
-
-        self.assertEqual(worker_lifecycle_state(worker), "queued")
-        self.assertIsNone(worker.field("status"))
-        self.assertIsNone(worker.field("next_eligible_action"))
+        with self.assertRaisesRegex(ValueError, "output-only"):
+            normalize_worker(
+                {
+                    "id": "review",
+                    "role": "review",
+                    "prompt": "Review the change",
+                    "status": "done",
+                    "next_eligible_action": "collect",
+                },
+                "review",
+            )
 
     def test_storage_normalization_serializes_plain_json_worker_snapshots(self):
         hydrated = normalize_run(

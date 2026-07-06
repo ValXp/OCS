@@ -74,8 +74,8 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         run = {
             "status": "done",
             "workers": {
-                "alpha": normalize_worker({"id": "alpha", "lifecycle_state": "done_collect", "status": "done"}, "alpha"),
-                "beta": normalize_worker({"id": "beta", "lifecycle_state": "done_collect", "status": "done"}, "beta"),
+                "alpha": normalize_worker({"id": "alpha", "lifecycle_state": "done_collect"}, "alpha"),
+                "beta": normalize_worker({"id": "beta", "lifecycle_state": "done_collect"}, "beta"),
             },
         }
         persisted_worker_ids = []
