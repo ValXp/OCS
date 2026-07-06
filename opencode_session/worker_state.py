@@ -658,25 +658,6 @@ WORKER_LIST_FIELDS = (
     "output_refs",
 )
 WORKER_OPTIONAL_LIST_FIELDS = ("attempts",)
-WORKER_SNAPSHOT_STATE_FIELDS = (
-    "lifecycle_state",
-    "retry_count",
-    "timeout_started_at",
-    "timed_out_at",
-    "failure_category",
-    "failure_reason",
-    "last_failure_category",
-    "last_failure_reason",
-    "blockers",
-    "output_refs",
-    "error",
-    "failure_retryable",
-    "manual_retry_required",
-    "result",
-    "attempts",
-    "cleanup",
-    "abort",
-)
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
 PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("status", "next_eligible_action"))
@@ -693,6 +674,51 @@ WORKER_RECORD_OPTIONAL_FIELD_NAMES = (
     "result",
 )
 WORKER_RECORD_CANONICAL_FIELD_NAMES = frozenset((*WORKER_REQUIRED_FIELD_NAMES, *WORKER_RECORD_OPTIONAL_FIELD_NAMES))
+
+
+@dataclass(frozen=True)
+class WorkerSnapshotTransitionPatch:
+    """Storage-boundary patch for replaying a normalized worker snapshot."""
+
+    worker_id: str
+    fields: dict
+    target_lifecycle_state: Optional[str] = None
+    prompt_ids: Optional[tuple] = None
+    set_if_missing_fields: dict = dataclass_field(default_factory=dict)
+    remove_fields: tuple = ()
+    stale_recovery_allowed: bool = False
+    accepted_abort_fields: dict = dataclass_field(default_factory=dict)
+    accepted_abort_prompt_ids: Optional[tuple] = None
+
+    def __post_init__(self):
+        fields = deepcopy(dict(self.fields or {}))
+        worker_id = fields.get("id") or self.worker_id
+        if not worker_id:
+            raise ValueError("snapshot patch requires worker_id")
+        fields["id"] = worker_id
+        target_lifecycle_state = self.target_lifecycle_state
+        patch_lifecycle_state = fields.get("lifecycle_state")
+        if target_lifecycle_state is None and patch_lifecycle_state in WORKER_LIFECYCLE_STATES:
+            target_lifecycle_state = patch_lifecycle_state
+        if target_lifecycle_state is not None and target_lifecycle_state not in WORKER_LIFECYCLE_STATES:
+            raise ValueError(
+                f"snapshot patch target lifecycle_state must be normalized: {target_lifecycle_state}"
+            )
+        if patch_lifecycle_state is not None and patch_lifecycle_state not in WORKER_LIFECYCLE_STATES:
+            raise ValueError(f"snapshot patch lifecycle_state must be normalized: {patch_lifecycle_state}")
+        object.__setattr__(self, "worker_id", worker_id)
+        object.__setattr__(self, "fields", fields)
+        object.__setattr__(self, "target_lifecycle_state", target_lifecycle_state)
+        object.__setattr__(self, "prompt_ids", _transition_prompt_ids_or_none(self.prompt_ids))
+        object.__setattr__(self, "set_if_missing_fields", deepcopy(dict(self.set_if_missing_fields or {})))
+        object.__setattr__(self, "remove_fields", tuple(self.remove_fields or ()))
+        object.__setattr__(self, "stale_recovery_allowed", bool(self.stale_recovery_allowed))
+        object.__setattr__(self, "accepted_abort_fields", deepcopy(dict(self.accepted_abort_fields or {})))
+        object.__setattr__(
+            self,
+            "accepted_abort_prompt_ids",
+            _transition_prompt_ids_or_none(self.accepted_abort_prompt_ids),
+        )
 
 
 def status_priority(status):
@@ -820,12 +846,7 @@ def _dynamic_transition_target_lifecycle_state(name, payload):
 
 def _snapshot_transition_lifecycle_state(transition):
     payload = _require_transition_payload(transition, _SnapshotAppliedTransition)
-    if "lifecycle_state" not in payload.state_fields or "lifecycle_state" not in payload.worker:
-        return None
-    lifecycle_state = payload.worker.get("lifecycle_state")
-    if lifecycle_state in WORKER_LIFECYCLE_STATES:
-        return lifecycle_state
-    return WORKER_LIFECYCLE_QUEUED
+    return payload.patch.target_lifecycle_state
 
 
 @dataclass(frozen=True)
@@ -899,10 +920,7 @@ class _CleanupUpdatedTransition:
 
 @dataclass(frozen=True)
 class _SnapshotAppliedTransition:
-    worker: dict
-    state_fields: tuple = WORKER_SNAPSHOT_STATE_FIELDS
-    set_if_missing_fields: tuple = ("session_id",)
-    removable_fields: tuple = REMOVABLE_WORKER_TRANSITION_FIELDS
+    patch: WorkerSnapshotTransitionPatch
 
 
 @dataclass(frozen=True)
@@ -1022,21 +1040,16 @@ def _cleanup_updated_transition_payload(worker):
     return _CleanupUpdatedTransition(deepcopy(worker.cleanup))
 
 
-def _snapshot_applied_transition_payload(worker):
-    return _SnapshotAppliedTransition(
-        deepcopy(_worker_fields(worker)),
-        state_fields=tuple(WORKER_SNAPSHOT_STATE_FIELDS),
-        set_if_missing_fields=("session_id",),
-        removable_fields=tuple(REMOVABLE_WORKER_TRANSITION_FIELDS),
-    )
+def _snapshot_applied_transition_payload(patch):
+    if not isinstance(patch, WorkerSnapshotTransitionPatch):
+        raise TypeError("snapshot transitions require WorkerSnapshotTransitionPatch from the storage boundary")
+    return _SnapshotAppliedTransition(patch)
 
 
-def _snapshot_worker_id(worker):
-    if isinstance(worker, WorkerRecord):
-        return worker.worker_id
-    if isinstance(worker, Mapping):
-        return worker.get("id")
-    raise TypeError("snapshot worker must be WorkerRecord or persisted worker mapping")
+def _snapshot_worker_id(patch):
+    if isinstance(patch, WorkerSnapshotTransitionPatch):
+        return patch.worker_id
+    raise TypeError("snapshot transitions require WorkerSnapshotTransitionPatch from the storage boundary")
 
 
 def _require_transition_payload(transition, payload_type):
@@ -1200,28 +1213,24 @@ def _apply_cleanup_updated_transition(reducer, transition, payload, target_state
 
 
 def _apply_snapshot_applied_transition(reducer, transition, payload, target_state):
-    if reducer._has_accepted_abort() and not _accepted_abort(_snapshot_transition_fields(transition)):
+    patch = payload.patch
+    if reducer._has_accepted_abort() and not _accepted_abort(patch.fields):
         worker = reducer._copy_latest()
-        if "cleanup" in payload.state_fields and "cleanup" in payload.worker:
-            worker["cleanup"] = deepcopy(payload.worker.get("cleanup"))
-        prompt_ids = payload.worker.get("prompt_ids")
-        if isinstance(prompt_ids, list):
-            reducer._merge_prompt_ids(worker, tuple(prompt_ids), merge_empty=True)
+        for field_name, value in patch.accepted_abort_fields.items():
+            worker[field_name] = deepcopy(value)
+        if patch.accepted_abort_prompt_ids is not None:
+            reducer._merge_prompt_ids(worker, patch.accepted_abort_prompt_ids, merge_empty=True)
         return worker
     worker = reducer._copy_latest()
     worker["id"] = transition.worker_id
-    for field_name in payload.state_fields:
-        if field_name in payload.worker:
-            worker[field_name] = deepcopy(payload.worker[field_name])
-    for field_name in payload.removable_fields:
-        if field_name not in payload.worker:
-            worker.pop(field_name, None)
-    prompt_ids = payload.worker.get("prompt_ids")
-    if isinstance(prompt_ids, list):
-        reducer._merge_prompt_ids(worker, tuple(prompt_ids), merge_empty=True)
-    for field_name in payload.set_if_missing_fields:
-        if payload.worker.get(field_name) and not worker.get(field_name):
-            worker[field_name] = deepcopy(payload.worker[field_name])
+    worker.update(deepcopy(patch.fields))
+    for field_name in patch.remove_fields:
+        worker.pop(field_name, None)
+    if patch.prompt_ids is not None:
+        reducer._merge_prompt_ids(worker, patch.prompt_ids, merge_empty=True)
+    for field_name, value in patch.set_if_missing_fields.items():
+        if value and not worker.get(field_name):
+            worker[field_name] = deepcopy(value)
     return worker
 
 
@@ -1971,9 +1980,9 @@ class WorkerTransition:
         return cls.create(WorkerTransitionName.CLEANUP_UPDATED, worker_id, worker)
 
     @classmethod
-    def snapshot_applied(cls, worker):
-        worker_id = _snapshot_worker_id(worker)
-        return cls.create(WorkerTransitionName.SNAPSHOT_APPLIED, worker_id, worker)
+    def snapshot_applied(cls, patch):
+        worker_id = _snapshot_worker_id(patch)
+        return cls.create(WorkerTransitionName.SNAPSHOT_APPLIED, worker_id, patch)
 
 
 def _copy_present(value):
@@ -1990,6 +1999,14 @@ def _filtered_prompt_ids(prompt_ids):
     return tuple(prompt_id for prompt_id in prompt_ids if prompt_id is not None)
 
 
+def _transition_prompt_ids_or_none(prompt_ids):
+    if prompt_ids is None:
+        return None
+    if not isinstance(prompt_ids, (list, tuple)):
+        return None
+    return _filtered_prompt_ids(prompt_ids)
+
+
 def _clear_current_status_fields(worker):
     worker["blockers"] = []
     worker["failure_category"] = None
@@ -2001,15 +2018,6 @@ def _clear_current_status_fields(worker):
 def _set_if_not_unset(fields, name, value):
     if value is not UNSET_TRANSITION_FIELD:
         fields[name] = deepcopy(value)
-
-
-def _snapshot_transition_fields(transition):
-    payload = transition.payload
-    fields = {"id": transition.worker_id}
-    for field_name in payload.state_fields:
-        if field_name in payload.worker:
-            fields[field_name] = deepcopy(payload.worker[field_name])
-    return fields
 
 
 def _accepted_abort(worker):

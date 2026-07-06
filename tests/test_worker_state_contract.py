@@ -8,6 +8,8 @@ from opencode_session.worker_storage_adapter import (
     canonicalize_legacy_worker_record,
     hydrate_worker_record,
     normalize_worker_snapshot_for_storage,
+    worker_snapshot_transition,
+    worker_snapshot_transition_patch,
 )
 from opencode_session.worker_state import (
     _WORKER_LIFECYCLE_TABLE,
@@ -28,9 +30,13 @@ from opencode_session.worker_state import (
     WorkerLifecycleDimensions,
     WorkerLifecycleStatus,
     WorkerRecord,
+    WorkerSnapshotTransitionPatch,
+    WorkerTransition,
+    WorkerTransitionError,
     WorkerTransitionName,
     WorkerTransitionSpec,
     apply_worker_transition,
+    apply_worker_transition_to_worker,
     deserialize_worker_record,
     is_executable_worker,
     is_worker_record,
@@ -691,6 +697,70 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(snapshot["lifecycle_state"], "done_collect")
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_snapshot_transition_requires_storage_boundary_patch(self):
+        with self.assertRaisesRegex(TypeError, "storage boundary"):
+            WorkerTransition.snapshot_applied({"id": "review", "lifecycle_state": "done_collect"})
+
+    def test_stale_snapshot_recovery_requires_adapter_declared_patch(self):
+        worker = normalize_worker({"id": "review", "lifecycle_state": "done_collect"}, "review")
+        transition = WorkerTransition.snapshot_applied(
+            WorkerSnapshotTransitionPatch("review", {"id": "review", "lifecycle_state": "active_wait"})
+        )
+
+        with self.assertRaisesRegex(WorkerTransitionError, "illegal worker transition"):
+            apply_worker_transition_to_worker(worker, transition)
+
+        self.assertEqual(worker_lifecycle_state(worker), "done_collect")
+
+    def test_storage_snapshot_patch_owns_legacy_and_persistence_compatibility(self):
+        patch = worker_snapshot_transition_patch(
+            {
+                "id": "review",
+                "status": "active",
+                "next_eligible_action": "retry",
+                "prompt_ids": ["msg_retry"],
+                "cleanup": {"requested": True, "deleted": False},
+            }
+        )
+
+        self.assertEqual(patch.target_lifecycle_state, "active_retry")
+        self.assertEqual(patch.fields["lifecycle_state"], "active_retry")
+        self.assertNotIn("status", patch.fields)
+        self.assertNotIn("next_eligible_action", patch.fields)
+        self.assertEqual(patch.prompt_ids, ("msg_retry",))
+        self.assertIn("error", patch.remove_fields)
+        self.assertTrue(patch.stale_recovery_allowed)
+        self.assertEqual(patch.accepted_abort_fields, {"cleanup": {"requested": True, "deleted": False}})
+        self.assertEqual(patch.accepted_abort_prompt_ids, ("msg_retry",))
+
+    def test_accepted_abort_snapshot_passthrough_is_adapter_declared(self):
+        worker = normalize_worker(
+            {
+                "id": "review",
+                "lifecycle_state": "aborted",
+                "abort": {"accepted": True},
+                "prompt_ids": ["msg_abort"],
+            },
+            "review",
+        )
+        transition = worker_snapshot_transition(
+            {
+                "id": "review",
+                "lifecycle_state": "done_collect",
+                "prompt_ids": ["msg_done"],
+                "cleanup": {"requested": True, "deleted": False},
+                "result": {"status": "done", "message_ids": {"assistant": "msg_done"}},
+            }
+        )
+
+        apply_worker_transition_to_worker(worker, transition)
+
+        self.assertEqual(worker_output_field(worker, "status"), "aborted")
+        self.assertEqual(worker_field(worker, "abort"), {"accepted": True})
+        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": False})
+        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_abort", "msg_done"])
+        self.assertIsNone(worker_field(worker, "result"))
 
     def test_internal_worker_guard_reports_missing_required_fields(self):
         with self.assertRaisesRegex(ValueError, "session_id"):

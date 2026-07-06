@@ -2,6 +2,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 import unittest
 
+from opencode_session.worker_storage_adapter import worker_snapshot_transition
 from opencode_session.worker_state import (
     UNSET_TRANSITION_FIELD,
     WORKER_TRANSITION_DEFINITIONS,
@@ -17,7 +18,6 @@ from opencode_session.worker_state import (
     mark_worker_active,
     mark_worker_failed,
     normalize_worker,
-    normalize_worker_snapshot,
     schedule_worker_retry,
     worker_lifecycle_source_states,
     worker_lifecycle_state,
@@ -435,17 +435,14 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             (
                 WorkerTransitionName.SNAPSHOT_APPLIED,
                 {"lifecycle_state": "active_wait", "prompt_ids": ["msg_initial"]},
-                lambda worker: WorkerTransition.snapshot_applied(
-                    normalize_worker_snapshot(
-                        {
-                            "id": worker_field(worker, "id"),
-                            "lifecycle_state": "done_collect",
-                            "prompt_ids": ["msg_done"],
-                            "result": {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
-                            "output_refs": ["assistant:msg_assistant"],
-                        },
-                        worker_field(worker, "id"),
-                    )
+                lambda worker: worker_snapshot_transition(
+                    {
+                        "id": worker_field(worker, "id"),
+                        "lifecycle_state": "done_collect",
+                        "prompt_ids": ["msg_done"],
+                        "result": {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+                        "output_refs": ["assistant:msg_assistant"],
+                    }
                 ),
                 {"status": "done", "action": "collect", "lifecycle": "done_collect"},
                 {"prompt_ids": ["msg_initial", "msg_done"], "output_refs": ["assistant:msg_assistant"]},
@@ -596,21 +593,18 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
     def test_snapshot_replay_allows_legal_active_to_done_transition(self):
         worker = normalize_worker({"lifecycle_state": "active_wait", "prompt_ids": ["msg_initial"]}, "review")
-        snapshot = normalize_worker_snapshot(
-            {
-                "id": "review",
-                "lifecycle_state": "done_collect",
-                "prompt_ids": ["msg_done"],
-                "result": {
-                    "status": "done",
-                    "message_ids": {"assistant": "msg_assistant"},
-                },
-                "output_refs": ["assistant:msg_assistant"],
+        snapshot = {
+            "id": "review",
+            "lifecycle_state": "done_collect",
+            "prompt_ids": ["msg_done"],
+            "result": {
+                "status": "done",
+                "message_ids": {"assistant": "msg_assistant"},
             },
-            "review",
-        )
+            "output_refs": ["assistant:msg_assistant"],
+        }
 
-        apply_worker_transition_to_worker(worker, WorkerTransition.snapshot_applied(snapshot))
+        apply_worker_transition_to_worker(worker, worker_snapshot_transition(snapshot))
 
         assert_worker_outcome(self, worker, status="done", action="collect", lifecycle="done_collect")
         self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_initial", "msg_done"])
@@ -631,16 +625,13 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             },
             "review",
         )
-        stale_snapshot = normalize_worker_snapshot(
-            {
-                "id": "review",
-                "lifecycle_state": "active_wait",
-                "prompt_ids": ["msg_stale"],
-            },
-            "review",
-        )
+        stale_snapshot = {
+            "id": "review",
+            "lifecycle_state": "active_wait",
+            "prompt_ids": ["msg_stale"],
+        }
         worker = deepcopy(original)
-        transition = WorkerTransition.snapshot_applied(stale_snapshot)
+        transition = worker_snapshot_transition(stale_snapshot)
 
         result = apply_worker_transition_to_record(WorkerRecord.from_worker(worker, "review"), transition)
 

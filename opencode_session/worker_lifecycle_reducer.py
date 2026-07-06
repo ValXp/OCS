@@ -97,15 +97,15 @@ def _transition_target_lifecycle_state_for_reason(transition):
 
 def _snapshot_target_lifecycle_state(transition):
     payload = getattr(transition, "payload", None)
-    state_fields = getattr(payload, "state_fields", ())
-    worker = getattr(payload, "worker", {})
-    if "lifecycle_state" not in state_fields or not isinstance(worker, Mapping):
-        return None
-    return worker.get("lifecycle_state")
+    patch = getattr(payload, "patch", None)
+    return getattr(patch, "target_lifecycle_state", None)
 
 
 def _is_stale_snapshot_recovery(transition):
-    return transition.name is WorkerTransitionName.SNAPSHOT_APPLIED
+    if transition.name is not WorkerTransitionName.SNAPSHOT_APPLIED:
+        return False
+    patch = getattr(getattr(transition, "payload", None), "patch", None)
+    return bool(getattr(patch, "stale_recovery_allowed", False))
 
 
 def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
