@@ -31,6 +31,65 @@ class WorkerExecutionOutcome:
     failure_category: Optional[str] = None
     run: Optional[RunRecord] = None
 
+
+class WorkerExecutionPersistenceBoundary:
+    """Owns persisted run/worker refreshes and remote session outbox updates during execution."""
+
+    def __init__(
+        self,
+        *,
+        run,
+        worker,
+        apply_transition,
+        session_journal=None,
+        session_provisioner=None,
+    ):
+        self.run = run
+        self.worker = worker
+        self._apply_transition = apply_transition
+        self._session_provisioner = session_provisioner or WorkerSessionProvisioner(session_journal=session_journal)
+
+    def provision_session(
+        self,
+        client,
+        *,
+        session_id=None,
+        agent=None,
+        model=None,
+        create_session=True,
+        cleanup_requested=False,
+    ):
+        provisioning = self._session_provisioner.provision(
+            client,
+            self.run,
+            self.worker,
+            session_id=session_id,
+            agent=agent,
+            model=model,
+            create_session=create_session,
+            cleanup_requested=cleanup_requested,
+        )
+        self._replace_state(provisioning.run, provisioning.worker)
+        self.apply_worker_transition(WorkerTransition.provisioned(self.worker))
+        self._finalize_provisioning_best_effort(provisioning)
+        return provisioning.outcome
+
+    def apply_worker_transition(self, transition):
+        if transition is None:
+            return self.worker
+        applied_run, applied_worker = self._apply_transition(self.run, self.worker, transition)
+        self._replace_state(applied_run, applied_worker or self.worker)
+        return self.worker
+
+    def _finalize_provisioning_best_effort(self, provisioning):
+        run, worker = self._session_provisioner.finalize_best_effort(self.run, self.worker, provisioning)
+        self._replace_state(run, worker)
+
+    def _replace_state(self, run, worker):
+        self.run = run
+        self.worker = worker
+
+
 class WorkerExecutionExecutor:
     def __init__(
         self,
@@ -40,11 +99,14 @@ class WorkerExecutionExecutor:
         now,
         session_journal=None,
         session_provisioner=None,
+        persistence_boundary_factory=WorkerExecutionPersistenceBoundary,
     ):
         self.apply_transition = apply_transition
         self.executor = coerce_worker_prompt_executor(executor)
         self.now = now
-        self.session_provisioner = session_provisioner or WorkerSessionProvisioner(session_journal=session_journal)
+        self.session_journal = session_journal
+        self.session_provisioner = session_provisioner
+        self.persistence_boundary_factory = persistence_boundary_factory
 
     def execute(
         self,
@@ -63,48 +125,46 @@ class WorkerExecutionExecutor:
     ):
         created_session_ids = []
         created_session_ids_for_next_attempt = []
-        provisioning = self.session_provisioner.provision(
+        persistence = self.persistence_boundary_factory(
+            run=run,
+            worker=worker,
+            apply_transition=self.apply_transition,
+            session_journal=self.session_journal,
+            session_provisioner=self.session_provisioner,
+        )
+        session_outcome = persistence.provision_session(
             client,
-            run,
-            worker,
             session_id=session_id,
             agent=agent,
             model=model,
             create_session=create_session,
             cleanup_requested=cleanup_requested,
         )
-        run = provisioning.run
-        worker = provisioning.worker
-        session_outcome = provisioning.outcome
         if session_outcome.created_session_id is not None:
             created_session_ids.append(session_outcome.created_session_id)
             created_session_ids_for_next_attempt.append(session_outcome.created_session_id)
-        run, worker = self._apply_transition(run, worker, WorkerTransition.provisioned(worker))
-        run, worker = self.session_provisioner.finalize_best_effort(run, worker, provisioning)
 
         while True:
-            active_transition = mark_worker_active(worker, now=self.now)
-            run, worker = self._apply_transition(run, worker, active_transition)
+            active_transition = mark_worker_active(persistence.worker, now=self.now)
+            persistence.apply_worker_transition(active_transition)
             attempt_record = new_worker_attempt_record(
-                worker,
+                persistence.worker,
                 started_at=self.now(),
                 created_session_ids=created_session_ids_for_next_attempt,
             )
             created_session_ids_for_next_attempt = []
-            run, worker = self._apply_transition(
-                run,
-                worker,
-                WorkerTransition.attempt_started(worker_field(worker, "id"), attempt_record),
+            persistence.apply_worker_transition(
+                WorkerTransition.attempt_started(worker_field(persistence.worker, "id"), attempt_record),
             )
             attempt = execute_single_worker_attempt(
                 client,
-                worker,
+                persistence.worker,
                 prompt,
                 capabilities,
                 executor=self.executor,
             )
             transition = apply_worker_attempt_transition(
-                worker,
+                persistence.worker,
                 attempt,
                 now=self.now,
             )
@@ -118,7 +178,7 @@ class WorkerExecutionExecutor:
                 attempt,
                 finished_at=self.now(),
             )
-            run, worker = self._apply_transition(run, worker, transition.worker_transition)
+            persistence.apply_worker_transition(transition.worker_transition)
             if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
                 continue
             return WorkerExecutionOutcome(
@@ -126,14 +186,8 @@ class WorkerExecutionExecutor:
                 created_session_ids,
                 transition.error,
                 transition.failure_category,
-                run,
+                persistence.run,
             )
-
-    def _apply_transition(self, run, worker, transition):
-        if transition is None:
-            return run, worker
-        applied_run, applied_worker = self.apply_transition(run, worker, transition)
-        return applied_run, applied_worker or worker
 
 
 def execute_worker_attempts(

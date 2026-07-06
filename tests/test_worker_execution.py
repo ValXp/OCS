@@ -12,6 +12,8 @@ from opencode_session.worker_cleanup_recovery import (
     recoverable_created_worker_sessions_by_worker,
 )
 from opencode_session.worker_execution import (
+    WorkerExecutionExecutor,
+    WorkerExecutionPersistenceBoundary,
     WorkerExecutionTimeout,
     execute_worker_attempts,
 )
@@ -326,6 +328,104 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIs(finalized_run, run)
         self.assertIs(finalized_worker, provisioning.worker)
         self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
+
+    def test_worker_execution_routes_transitions_and_session_outbox_through_single_boundary(self):
+        run = {
+            "name": "demo",
+            "directory": "/workspace",
+            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+        }
+        worker = run["workers"]["worker"]
+        client = FakeClient(["ses_new"])
+        journal_snapshots = []
+        persisted_transition_names = []
+        boundary_instances = []
+
+        def persist_run_mutation(run, mutator):
+            mutator(run)
+            journal_snapshots.append(deepcopy(run.get(WORKER_SESSION_JOURNAL_FIELD)))
+            return run
+
+        def persist_worker_transition(run, worker, transition):
+            persisted_transition_names.append(transition.name.value)
+            updated = apply_worker_transition(run.setdefault("workers", {}), transition)
+            return run, updated
+
+        class RecordingBoundary(WorkerExecutionPersistenceBoundary):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.calls = []
+                boundary_instances.append(self)
+
+            def provision_session(self, *args, **kwargs):
+                self.calls.append("provision_session")
+                return super().provision_session(*args, **kwargs)
+
+            def apply_worker_transition(self, transition):
+                self.calls.append(("transition", transition.name.value if transition is not None else None))
+                return super().apply_worker_transition(transition)
+
+        def execute_prompt(client, session_id, prompt, capabilities):
+            client.requests.append(("execute", session_id, prompt))
+            return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
+
+        journal = WorkerSessionCreationJournal(
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+            id_factory=lambda: "worker-session-intent-1",
+        )
+        executor = WorkerExecutionExecutor(
+            apply_transition=persist_worker_transition,
+            executor=execute_prompt,
+            now=lambda: "2026-07-03T00:00:00Z",
+            session_journal=journal,
+            persistence_boundary_factory=RecordingBoundary,
+        )
+
+        outcome = executor.execute(
+            client,
+            run,
+            worker,
+            "Finish the worker task",
+            CAPABILITIES,
+            agent="build",
+            model="openai/gpt-5.5",
+            cleanup_requested=True,
+        )
+
+        self.assertEqual(outcome.kind, "completed")
+        self.assertEqual(len(boundary_instances), 1)
+        self.assertEqual(
+            boundary_instances[0].calls,
+            [
+                "provision_session",
+                ("transition", "provisioned"),
+                ("transition", "active"),
+                ("transition", "attempt_started"),
+                ("transition", "result_applied"),
+            ],
+        )
+        self.assertEqual(
+            persisted_transition_names,
+            ["provisioned", "active", "attempt_started", "result_applied"],
+        )
+        self.assertEqual(len(journal_snapshots), 3)
+        self.assertEqual(journal_snapshots[0][0]["status"], "intent")
+        self.assertEqual(journal_snapshots[1][0]["status"], "created")
+        self.assertIsNone(journal_snapshots[2])
+        self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
+        self.assertEqual(
+            client.requests,
+            [
+                ("create", "/workspace", "build", "openai/gpt-5.5"),
+                ("execute", "ses_new", "Finish the worker task"),
+            ],
+        )
+        self.assertEqual(worker_field(run["workers"]["worker"], "session_id"), "ses_new")
+        self.assertEqual(
+            worker_field(run["workers"]["worker"], "cleanup"),
+            {"requested": True, "deleted": False, "sessions": ["ses_new"]},
+        )
 
     def test_recoverable_created_worker_sessions_merges_cleanup_and_journal_transactions(self):
         run = {
