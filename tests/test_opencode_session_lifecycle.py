@@ -13,6 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = REPO_ROOT / "bin" / "ocs"
 
 
+def route_probe_then(*requests):
+    return [("GET", "/doc", None), *requests]
+
+
 class LifecycleOpenCodeServer:
     def __init__(self, *, children=None):
         self.children = children or []
@@ -92,7 +96,7 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         self.assertEqual(result.stdout, "abort session=ses_active accepted=true status=active\n")
-        self.assertEqual(server.requests, [("POST", "/session/ses_active/abort", {})])
+        self.assertEqual(server.requests, route_probe_then(("POST", "/session/ses_active/abort", {})))
 
     def test_fork_posts_legacy_route_with_message_id_and_prints_child_session(self):
         with LifecycleOpenCodeServer() as server:
@@ -101,7 +105,10 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         self.assertEqual(result.stdout, "forked parent=ses_parent child=ses_child message=msg_branch\n")
-        self.assertEqual(server.requests, [("POST", "/session/ses_parent/fork", {"messageID": "msg_branch"})])
+        self.assertEqual(
+            server.requests,
+            route_probe_then(("POST", "/session/ses_parent/fork", {"messageID": "msg_branch"})),
+        )
 
     def test_children_filters_by_directory_and_prints_compact_sessions(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other_directory:
@@ -135,7 +142,7 @@ class LifecycleCliTest(unittest.TestCase):
             f'id=ses_child_1 title="Child one" dir={directory} agent=build model=openai/gpt-5.5 '
             "cost=0.2 tokens=15 created=2026-07-02T00:00:00Z updated=2026-07-02T00:00:03Z\n",
         )
-        self.assertEqual(server.requests, [("GET", "/session/ses_parent/children", None)])
+        self.assertEqual(server.requests, route_probe_then(("GET", "/session/ses_parent/children", None)))
 
     def test_children_json_outputs_complete_child_session_data(self):
         children = [
@@ -180,7 +187,7 @@ class LifecycleCliTest(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(server.requests, [("GET", "/session/ses_parent/children", None)])
+        self.assertEqual(server.requests, route_probe_then(("GET", "/session/ses_parent/children", None)))
 
     def test_children_normalizes_session_aliases_for_compact_and_json_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -221,7 +228,11 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertEqual(payload[0]["sessionID"], "ses_child_1")
         self.assertEqual(
             server.requests,
-            [("GET", "/session/ses_parent/children", None), ("GET", "/session/ses_parent/children", None)],
+            route_probe_then(
+                ("GET", "/session/ses_parent/children", None),
+                ("GET", "/doc", None),
+                ("GET", "/session/ses_parent/children", None),
+            ),
         )
 
     def test_lifecycle_commands_report_missing_sessions_consistently(self):
@@ -243,7 +254,7 @@ class LifecycleCliTest(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertIn("session not found", result.stderr)
                 self.assertIn("ses_missing", result.stderr)
-                self.assertEqual(server.requests, [request])
+                self.assertEqual(server.requests, route_probe_then(request))
 
 
 if __name__ == "__main__":

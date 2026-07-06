@@ -119,6 +119,7 @@ class SessionCommandService:
         raise SessionCommandError(f"delete verification failed; session {session_id} is still readable")
 
     def abort(self, session_id):
+        self._ensure_routes()
         try:
             response = self.client.abort_session_response(session_id)
         except OpenCodeApiError as error:
@@ -128,6 +129,7 @@ class SessionCommandService:
         return SessionAbortResult(abort=abort_record(session_id, response.data), raw_body=response.body)
 
     def fork(self, session_id, *, message_id=None):
+        self._ensure_routes()
         try:
             response = self.client.fork_session_response(session_id, message_id=message_id)
         except OpenCodeApiError as error:
@@ -137,6 +139,7 @@ class SessionCommandService:
         return SessionForkResult(fork=fork_record(session_id, message_id, response.data), raw_body=response.body)
 
     def children(self, session_id, *, directory=None):
+        self._ensure_routes()
         try:
             response = self.client.list_child_sessions_response(session_id)
         except OpenCodeApiError as error:
