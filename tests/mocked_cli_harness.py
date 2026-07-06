@@ -15,16 +15,18 @@ DEFAULT_TIMEOUT_SECONDS = 20.0
 
 
 class FakeRequest:
-    def __init__(self, method, path, payload, headers):
+    def __init__(self, method, path, payload, headers, params=None):
         self.method = method
         self.path = path
         self.payload = payload
         self.headers = headers
+        self.params = params or {}
 
 
 class FakeOpenCodeServer:
     def __init__(self):
         self._routes = {}
+        self._route_templates = []
         self.requests = []
         self.unexpected_requests = []
         self.server = None
@@ -54,6 +56,9 @@ class FakeOpenCodeServer:
                 request = FakeRequest(self.command, self.path, payload, dict(self.headers.items()))
                 parent.requests.append((request.method, request.path, request.payload))
                 responder = parent._routes.get((request.method, request.path))
+                if responder is None:
+                    responder, params = parent._match_template_route(request.method, request.path)
+                    request.params = params
                 if responder is None:
                     parent.unexpected_requests.append((request.method, request.path, request.payload))
                     self._write_text(parent._format_unexpected_requests(), status=500)
@@ -148,11 +153,14 @@ class FakeOpenCodeServer:
             response_status = status(request) if callable(status) else status
             handler._write_json(response_payload, status=response_status)
 
-        self._routes[(method.upper(), path)] = responder
-        return self
+        return self.route(method, path, responder)
 
     def route(self, method, path, responder):
-        self._routes[(method.upper(), path)] = responder
+        method = method.upper()
+        if _is_route_template(path):
+            self._route_templates.append((method, path, _compile_route_template(path), responder))
+        else:
+            self._routes[(method, path)] = responder
         return self
 
     def sse(
@@ -177,16 +185,278 @@ class FakeOpenCodeServer:
                 event_start_delay_seconds=event_start_delay_seconds,
             )
 
-        self._routes[(method.upper(), path)] = responder
-        return self
+        return self.route(method, path, responder)
 
     def _format_unexpected_requests(self):
         lines = ["unexpected OpenCode request(s):"]
         lines.extend(f"- {method} {path} payload={payload!r}" for method, path, payload in self.unexpected_requests)
         lines.append("registered routes:")
         registered_routes = [f"- {method} {path}" for method, path in sorted(self._routes)]
+        registered_routes.extend(
+            f"- {method} {path}" for method, path, _matcher, _responder in self._route_templates
+        )
         lines.extend(registered_routes or ["- none"])
         return "\n".join(lines)
+
+    def _match_template_route(self, method, path):
+        for route_method, _route_path, matcher, responder in self._route_templates:
+            if route_method != method:
+                continue
+            params = matcher(path)
+            if params is not None:
+                return responder, params
+        return None, {}
+
+
+def request_paths(requests):
+    return [(method, path) for method, path, _payload in requests]
+
+
+def payload_directory(payload):
+    payload = payload or {}
+    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    return location.get("directory") or payload.get("directory")
+
+
+def prompt_message_id(payload):
+    return (payload or {}).get("messageID") or (payload or {}).get("id")
+
+
+def prompt_text(payload):
+    payload = payload or {}
+    prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
+    if prompt.get("text") is not None:
+        return prompt.get("text")
+    parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
+    return "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+
+
+def smoke_open_code_server(*, sessions=None, prompt_response=None, prompt_status=200):
+    return configure_smoke_open_code_server(
+        FakeOpenCodeServer(),
+        sessions=sessions,
+        prompt_response=prompt_response,
+        prompt_status=prompt_status,
+    )
+
+
+def configure_smoke_open_code_server(server, *, sessions=None, prompt_response=None, prompt_status=200):
+    server.sessions = list(sessions or [])
+    _register_core_routes(
+        server,
+        {
+            "/api/session": {"get": {}, "post": {}},
+            "/api/session/{sessionID}/prompt": {"post": {}},
+            "/api/event": {"get": {}},
+            "/session/{sessionID}/run": {"post": {}},
+            "/session/{sessionID}/reply": {"post": {}},
+        },
+    )
+    server.sse(
+        "/api/event",
+        [
+            {
+                "type": "session.prompt.admitted",
+                "properties": {
+                    "sessionID": "ses_smoke_1",
+                    "messageID": "msg_smoke_steer",
+                    "delivery": "steer",
+                    "state": "admitted",
+                },
+            },
+            {"type": "session.status", "properties": {"sessionID": "ses_smoke_1", "status": "completed"}},
+        ],
+    )
+    server.json("GET", "/api/session", lambda _request: {"sessions": server.sessions})
+    server.route("GET", "/api/session/{sessionID}", _session_getter(server))
+    server.route("DELETE", "/api/session/{sessionID}", _session_deleter(server))
+    server.json("GET", "/permission", [])
+    server.json("GET", "/question", [])
+    server.json("POST", "/api/session", lambda request: _create_smoke_session(server, request.payload))
+    server.json(
+        "POST",
+        "/api/session/ses_smoke_1/prompt",
+        lambda request: prompt_response
+        or {
+            "sessionID": "ses_smoke_1",
+            "messageID": prompt_message_id(request.payload),
+            "delivery": "steer",
+            "state": "admitted",
+            "admittedSequence": 1,
+        },
+        status=prompt_status,
+    )
+    server.json("POST", "/session/ses_smoke_1/run", {"id": "msg_user_smoke", "status": "submitted"})
+    server.json(
+        "POST",
+        "/session/ses_smoke_1/reply",
+        {"id": "msg_assistant_smoke", "status": "completed", "text": "ok"},
+    )
+    return server
+
+
+def live_validation_open_code_server(
+    *,
+    reply_payload=None,
+    message_payload=None,
+    wait_payload=None,
+    wait_available=True,
+    session_payloads=None,
+    events=None,
+):
+    return configure_live_validation_open_code_server(
+        FakeOpenCodeServer(),
+        reply_payload=reply_payload,
+        message_payload=message_payload,
+        wait_payload=wait_payload,
+        wait_available=wait_available,
+        session_payloads=session_payloads,
+        events=events,
+    )
+
+
+def configure_live_validation_open_code_server(
+    server,
+    *,
+    reply_payload=None,
+    message_payload=None,
+    wait_payload=None,
+    wait_available=True,
+    session_payloads=None,
+    events=None,
+):
+    server.sessions = []
+    session_payloads = session_payloads or {}
+    reply_payload = reply_payload or {
+        "id": "msg_assistant_live",
+        "status": "completed",
+        "cost": 0.001,
+        "tokens": {"input": 4, "output": 1, "total": 5},
+        "text": "PONG",
+    }
+    message_payload = message_payload or {
+        "info": {
+            "id": "msg_assistant_live",
+            "sessionID": "ses_live_2",
+            "role": "assistant",
+            "cost": 0.001,
+            "tokens": {"input": 4, "output": 1, "total": 5},
+        },
+        "parts": [{"type": "text", "text": "PONG"}],
+    }
+    paths = {
+        "/api/session": {"get": {}, "post": {}},
+        "/api/session/{sessionID}/prompt": {"post": {}},
+        "/session/{sessionID}/message": {"post": {}},
+        "/session/{sessionID}/run": {"post": {}},
+        "/session/{sessionID}/reply": {"post": {}},
+    }
+    if wait_available:
+        paths["/api/session/{sessionID}/wait"] = {"post": {}}
+    if events is not None:
+        paths["/api/event"] = {"get": {}}
+    _register_core_routes(server, paths)
+    if events is not None:
+        server.sse("/api/event", events)
+    server.json("GET", "/api/session", {"error": "not found"}, status=404)
+    server.route("GET", "/api/session/{sessionID}", _session_getter(server, session_payloads=session_payloads))
+    server.route("DELETE", "/api/session/{sessionID}", _session_deleter(server))
+    server.json("POST", "/api/session", lambda request: _create_live_validation_session(server, request.payload))
+    server.json(
+        "POST",
+        "/api/session/ses_live_1/prompt",
+        lambda request: {
+            "sessionID": "ses_live_1",
+            "messageID": prompt_message_id(request.payload),
+            "delivery": "steer",
+            "state": "admitted",
+            "admittedSequence": 1,
+        },
+    )
+    server.json("POST", "/api/session/ses_live_1/wait", wait_payload or {})
+    server.json("POST", "/session/ses_live_2/run", {"id": "msg_user_live", "status": "submitted"})
+    server.json("POST", "/session/ses_live_2/reply", reply_payload)
+    server.json("POST", "/session/ses_live_2/message", message_payload)
+    return server
+
+
+def _register_core_routes(server, paths):
+    server.json("GET", "/global/health", {"status": "ok", "version": "2.0.0"})
+    server.json("GET", "/doc", {"openapi": "3.1.0", "paths": paths})
+
+
+def _create_smoke_session(server, payload):
+    session = {
+        "id": "ses_smoke_1",
+        "title": payload["title"],
+        "directory": payload_directory(payload),
+        "metadata": payload["metadata"],
+    }
+    server.sessions.append(session)
+    return session
+
+
+def _create_live_validation_session(server, payload):
+    session_id = f"ses_live_{len(server.sessions) + 1}"
+    session = {
+        "id": session_id,
+        "title": payload["title"],
+        "directory": payload_directory(payload),
+        "metadata": payload["metadata"],
+    }
+    server.sessions.append(session)
+    return session
+
+
+def _session_getter(server, *, session_payloads=None):
+    session_payloads = session_payloads or {}
+
+    def responder(handler, request):
+        session_id = request.params["sessionID"]
+        for session in server.sessions:
+            if session["id"] == session_id:
+                payload = dict(session)
+                payload.update(session_payloads.get(session_id, {}))
+                handler._write_json(payload)
+                return
+        handler._write_json({"error": "not found"}, status=404)
+
+    return responder
+
+
+def _session_deleter(server):
+    def responder(handler, request):
+        session_id = request.params["sessionID"]
+        for index, session in enumerate(server.sessions):
+            if session["id"] == session_id:
+                del server.sessions[index]
+                handler._write_json({"id": session_id, "deleted": True})
+                return
+        handler._write_json({"error": "not found"}, status=404)
+
+    return responder
+
+
+def _is_route_template(path):
+    return "{" in path and "}" in path
+
+
+def _compile_route_template(path):
+    template_parts = path.strip("/").split("/")
+
+    def matcher(candidate):
+        candidate_parts = candidate.strip("/").split("/")
+        if len(candidate_parts) != len(template_parts):
+            return None
+        params = {}
+        for template_part, candidate_part in zip(template_parts, candidate_parts):
+            if template_part.startswith("{") and template_part.endswith("}"):
+                params[template_part[1:-1]] = candidate_part
+            elif template_part != candidate_part:
+                return None
+        return params
+
+    return matcher
 
 
 def run_ocs(*args, input_text=None, env=None, timeout_seconds=None):

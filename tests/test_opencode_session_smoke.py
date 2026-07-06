@@ -1,179 +1,31 @@
 import json
-import os
-import subprocess
-import sys
 import tempfile
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = REPO_ROOT / "bin" / "ocs"
-
-
-class SmokeOpenCodeServer:
-    def __init__(self, *, sessions=None, prompt_response=None, prompt_status=200):
-        self.prompt_response = prompt_response
-        self.prompt_status = prompt_status
-        self.sessions = list(sessions or [])
-        self.requests = []
-        self.server = None
-        self.thread = None
-
-    def __enter__(self):
-        parent = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, format, *args):
-                return
-
-            def do_GET(self):
-                parent.requests.append(("GET", self.path, None))
-                if self.path == "/global/health":
-                    self._write_json({"status": "ok", "version": "2.0.0"})
-                    return
-                if self.path == "/doc":
-                    self._write_json(
-                        {
-                            "openapi": "3.1.0",
-                            "paths": {
-                                "/api/session": {"get": {}, "post": {}},
-                                "/api/session/{sessionID}/prompt": {"post": {}},
-                                "/api/event": {"get": {}},
-                                "/session/{sessionID}/run": {"post": {}},
-                                "/session/{sessionID}/reply": {"post": {}},
-                            },
-                        }
-                    )
-                    return
-                if self.path == "/api/event":
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.end_headers()
-                    events = [
-                        {
-                            "type": "session.prompt.admitted",
-                            "properties": {
-                                "sessionID": "ses_smoke_1",
-                                "messageID": "msg_smoke_steer",
-                                "delivery": "steer",
-                                "state": "admitted",
-                            },
-                        },
-                        {"type": "session.status", "properties": {"sessionID": "ses_smoke_1", "status": "completed"}},
-                    ]
-                    for event in events:
-                        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
-                    self.wfile.flush()
-                    return
-                if self.path == "/api/session":
-                    self._write_json({"sessions": parent.sessions})
-                    return
-                if self.path.startswith("/api/session/"):
-                    session_id = self.path.rsplit("/", 1)[-1]
-                    for session in parent.sessions:
-                        if session["id"] == session_id:
-                            self._write_json(session)
-                            return
-                    self.send_error(404)
-                    return
-                if self.path == "/permission":
-                    self._write_json([])
-                    return
-                if self.path == "/question":
-                    self._write_json([])
-                    return
-                self.send_error(404)
-
-            def do_POST(self):
-                body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
-                payload = json.loads(body or "{}")
-                parent.requests.append(("POST", self.path, payload))
-                if self.path == "/api/session":
-                    session = {
-                        "id": "ses_smoke_1",
-                        "title": payload["title"],
-                        "directory": _payload_directory(payload),
-                        "metadata": payload["metadata"],
-                    }
-                    parent.sessions.append(session)
-                    self._write_json(session)
-                    return
-                if self.path == "/api/session/ses_smoke_1/prompt":
-                    self._write_json(
-                        parent.prompt_response
-                        or {
-                            "sessionID": "ses_smoke_1",
-                            "messageID": _prompt_message_id(payload),
-                            "delivery": "steer",
-                            "state": "admitted",
-                            "admittedSequence": 1,
-                        },
-                        status=parent.prompt_status,
-                    )
-                    return
-                if self.path == "/session/ses_smoke_1/run":
-                    self._write_json({"id": "msg_user_smoke", "status": "submitted"})
-                    return
-                if self.path == "/session/ses_smoke_1/reply":
-                    self._write_json({"id": "msg_assistant_smoke", "status": "completed", "text": "ok"})
-                    return
-                self.send_error(404)
-
-            def do_DELETE(self):
-                parent.requests.append(("DELETE", self.path, None))
-                if self.path.startswith("/api/session/"):
-                    session_id = self.path.rsplit("/", 1)[-1]
-                    for index, session in enumerate(parent.sessions):
-                        if session["id"] == session_id:
-                            del parent.sessions[index]
-                            self._write_json({"id": session_id, "deleted": True})
-                            return
-                    self.send_error(404)
-                    return
-                self.send_error(404)
-
-            def _write_json(self, payload, *, status=200):
-                body = json.dumps(payload).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever)
-        self.thread.daemon = True
-        self.thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.server.shutdown()
-        self.thread.join(timeout=2)
-        self.server.server_close()
-
-    @property
-    def url(self):
-        return f"http://127.0.0.1:{self.server.server_port}"
+try:
+    from tests.mocked_cli_harness import (
+        payload_directory,
+        prompt_message_id,
+        prompt_text,
+        request_paths,
+        run_ocs,
+        smoke_open_code_server,
+    )
+except ModuleNotFoundError:
+    from mocked_cli_harness import (
+        payload_directory,
+        prompt_message_id,
+        prompt_text,
+        request_paths,
+        run_ocs,
+        smoke_open_code_server,
+    )
 
 
 class SmokeCliTest(unittest.TestCase):
-    def run_cli(self, *args):
-        return subprocess.run(
-            [sys.executable, str(CLI), *args],
-            cwd=REPO_ROOT,
-            env=os.environ.copy(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-
     def test_smoke_runs_end_to_end_and_verifies_disposable_cleanup(self):
-        with tempfile.TemporaryDirectory() as directory, SmokeOpenCodeServer() as server:
-            result = self.run_cli("smoke", "--directory", directory, "--prefix", "ocs-smoke-test-", "--server", server.url)
+        with tempfile.TemporaryDirectory() as directory, smoke_open_code_server() as server:
+            result = run_ocs("smoke", "--directory", directory, "--prefix", "ocs-smoke-test-", "--server", server.url)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
@@ -182,24 +34,27 @@ class SmokeCliTest(unittest.TestCase):
             "smoke status=done health=ok version=2.0.0 session=ses_smoke_1 steer=queued "
             "run=skipped events=session.prompt.admitted,session.status blockers=0 cleanup=done no_live_model=true\n",
         )
-        self.assertEqual(parent_paths(server.requests), [
-            ("GET", "/global/health"),
-            ("GET", "/doc"),
-            ("POST", "/api/session"),
-            ("GET", "/api/event"),
-            ("POST", "/api/session/ses_smoke_1/prompt"),
-            ("GET", "/permission"),
-            ("GET", "/question"),
-            ("DELETE", "/api/session/ses_smoke_1"),
-            ("GET", "/api/session/ses_smoke_1"),
-        ])
+        self.assertEqual(
+            request_paths(server.requests),
+            [
+                ("GET", "/global/health"),
+                ("GET", "/doc"),
+                ("POST", "/api/session"),
+                ("GET", "/api/event"),
+                ("POST", "/api/session/ses_smoke_1/prompt"),
+                ("GET", "/permission"),
+                ("GET", "/question"),
+                ("DELETE", "/api/session/ses_smoke_1"),
+                ("GET", "/api/session/ses_smoke_1"),
+            ],
+        )
         create_payload = server.requests[2][2]
-        self.assertEqual(_payload_directory(create_payload), directory)
+        self.assertEqual(payload_directory(create_payload), directory)
         self.assertTrue(create_payload["title"].startswith("ocs-smoke-test-"))
         self.assertEqual(create_payload["metadata"]["prefix"], "ocs-smoke-test-")
         steer_payload = server.requests[4][2]
-        self.assertTrue(_prompt_message_id(steer_payload).startswith("msg_ocs-smoke-test-"))
-        self.assertEqual(_prompt_text(steer_payload), "ocs smoke steer")
+        self.assertTrue(prompt_message_id(steer_payload).startswith("msg_ocs-smoke-test-"))
+        self.assertEqual(prompt_text(steer_payload), "ocs smoke steer")
         self.assertEqual(steer_payload["delivery"], "steer")
 
     def test_cleanup_deletes_stale_disposable_sessions_in_target_directory(self):
@@ -210,8 +65,16 @@ class SmokeCliTest(unittest.TestCase):
                 {"id": "ocs-smoke-test-id", "title": "generated", "directory": directory},
                 {"id": "ses_other_dir", "title": "ocs-smoke-test-other", "directory": other_directory},
             ]
-            with SmokeOpenCodeServer(sessions=sessions) as server:
-                result = self.run_cli("cleanup", "--directory", directory, "--prefix", "ocs-smoke-test-", "--server", server.url)
+            with smoke_open_code_server(sessions=sessions) as server:
+                result = run_ocs(
+                    "cleanup",
+                    "--directory",
+                    directory,
+                    "--prefix",
+                    "ocs-smoke-test-",
+                    "--server",
+                    server.url,
+                )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
@@ -219,39 +82,45 @@ class SmokeCliTest(unittest.TestCase):
             result.stdout,
             f"cleanup stale=2 deleted=2 verified=2 prefix=ocs-smoke-test- dir={directory}\n",
         )
-        self.assertEqual(parent_paths(server.requests), [
-            ("GET", "/doc"),
-            ("GET", "/api/session"),
-            ("DELETE", "/api/session/ses_old"),
-            ("GET", "/api/session/ses_old"),
-            ("DELETE", "/api/session/ocs-smoke-test-id"),
-            ("GET", "/api/session/ocs-smoke-test-id"),
-        ])
+        self.assertEqual(
+            request_paths(server.requests),
+            [
+                ("GET", "/doc"),
+                ("GET", "/api/session"),
+                ("DELETE", "/api/session/ses_old"),
+                ("GET", "/api/session/ses_old"),
+                ("DELETE", "/api/session/ocs-smoke-test-id"),
+                ("GET", "/api/session/ocs-smoke-test-id"),
+            ],
+        )
 
     def test_smoke_cleans_disposable_session_after_partial_failure(self):
-        with tempfile.TemporaryDirectory() as directory, SmokeOpenCodeServer(
+        with tempfile.TemporaryDirectory() as directory, smoke_open_code_server(
             prompt_response={"error": "prompt admission rejected"}, prompt_status=422
         ) as server:
-            result = self.run_cli("smoke", "--directory", directory, "--prefix", "ocs-smoke-test-", "--server", server.url)
+            result = run_ocs("smoke", "--directory", directory, "--prefix", "ocs-smoke-test-", "--server", server.url)
 
         self.assertEqual(result.returncode, 69)
         self.assertEqual(result.stdout, "")
         self.assertIn("smoke failed", result.stderr)
         self.assertIn("POST /api/session/ses_smoke_1/prompt failed: HTTP 422", result.stderr)
         self.assertIn("cleanup=done deleted=1 verified=1", result.stderr)
-        self.assertEqual(parent_paths(server.requests), [
-            ("GET", "/global/health"),
-            ("GET", "/doc"),
-            ("POST", "/api/session"),
-            ("GET", "/api/event"),
-            ("POST", "/api/session/ses_smoke_1/prompt"),
-            ("DELETE", "/api/session/ses_smoke_1"),
-            ("GET", "/api/session/ses_smoke_1"),
-        ])
+        self.assertEqual(
+            request_paths(server.requests),
+            [
+                ("GET", "/global/health"),
+                ("GET", "/doc"),
+                ("POST", "/api/session"),
+                ("GET", "/api/event"),
+                ("POST", "/api/session/ses_smoke_1/prompt"),
+                ("DELETE", "/api/session/ses_smoke_1"),
+                ("GET", "/api/session/ses_smoke_1"),
+            ],
+        )
 
     def test_smoke_json_reports_no_live_model_mode_and_check_metadata(self):
-        with tempfile.TemporaryDirectory() as directory, SmokeOpenCodeServer() as server:
-            result = self.run_cli(
+        with tempfile.TemporaryDirectory() as directory, smoke_open_code_server() as server:
+            result = run_ocs(
                 "smoke",
                 "--directory",
                 directory,
@@ -289,8 +158,8 @@ class SmokeCliTest(unittest.TestCase):
         self.assertEqual(payload["checks"]["blockers"], {"status": "done", "permissions": 0, "questions": 0, "total": 0})
 
     def test_default_smoke_does_not_call_legacy_run_reply_in_no_live_model_mode(self):
-        with tempfile.TemporaryDirectory() as directory, SmokeOpenCodeServer() as server:
-            result = self.run_cli(
+        with tempfile.TemporaryDirectory() as directory, smoke_open_code_server() as server:
+            result = run_ocs(
                 "smoke",
                 "--directory",
                 directory,
@@ -312,29 +181,8 @@ class SmokeCliTest(unittest.TestCase):
             payload["checks"]["run_blocking"]["api_path"],
             {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
         )
-        self.assertNotIn(("POST", "/session/ses_smoke_1/run"), parent_paths(server.requests))
-        self.assertNotIn(("POST", "/session/ses_smoke_1/reply"), parent_paths(server.requests))
-
-
-def parent_paths(requests):
-    return [(method, path) for method, path, _payload in requests]
-
-
-def _payload_directory(payload):
-    location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
-    return location.get("directory") or payload.get("directory")
-
-
-def _prompt_message_id(payload):
-    return payload.get("messageID") or payload.get("id")
-
-
-def _prompt_text(payload):
-    prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
-    if prompt.get("text") is not None:
-        return prompt.get("text")
-    parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
-    return "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+        self.assertNotIn(("POST", "/session/ses_smoke_1/run"), request_paths(server.requests))
+        self.assertNotIn(("POST", "/session/ses_smoke_1/reply"), request_paths(server.requests))
 
 
 if __name__ == "__main__":
