@@ -31,6 +31,7 @@ from opencode_session.worker_state import (
     normalize_worker,
     worker_field,
     worker_has_field,
+    worker_output_field,
 )
 
 
@@ -424,7 +425,7 @@ class WorkerExecutionTest(unittest.TestCase):
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 executions.append((session_id, prompt))
-                self.assertEqual(worker_field(worker, "status"), "active")
+                self.assertEqual(worker_output_field(worker, "status"), "active")
                 attempt = self.assert_single_worker_attempt(worker, status="active", session_id="ses_initial")
                 self.assertEqual(attempt.get("id"), "attempt-1")
                 self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -446,7 +447,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(executions, [("ses_initial", "Finish the worker task")])
         self.assertEqual(client.requests, [("create", directory, None, None)])
         self.assertEqual(outcome.kind, "completed")
-        self.assertEqual(worker_field(worker, "status"), "done")
+        self.assertEqual(worker_output_field(worker, "status"), "done")
         attempt = self.assert_single_worker_attempt(worker, status="completed", session_id="ses_initial")
         self.assertEqual(attempt.get("id"), "attempt-1")
         self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -525,10 +526,10 @@ class WorkerExecutionTest(unittest.TestCase):
             ],
         )
         self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
-        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
         self.assertEqual(worker_field(worker, "retry_count"), 0)
         self.assertTrue(worker_field(worker, "manual_retry_required"))
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
         self.assertEqual(worker_field(worker, "failure_reason"), "worker timed out after 0.05s")
         self.assertFalse(worker_has_field(worker, "timeout_retry_sessions"))
         self.assertFalse(worker_has_field(worker, "result"))
@@ -550,8 +551,8 @@ class WorkerExecutionTest(unittest.TestCase):
                 client.requests.append(("execute", session_id, prompt))
                 self.assertTrue(persisted_workers)
                 persisted_worker = persisted_workers[-1]
-                self.assertEqual(worker_field(persisted_worker, "status"), "active")
-                self.assertEqual(worker_field(persisted_worker, "next_eligible_action"), "wait")
+                self.assertEqual(worker_output_field(persisted_worker, "status"), "active")
+                self.assertEqual(worker_output_field(persisted_worker, "next_eligible_action"), "wait")
                 attempt = self.assert_single_worker_attempt(
                     persisted_worker,
                     status="active",
@@ -581,8 +582,8 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(outcome.kind, "completed")
         self.assertTrue(persisted_workers)
         persisted_worker = persisted_workers[-1]
-        self.assertEqual(worker_field(persisted_worker, "status"), "done")
-        self.assertEqual(worker_field(persisted_worker, "next_eligible_action"), "collect")
+        self.assertEqual(worker_output_field(persisted_worker, "status"), "done")
+        self.assertEqual(worker_output_field(persisted_worker, "next_eligible_action"), "collect")
         attempt = self.assert_single_worker_attempt(persisted_worker, status="completed", session_id="ses_initial")
         self.assertEqual(attempt.get("id"), "attempt-1")
         self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -628,12 +629,12 @@ class WorkerExecutionTest(unittest.TestCase):
                 ("execute", "ses_initial", "Finish the worker task", True),
             ],
         )
-        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
         self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
         self.assertEqual(worker_field(worker, "retry_count"), 0)
         self.assertEqual(worker_field(worker, "last_failure_category"), "timeout")
         self.assertEqual(worker_field(worker, "last_failure_reason"), "worker timed out after 0.05s")
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
         self.assertTrue(worker_field(worker, "manual_retry_required"))
         self.assertFalse(worker_has_field(worker, "result"))
         self.assertFalse(worker_has_field(worker, "timeout_retry_sessions"))
@@ -674,8 +675,8 @@ class WorkerExecutionTest(unittest.TestCase):
                 ("execute", "ses_initial", "Finish the worker task"),
             ],
         )
-        self.assertEqual(worker_field(worker, "status"), "timeout")
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
         self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
 
 

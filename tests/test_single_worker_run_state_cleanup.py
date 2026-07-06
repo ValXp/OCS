@@ -7,7 +7,7 @@ from opencode_session.multi_worker_orchestration import DependencyOrderedSerialR
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.worker_execution import WorkerExecutionTimeout
-from opencode_session.worker_state import worker_field
+from opencode_session.worker_state import worker_field, worker_output_field
 
 try:
     from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
@@ -66,7 +66,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
         self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
         self.assertTrue(worker_field(worker, "manual_retry_required"))
 

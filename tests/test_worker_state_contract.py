@@ -38,6 +38,7 @@ from opencode_session.worker_state import (
     worker_lifecycle_state_for_status_alias,
     worker_lifecycle_target_states,
     worker_field,
+    worker_output_field,
     worker_timeout_lifecycle_state,
     worker_record_for_mutation,
 )
@@ -170,12 +171,14 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertIsInstance(worker, WorkerRecord)
         self.assertNotIsInstance(worker, dict)
         self.assertEqual(worker.field("id"), "review")
-        self.assertEqual(worker.status, "failed")
         self.assertEqual(worker.field("dependencies"), [])
         self.assertEqual(worker.field("prompt_ids"), [])
         self.assertEqual(worker.field("timeout_policy"), "timeout")
         self.assertEqual(worker.lifecycle_state, "failed_retry")
-        self.assertEqual(worker.next_eligible_action, "retry")
+        self.assertIsNone(worker.field("status"))
+        self.assertIsNone(worker.field("next_eligible_action"))
+        self.assertEqual(worker_output_field(worker, "status"), "failed")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
 
     def test_worker_execution_eligibility_derives_canonical_action(self):
         queued = normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "queued"}, "build")
@@ -197,7 +200,8 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(next_eligible_worker_action(waiting), "wait")
         self.assertTrue(is_executable_worker(retrying))
         self.assertFalse(is_executable_worker(stale_action))
-        self.assertEqual(worker_field(stale_action, "next_eligible_action"), "wait")
+        self.assertIsNone(worker_field(stale_action, "next_eligible_action"))
+        self.assertEqual(worker_output_field(stale_action, "next_eligible_action"), "wait")
         self.assertEqual(next_eligible_worker_action(stale_action), "wait")
 
     def test_legacy_worker_mappings_canonicalize_at_hydration_boundary(self):
@@ -266,8 +270,10 @@ class WorkerStateContractTest(unittest.TestCase):
                 self.assertIsInstance(record, WorkerRecord)
                 self.assertEqual(worker_lifecycle_state(record), expected_lifecycle)
                 self.assertEqual(worker_field(record, "lifecycle_state"), expected_lifecycle)
-                self.assertEqual(worker_field(record, "status"), expected_status)
-                self.assertEqual(worker_field(record, "next_eligible_action"), expected_action)
+                self.assertIsNone(worker_field(record, "status"))
+                self.assertIsNone(worker_field(record, "next_eligible_action"))
+                self.assertEqual(worker_output_field(record, "status"), expected_status)
+                self.assertEqual(worker_output_field(record, "next_eligible_action"), expected_action)
                 self.assertEqual(next_eligible_worker_action(record), expected_action)
                 self.assertEqual(next_eligible_action(record), expected_action)
                 self.assertEqual(is_executable_worker(record), executable)
@@ -339,7 +345,8 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertEqual(record.field("prompt"), "Review the change")
         self.assertEqual(record.field("prompt_ids"), ["msg_review"])
-        self.assertEqual(worker_field(record, "status"), "queued")
+        self.assertIsNone(worker_field(record, "status"))
+        self.assertEqual(worker_output_field(record, "status"), "queued")
         self.assertNotIn("status", snapshot)
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
@@ -354,7 +361,8 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertIs(record, worker)
         self.assertIs(workers["review"], worker)
-        self.assertEqual(worker.status, "active")
+        self.assertEqual(worker.lifecycle_state, "active_wait")
+        self.assertEqual(worker_output_field(worker, "status"), "active")
         self.assertEqual(worker.field("prompt_ids"), ["msg_review"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 

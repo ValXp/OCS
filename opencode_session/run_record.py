@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 
 from opencode_session.status import short_status
@@ -6,6 +7,7 @@ from opencode_session.worker_state import (
     default_worker_record,
     deserialize_worker_record,
     serialize_worker_snapshot,
+    worker_output_dict,
 )
 
 
@@ -113,3 +115,15 @@ def normalize_run_for_storage(run, *, fallback_name):
         for worker_id, worker in normalized["workers"].items()
     }
     return normalized
+
+
+def run_record_for_output(run):
+    output = deepcopy(run)
+    workers = output.get("workers") or {}
+    if not isinstance(workers, dict):
+        workers = {}
+    output["workers"] = {
+        worker_id: worker_output_dict(worker, worker_id)
+        for worker_id, worker in workers.items()
+    }
+    return output

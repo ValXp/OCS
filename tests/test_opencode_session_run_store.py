@@ -15,6 +15,7 @@ from opencode_session.worker_state import (
     refresh_run_summary,
     worker_field,
     worker_has_field,
+    worker_output_field,
 )
 
 try:
@@ -222,9 +223,9 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             ).run
             stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(worker_field(run["workers"]["build"], "status"), "active")
+        self.assertEqual(worker_output_field(run["workers"]["build"], "status"), "active")
         self.assertFalse(worker_has_field(run["workers"]["build"], "result"))
-        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
+        self.assertEqual(worker_output_field(persisted["workers"]["build"], "status"), "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
         self.assertEqual(stored["workers"]["build"]["lifecycle_state"], "done_collect")
         self.assertNotIn("status", stored["workers"]["build"])
@@ -260,7 +261,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         self.assertEqual(worker_field(persisted["workers"]["docs"], "prompt_ids"), ["prompt-docs"])
-        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
+        self.assertEqual(worker_output_field(persisted["workers"]["build"], "status"), "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
 
     def test_worker_patch_preserves_concurrent_prompt_id_on_same_worker(self):
@@ -292,7 +293,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         self.assertEqual(worker_field(persisted["workers"]["build"], "prompt_ids"), ["prompt-steer", "prompt-build"])
-        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
+        self.assertEqual(worker_output_field(persisted["workers"]["build"], "status"), "done")
 
     def test_worker_patch_preserves_concurrent_worker_configuration_edits_on_same_worker(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
@@ -334,7 +335,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         build = persisted["workers"]["build"]
-        self.assertEqual(worker_field(build, "status"), "done")
+        self.assertEqual(worker_output_field(build, "status"), "done")
         self.assertEqual(worker_field(build, "prompt"), "Build with new instructions")
         self.assertEqual(worker_field(build, "dependencies"), ["docs"])
         self.assertEqual(worker_field(build, "retry_limit"), 3)
@@ -391,7 +392,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         build = persisted["workers"]["build"]
-        self.assertEqual(worker_field(build, "status"), "aborted")
+        self.assertEqual(worker_output_field(build, "status"), "aborted")
         self.assertEqual(worker_field(build, "abort"), {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}})
         self.assertFalse(worker_has_field(build, "result"))
         self.assertEqual(persisted["status"], "aborted")

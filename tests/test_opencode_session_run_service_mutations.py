@@ -10,7 +10,7 @@ from opencode_session.run_services import (
     recoverable_remote_mutation_entries,
 )
 from opencode_session.run_store import RunStore, RunStoreError
-from opencode_session.worker_state import WorkerRecord, worker_field
+from opencode_session.worker_state import WorkerRecord, worker_field, worker_output_field
 
 
 PROMPT_CAPABILITIES = {
@@ -298,7 +298,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(result.abort["status"], "aborted")
         self.assertNotIn(REMOTE_MUTATION_JOURNAL_FIELD, run)
         self.assertEqual(run["status"], "aborted")
-        self.assertEqual(worker_field(run["workers"]["planner"], "status"), "aborted")
+        self.assertEqual(worker_output_field(run["workers"]["planner"], "status"), "aborted")
         self.assertEqual(len(client.requests), 1)
 
     def test_abort_applies_transition_through_worker_record_boundary(self):
@@ -324,7 +324,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
 
         self.assertIsInstance(result.worker, WorkerRecord)
         self.assertEqual(calls, [("planner", "aborted")])
-        self.assertEqual(worker_field(result.worker, "status"), "aborted")
+        self.assertEqual(worker_output_field(result.worker, "status"), "aborted")
 
     def test_abort_keeps_journal_when_final_abort_persistence_fails_after_api_success(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -344,7 +344,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
             run = inner_store.load_run("demo")
 
         self.assertEqual(client.requests, [("abort", "ses_plan")])
-        self.assertEqual(worker_field(run["workers"]["planner"], "status"), "active")
+        self.assertEqual(worker_output_field(run["workers"]["planner"], "status"), "active")
         self.assertEqual(len(run[REMOTE_MUTATION_JOURNAL_FIELD]), 1)
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "abort_worker")
@@ -371,7 +371,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
             run = inner_store.load_run("demo")
 
         self.assertEqual(client.requests, [("abort", "ses_plan")])
-        self.assertEqual(worker_field(run["workers"]["planner"], "status"), "active")
+        self.assertEqual(worker_output_field(run["workers"]["planner"], "status"), "active")
         self.assertEqual(len(run[REMOTE_MUTATION_JOURNAL_FIELD]), 1)
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "abort_worker")

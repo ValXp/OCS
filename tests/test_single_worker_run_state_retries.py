@@ -5,7 +5,7 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
-from opencode_session.worker_state import worker_field
+from opencode_session.worker_state import worker_field, worker_output_field
 
 try:
     from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
@@ -80,7 +80,7 @@ class SingleWorkerRunStateRetryTest(unittest.TestCase):
         )
         self.assertEqual(run["status"], "done")
         retry_worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(retry_worker, "status"), "done")
+        self.assertEqual(worker_output_field(retry_worker, "status"), "done")
         self.assertEqual(worker_field(retry_worker, "retry_count"), 1)
         self.assertEqual(worker_field(retry_worker, "retry_limit"), 1)
         self.assertEqual(worker_field(retry_worker, "retryable_failures"), ["provider"])
@@ -88,7 +88,7 @@ class SingleWorkerRunStateRetryTest(unittest.TestCase):
         self.assertEqual(worker_field(retry_worker, "last_failure_reason"), "transient provider outage")
         self.assertIsNone(worker_field(retry_worker, "failure_reason"))
         self.assertEqual(worker_field(retry_worker, "prompt_ids"), ["msg_user_retry"])
-        self.assertEqual(worker_field(retry_worker, "next_eligible_action"), "collect")
+        self.assertEqual(worker_output_field(retry_worker, "next_eligible_action"), "collect")
         self.assertEqual(
             worker_field(retry_worker, "result")["message_ids"],
             {"user": "msg_user_retry", "assistant": "msg_assistant_1"},
@@ -151,13 +151,13 @@ class SingleWorkerRunStateRetryTest(unittest.TestCase):
         self.assertEqual(outcome.exit_code, 0)
         self.assertIsNone(outcome.error)
         retry_worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(retry_worker, "status"), "done")
+        self.assertEqual(worker_output_field(retry_worker, "status"), "done")
         self.assertEqual(worker_field(retry_worker, "retry_count"), 1)
         self.assertEqual(worker_field(retry_worker, "retryable_failures"), ["api"])
         self.assertEqual(worker_field(retry_worker, "last_failure_category"), "api")
         self.assertIn("HTTP 503", worker_field(retry_worker, "last_failure_reason"))
         self.assertIsNone(worker_field(retry_worker, "failure_reason"))
-        self.assertEqual(worker_field(retry_worker, "next_eligible_action"), "collect")
+        self.assertEqual(worker_output_field(retry_worker, "next_eligible_action"), "collect")
 
 
 if __name__ == "__main__":

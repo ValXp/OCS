@@ -24,6 +24,7 @@ from opencode_session.worker_state import (
     worker_lifecycle_target_states,
     worker_field,
     worker_has_field,
+    worker_output_field,
     worker_transition_is_legal,
     worker_transition_target_lifecycle_state,
 )
@@ -212,8 +213,8 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(worker_field(worker, "status"), "aborted")
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_output_field(worker, "status"), "aborted")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "none")
         self.assertEqual(worker_field(worker, "abort"), {"session_id": "ses_build", "accepted": True})
         self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_initial", "msg_user"])
         self.assertFalse(worker_has_field(worker, "result"))
@@ -605,7 +606,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
         apply_worker_transition_to_worker(worker, mark_worker_active(worker))
 
-        self.assertEqual(worker_field(worker, "status"), "active")
+        self.assertEqual(worker_output_field(worker, "status"), "active")
         self.assertEqual(worker_field(worker, "lifecycle_state"), "active_wait")
         self.assertEqual(worker_field(worker, "prompt_ids"), [])
 
@@ -614,11 +615,11 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
         apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": False}))
 
-        self.assertEqual(worker_field(worker, "status"), "active")
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "wait")
+        self.assertEqual(worker_output_field(worker, "status"), "active")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "wait")
 
         apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": True}))
 
-        self.assertEqual(worker_field(worker, "status"), "aborted")
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_output_field(worker, "status"), "aborted")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "none")
         self.assertEqual(worker_field(worker, "abort"), {"accepted": True})

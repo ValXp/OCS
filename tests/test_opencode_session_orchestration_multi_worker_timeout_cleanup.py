@@ -10,7 +10,13 @@ from opencode_session.run_start_core import RunStartCore
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
-from opencode_session.worker_state import apply_worker_transition, normalize_worker, worker_field, worker_has_field
+from opencode_session.worker_state import (
+    apply_worker_transition,
+    normalize_worker,
+    worker_field,
+    worker_has_field,
+    worker_output_field,
+)
 
 try:
     from tests.multi_worker_orchestration_helpers import CAPABILITIES, FakeClient
@@ -56,9 +62,9 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker_field(run["workers"]["alpha"], "status"), "failed")
+        self.assertEqual(worker_output_field(run["workers"]["alpha"], "status"), "failed")
         self.assertEqual(worker_field(run["workers"]["alpha"], "cleanup"), {"requested": True, "deleted": True})
-        self.assertEqual(worker_field(run["workers"]["beta"], "status"), "queued")
+        self.assertEqual(worker_output_field(run["workers"]["beta"], "status"), "queued")
         self.assertIsNone(worker_field(run["workers"]["beta"], "session_id"))
         self.assertFalse(worker_has_field(run["workers"]["beta"], "cleanup"))
 
@@ -98,7 +104,7 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             worker_field(run["workers"]["alpha"], "cleanup"),
             {"requested": True, "deleted": False, "error": first_error},
         )
-        self.assertEqual(worker_field(run["workers"]["alpha"], "status"), "done")
+        self.assertEqual(worker_output_field(run["workers"]["alpha"], "status"), "done")
         self.assertIsNone(worker_field(run["workers"]["alpha"], "failure_reason"))
         self.assertEqual(worker_field(run["workers"]["beta"], "cleanup"), {"requested": True, "deleted": True})
         self.assertEqual(persisted_worker_ids, ["alpha", "beta"])
@@ -147,8 +153,8 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         )
         retry_worker = run["workers"]["worker"]
         self.assertEqual(worker_field(retry_worker, "session_id"), "ses_initial")
-        self.assertEqual(worker_field(retry_worker, "status"), "timeout")
-        self.assertEqual(worker_field(retry_worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_output_field(retry_worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(retry_worker, "next_eligible_action"), "retry")
         self.assertTrue(worker_field(retry_worker, "manual_retry_required"))
         self.assertFalse(worker_has_field(retry_worker, "result"))
 
@@ -197,7 +203,7 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
         self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
         self.assertTrue(worker_field(worker, "manual_retry_required"))
 
@@ -246,7 +252,7 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
         self.assertEqual(worker_field(worker, "failure_reason"), "worker timed out after 0.01s")
         self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": False, "error": first_error})
 

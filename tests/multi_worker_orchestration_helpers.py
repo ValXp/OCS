@@ -3,7 +3,7 @@ import tempfile
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
-from opencode_session.worker_state import worker_field
+from opencode_session.worker_state import worker_field, worker_output_field
 
 
 RUN_NAME = "demo"
@@ -144,9 +144,9 @@ def assert_single_worker_attempt(test_case, worker, *, status, session_id):
 
 def assert_blocked_worker(test_case, run, worker_id, blockers):
     worker = run["workers"][worker_id]
-    test_case.assertEqual(worker_field(worker, "status"), "blocked")
+    test_case.assertEqual(worker_output_field(worker, "status"), "blocked")
     test_case.assertEqual(worker_field(worker, "blockers"), blockers)
-    test_case.assertEqual(worker_field(worker, "next_eligible_action"), "resolve_blocker")
+    test_case.assertEqual(worker_output_field(worker, "next_eligible_action"), "resolve_blocker")
 
 
 _LIFECYCLE_STATE_BY_STATUS = {

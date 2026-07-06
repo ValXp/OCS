@@ -130,8 +130,6 @@ class WorkerRequiredFields(TypedDict):
     agent: Optional[str]
     model: Optional[str]
     lifecycle_state: str
-    status: str
-    next_eligible_action: str
     dependencies: List[str]
     prompt_ids: List[str]
     retry_count: int
@@ -171,12 +169,6 @@ class HydratedWorker(Protocol):
     @property
     def lifecycle_state(self) -> str: ...
 
-    @property
-    def status(self) -> str: ...
-
-    @property
-    def next_eligible_action(self) -> str: ...
-
     def field(self, field_name: str, default: object = None) -> object: ...
 
     def set_field(self, field_name: str, value: object) -> "HydratedWorker": ...
@@ -203,7 +195,7 @@ class HydratedWorker(Protocol):
 WORKER_REQUIRED_FIELD_NAMES = tuple(WorkerRequiredFields.__annotations__)
 
 
-class WorkerRecordShape(Worker):
+class WorkerOutputRecord(Worker, total=False):
     status: str
     next_eligible_action: str
 

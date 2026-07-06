@@ -544,7 +544,7 @@ WORKER_SNAPSHOT_STATE_FIELDS = (
 )
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
-PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("lifecycle_state", "status", "next_eligible_action"))
+PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("status", "next_eligible_action"))
 
 
 def status_priority(status):
@@ -587,6 +587,17 @@ def public_worker_state_fields(lifecycle_state):
         "status": status,
         "next_eligible_action": action,
     }
+
+
+def worker_output_dict(worker, worker_id=None):
+    record = WorkerRecord.from_worker(canonicalize_legacy_worker_record(worker), worker_id).to_worker()
+    fields = record.to_snapshot()
+    fields.update(public_worker_state_fields(fields["lifecycle_state"]))
+    return fields
+
+
+def worker_output_field(worker, field_name, default=None):
+    return worker_output_dict(worker).get(field_name, default)
 
 
 def worker_lifecycle_source_states(transition_name):
@@ -1258,7 +1269,7 @@ def _require_worker_record(worker):
 
 def _worker_fields(worker):
     if isinstance(worker, WorkerRecord):
-        return worker.to_public_dict()
+        return worker.to_snapshot()
     if isinstance(worker, Mapping):
         return dict(worker)
     return {}
@@ -1270,15 +1281,6 @@ def _raw_worker_field(worker, field_name, default=None):
     if isinstance(worker, Mapping):
         return worker.get(field_name, default)
     return default
-
-
-def _canonical_public_worker_field(worker, field_name, default=None):
-    if field_name not in PUBLIC_WORKER_STATE_FIELD_NAMES:
-        return default
-    lifecycle_state = _canonical_lifecycle_state(worker)
-    if field_name == "lifecycle_state":
-        return lifecycle_state
-    return public_worker_state_fields(lifecycle_state).get(field_name, default)
 
 
 def worker_field(worker, field_name, default=None):
@@ -1355,22 +1357,20 @@ def is_failed_dependency_status(status):
 @dataclass(frozen=True)
 class WorkerSchedulingState:
     lifecycle_state: Optional[str]
-    status: Optional[str]
-    next_eligible_action: str
     has_prompt: bool
 
     @classmethod
     def from_worker(cls, worker):
         worker = _require_worker_record(worker)
-        lifecycle_state = worker_lifecycle_state(worker)
-        status, next_eligible_action = public_worker_state(lifecycle_state)
-        return cls(lifecycle_state, status, next_eligible_action, worker_has_prompt(worker))
+        return cls(worker_lifecycle_state(worker), worker_has_prompt(worker))
 
     def can_execute(self):
-        return self.has_prompt and self.next_eligible_action in EXECUTABLE_WORKER_ACTIONS
+        metadata = WORKER_LIFECYCLE_METADATA.get(self.lifecycle_state)
+        return self.has_prompt and metadata is not None and metadata.executable
 
     def can_block_for_dependency(self):
-        return self.has_prompt and is_dependency_blockable_status(self.status)
+        metadata = WORKER_LIFECYCLE_METADATA.get(self.lifecycle_state)
+        return self.has_prompt and metadata is not None and is_dependency_blockable_status(metadata.status)
 
 
 def worker_lifecycle_state(worker):
@@ -1443,6 +1443,8 @@ def canonicalize_legacy_worker_record(worker):
     fields = _worker_fields(worker)
     if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
         fields["lifecycle_state"] = _lifecycle_state_from_legacy_public_worker_state(fields)
+    for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
+        fields.pop(public_field_name, None)
     return fields
 
 
@@ -1454,7 +1456,7 @@ def latest_prompt_ids_are_retry_marker(latest_worker):
 
 
 def next_eligible_worker_action(worker):
-    return WorkerSchedulingState.from_worker(worker).next_eligible_action
+    return public_worker_state(worker_lifecycle_state(worker))[1]
 
 
 def worker_has_prompt(worker):
@@ -1480,11 +1482,11 @@ class WorkerRecord:
         self._worker_id = self._fields.get("id") or worker_id
 
     def __repr__(self):
-        return f"{type(self).__name__}({self.worker_id!r}, {self.to_public_dict()!r})"
+        return f"{type(self).__name__}({self.worker_id!r}, {self.to_snapshot()!r})"
 
     def __eq__(self, other):
         if isinstance(other, WorkerRecord):
-            return self.to_public_dict() == other.to_public_dict()
+            return self.to_snapshot() == other.to_snapshot()
         return NotImplemented
 
     def _raw_field(self, field_name, default=None):
@@ -1495,14 +1497,10 @@ class WorkerRecord:
             return self.worker_id
         if field_name == "lifecycle_state":
             return self.lifecycle_state
-        if field_name == "status":
-            return self.status
-        if field_name == "next_eligible_action":
-            return self.next_eligible_action
         return self._raw_field(field_name, default)
 
     def has_field(self, field_name):
-        return field_name in self._fields or field_name in {"id", "lifecycle_state", "status", "next_eligible_action"}
+        return field_name in self._fields or field_name in {"id", "lifecycle_state"}
 
     def set_field(self, field_name, value):
         self._fields[field_name] = deepcopy(value)
@@ -1562,16 +1560,7 @@ class WorkerRecord:
     @classmethod
     def default_fields(cls, worker_id):
         fields = cls.default_snapshot_fields(worker_id)
-        fields.update(cls.public_state_fields(fields["lifecycle_state"]))
         return cls.from_worker(require_internal_worker(fields), worker_id)
-
-    @classmethod
-    def public_state(cls, lifecycle_state):
-        return public_worker_state(lifecycle_state)
-
-    @classmethod
-    def public_state_fields(cls, lifecycle_state):
-        return public_worker_state_fields(lifecycle_state)
 
     @classmethod
     def lifecycle_set_fields(cls, worker_id, lifecycle_state):
@@ -1589,37 +1578,25 @@ class WorkerRecord:
         return WORKER_LIFECYCLE_QUEUED
 
     @property
-    def status(self):
-        return self.public_state(self.lifecycle_state)[0]
-
-    @property
-    def next_eligible_action(self):
-        return self.public_state(self.lifecycle_state)[1]
-
-    @property
     def has_prompt(self):
         return worker_has_prompt(self)
 
     def scheduling_state(self):
         return WorkerSchedulingState(
             self.lifecycle_state,
-            self.status,
-            self.next_eligible_action,
             self.has_prompt,
         )
 
     def to_public_dict(self):
-        fields = deepcopy(self._fields)
-        fields["id"] = fields.get("id") or self.worker_id
-        fields["lifecycle_state"] = self.lifecycle_state
-        fields.update(self.public_state_fields(fields["lifecycle_state"]))
-        return fields
+        return self.to_snapshot()
 
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
-        fields = self.to_public_dict()
-        fields.pop("status", None)
-        fields.pop("next_eligible_action", None)
+        fields = deepcopy(self._fields)
+        fields["id"] = fields.get("id") or self.worker_id
+        fields["lifecycle_state"] = self.lifecycle_state
+        for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
+            fields.pop(public_field_name, None)
         normalized.update(fields)
         normalized["id"] = normalized.get("id") or self.worker_id
         for key in WORKER_LIST_FIELDS:
@@ -1641,11 +1618,7 @@ class WorkerRecord:
 
     def to_worker(self):
         normalized = self.to_snapshot()
-        normalized.update(self.public_state_fields(normalized["lifecycle_state"]))
         return type(self).from_worker(require_internal_worker(normalized), self.worker_id)
-
-    def serialized_public_state(self):
-        return self.public_state_fields(self.lifecycle_state)
 
     def set_session(self, session_id, *, agent=None, model=None):
         self.set_field("session_id", session_id)
@@ -2105,4 +2078,4 @@ def worker_prompt(worker):
 
 
 def _worker_status(worker):
-    return worker_field(worker, "status") if isinstance(worker, WorkerRecord) else None
+    return public_worker_state(worker_lifecycle_state(worker))[0] if isinstance(worker, WorkerRecord) else None

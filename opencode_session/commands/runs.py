@@ -9,6 +9,7 @@ from opencode_session.prompt_admission import (
     format_admission_compact,
 )
 from opencode_session.run_formatting import format_run_compact, format_worker_result_compact
+from opencode_session.run_record import run_record_for_output
 from opencode_session.run_services import RunCommandService, RunStartRequest, RunWorkerSessionNotFound
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root
 from opencode_session.session_lifecycle import format_abort_compact
@@ -154,17 +155,17 @@ def _start_orchestration_run(args, service, *, print_error, **_context):
     )
     if outcome.error is not None:
         return _error_result(args, outcome.error, outcome.exit_code, print_error)
-    return render_command_result(args, CommandResult(outcome.run, compact=format_run_compact, exit_code=outcome.exit_code))
+    return _render_run_result(args, outcome.run, exit_code=outcome.exit_code)
 
 
 def _init_run(args, service, **_context):
     run = service.create_run(args.name, directory=args.directory, server_url=args.server)
-    return render_command_result(args, run, compact=format_run_compact(run))
+    return _render_run_result(args, run)
 
 
 def _status_run(args, service, **_context):
     run = service.load_run(args.name)
-    return render_command_result(args, run, compact=format_run_compact(run))
+    return _render_run_result(args, run)
 
 
 def _upsert_run_worker(args, service, **_context):
@@ -187,7 +188,18 @@ def _upsert_run_worker(args, service, **_context):
         blockers=args.blockers,
         output_refs=args.output_refs,
     )
-    return render_command_result(args, run, compact=format_run_compact(run))
+    return _render_run_result(args, run)
+
+
+def _render_run_result(args, run, *, exit_code=0):
+    return render_command_result(
+        args,
+        CommandResult(
+            run_record_for_output(run),
+            compact=format_run_compact(run),
+            exit_code=exit_code,
+        ),
+    )
 
 
 def _collect_run_results(args, service, **_context):

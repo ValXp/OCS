@@ -1,12 +1,13 @@
 from dataclasses import dataclass
 
 from opencode_session.worker_state import (
-    WorkerSchedulingState,
     is_dependency_blockable_worker,
     is_executable_worker,
     is_failed_dependency_status,
     is_runnable_status,
     is_worker_mapping,
+    public_worker_state,
+    worker_lifecycle_state,
     worker_field,
     worker_has_prompt,
 )
@@ -211,7 +212,7 @@ def _worker_dependencies(worker):
 
 
 def _worker_status(worker):
-    return WorkerSchedulingState.from_worker(worker).status
+    return public_worker_state(worker_lifecycle_state(worker))[0]
 
 
 def _add_blocker(blockers_by_worker_id, worker_id, blocker):

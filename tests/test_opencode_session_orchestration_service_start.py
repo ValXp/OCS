@@ -13,7 +13,7 @@ from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
-from opencode_session.worker_state import normalize_worker, worker_field
+from opencode_session.worker_state import normalize_worker, worker_field, worker_output_field
 
 try:
     from tests.multi_worker_orchestration_helpers import (
@@ -111,7 +111,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             execution_policy=EXECUTION_POLICY_FAIL_FAST,
         )
 
-        self.assertEqual(worker_field(outcome.run["workers"]["worker"], "status"), "done")
+        self.assertEqual(worker_output_field(outcome.run["workers"]["worker"], "status"), "done")
         self.assertEqual(len(core.calls), 1)
         self.assertIs(core.calls[0]["client"], client)
         self.assertIs(core.calls[0]["run"], run)
@@ -123,7 +123,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(core.calls[0]["model"], "openai/gpt-5.5")
         self.assertFalse(core.calls[0]["cleanup_requested"])
         self.assertTrue(core.calls[0]["stop_after_retry"])
-        self.assertEqual(worker_field(session_tracker.remembered[0][1], "status"), "done")
+        self.assertEqual(worker_output_field(session_tracker.remembered[0][1], "status"), "done")
         self.assertEqual(session_tracker.remembered[0][2], "completed")
 
     def test_start_persists_active_attempt_before_provider_call(self):
@@ -137,8 +137,8 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                 observed_before_call["worker"] = deepcopy(persisted_worker)
 
                 self.assertEqual(worker_field(persisted_worker, "session_id"), "ses_initial")
-                self.assertEqual(worker_field(persisted_worker, "status"), "active")
-                self.assertEqual(worker_field(persisted_worker, "next_eligible_action"), "wait")
+                self.assertEqual(worker_output_field(persisted_worker, "status"), "active")
+                self.assertEqual(worker_output_field(persisted_worker, "next_eligible_action"), "wait")
                 attempt = assert_single_worker_attempt(
                     self,
                     persisted_worker,
@@ -162,8 +162,8 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             [("create", scenario.directory, None, None), ("execute", "ses_initial", "Finish the worker task")],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(worker, "status"), "done")
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "collect")
+        self.assertEqual(worker_output_field(worker, "status"), "done")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "collect")
         attempt = assert_single_worker_attempt(self, worker, status="completed", session_id="ses_initial")
         self.assertEqual(attempt.get("id"), "attempt-1")
         self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -302,10 +302,10 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertIn("unsupported route behavior", outcome.error)
         worker = run["workers"]["worker"]
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertEqual(worker_output_field(worker, "status"), "failed")
         self.assertEqual(worker_field(worker, "failure_category"), "api")
         self.assertEqual(worker_field(worker, "retryable_failures"), ["api"])
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "none")
 
     def test_start_api_setup_failure_is_not_retryable(self):
         def detect_capabilities(client):
@@ -325,10 +325,10 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(outcome.error, "api failure: capability probe failed")
         worker = run["workers"]["worker"]
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertEqual(worker_output_field(worker, "status"), "failed")
         self.assertEqual(worker_field(worker, "failure_category"), "api")
         self.assertEqual(worker_field(worker, "retryable_failures"), ["api"])
-        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "none")
 
 
 class FailAfterCreatedSessionJournalStore:

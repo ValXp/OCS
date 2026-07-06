@@ -2,7 +2,7 @@ import unittest
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.worker_state import worker_field, worker_has_field
+from opencode_session.worker_state import worker_field, worker_has_field, worker_output_field
 
 try:
     from tests.multi_worker_orchestration_helpers import (
@@ -63,7 +63,7 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
                 self.assertEqual(scenario.client.requests, [])
                 self.assertEqual(run["status"], "failed")
                 for worker_id, status in case["status_assertions"].items():
-                    self.assertEqual(worker_field(run["workers"][worker_id], "status"), status)
+                    self.assertEqual(worker_output_field(run["workers"][worker_id], "status"), status)
                 self.assertEqual(worker_field(run["workers"]["docs"], "failure_category"), "api")
                 assert_blocked_worker(self, run, "review", ["dependency:build"])
                 self.assertIsNone(worker_field(run["workers"]["review"], "failure_category"))
@@ -90,7 +90,7 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
         self.assertEqual(detector_calls, [])
         self.assertEqual(scenario.client.requests, [])
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker_field(run["workers"]["build"], "status"), "failed")
+        self.assertEqual(worker_output_field(run["workers"]["build"], "status"), "failed")
         assert_blocked_worker(self, run, "review", ["dependency:build"])
         assert_blocked_worker(self, run, "deploy", ["dependency:review"])
         assert_blocked_worker(self, run, "docs", ["dependency:missing"])
@@ -124,8 +124,8 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
         self.assertEqual(scenario.client.requests, [])
         self.assertEqual(run["status"], "failed")
         self.assertEqual(run["output_refs"], ["docs:msg_docs_assistant"])
-        self.assertEqual(worker_field(run["workers"]["docs"], "status"), "done")
-        self.assertEqual(worker_field(run["workers"]["build"], "status"), "failed")
+        self.assertEqual(worker_output_field(run["workers"]["docs"], "status"), "done")
+        self.assertEqual(worker_output_field(run["workers"]["build"], "status"), "failed")
         assert_blocked_worker(self, run, "review", ["dependency:build"])
 
     def test_continue_policy_runs_next_independent_ready_worker_serially_after_failure(self):
@@ -159,8 +159,8 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
             ],
         )
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker_field(run["workers"]["alpha"], "status"), "failed")
-        self.assertEqual(worker_field(run["workers"]["beta"], "status"), "done")
+        self.assertEqual(worker_output_field(run["workers"]["alpha"], "status"), "failed")
+        self.assertEqual(worker_output_field(run["workers"]["beta"], "status"), "done")
         self.assertEqual(worker_field(run["workers"]["beta"], "output_refs"), ["assistant:msg_beta_assistant"])
 
     def test_start_does_not_probe_capabilities_when_partially_completed_cycle_blocks_worker(self):
@@ -200,7 +200,7 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
         self.assertEqual(scenario.client.requests, [])
         self.assertEqual(executions, [])
         self.assertEqual(run["status"], "blocked")
-        self.assertEqual(worker_field(run["workers"]["build"], "status"), "done")
+        self.assertEqual(worker_output_field(run["workers"]["build"], "status"), "done")
         assert_blocked_worker(self, run, "review", ["dependency-cycle:build->review->build"])
 
     def test_start_does_not_execute_blocked_worker_after_dependency_succeeds(self):
@@ -243,7 +243,7 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
         self.assertEqual(executions, executions_after_first_start)
         self.assertEqual(run["status"], "blocked")
         self.assertEqual(run["output_refs"], ["build:msg_build_assistant"])
-        self.assertEqual(worker_field(run["workers"]["build"], "status"), "done")
+        self.assertEqual(worker_output_field(run["workers"]["build"], "status"), "done")
         assert_blocked_worker(self, run, "review", ["manual:blocker"])
 
     def test_start_requeued_worker_finishes_without_stale_status_metadata(self):
@@ -293,7 +293,7 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
         self.assertEqual(run["status"], "done")
         self.assertEqual(run["output_refs"], ["build:msg_build_assistant", "review:msg_review_assistant"])
         review = run["workers"]["review"]
-        self.assertEqual(worker_field(review, "status"), "done")
+        self.assertEqual(worker_output_field(review, "status"), "done")
         self.assertEqual(worker_field(review, "blockers"), [])
         self.assertFalse(worker_has_field(review, "error"))
         self.assertIsNone(worker_field(review, "failure_category"))
@@ -301,7 +301,7 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
         self.assertFalse(worker_has_field(review, "failure_retryable"))
         self.assertEqual(worker_field(review, "last_failure_category"), "api")
         self.assertEqual(worker_field(review, "last_failure_reason"), "previous failure")
-        self.assertEqual(worker_field(review, "next_eligible_action"), "collect")
+        self.assertEqual(worker_output_field(review, "next_eligible_action"), "collect")
 
 
 if __name__ == "__main__":

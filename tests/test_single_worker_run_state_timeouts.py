@@ -5,7 +5,7 @@ from opencode_session.multi_worker_orchestration import DependencyOrderedSerialR
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.worker_execution import WorkerExecutionTimeout
-from opencode_session.worker_state import worker_field, worker_has_field
+from opencode_session.worker_state import worker_field, worker_has_field, worker_output_field
 
 try:
     from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
@@ -53,14 +53,14 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
         self.assertEqual(outcome.error, "worker timed out after 1s")
         self.assertEqual(run["status"], "timeout")
         timeout_worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(timeout_worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(timeout_worker, "status"), "timeout")
         self.assertEqual(worker_field(timeout_worker, "timeout_seconds"), 1)
         self.assertEqual(worker_field(timeout_worker, "timeout_policy"), "timeout")
         self.assertEqual(worker_field(timeout_worker, "timeout_started_at"), "2026-07-03T00:00:00Z")
         self.assertEqual(worker_field(timeout_worker, "timed_out_at"), "2026-07-03T00:00:00Z")
         self.assertEqual(worker_field(timeout_worker, "failure_category"), "timeout")
         self.assertEqual(worker_field(timeout_worker, "failure_reason"), "worker timed out after 1s")
-        self.assertEqual(worker_field(timeout_worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_output_field(timeout_worker, "next_eligible_action"), "none")
         self.assertFalse(worker_has_field(timeout_worker, "result"))
 
     def test_start_skips_automatic_timeout_retry_and_marks_manual_retry(self):
@@ -110,12 +110,12 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
             ],
         )
         retry_worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(retry_worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(retry_worker, "status"), "timeout")
         self.assertEqual(worker_field(retry_worker, "session_id"), "ses_initial")
         self.assertEqual(worker_field(retry_worker, "retry_count"), 0)
         self.assertEqual(worker_field(retry_worker, "last_failure_category"), "timeout")
         self.assertEqual(worker_field(retry_worker, "last_failure_reason"), "worker timed out after 0.05s")
-        self.assertEqual(worker_field(retry_worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_output_field(retry_worker, "next_eligible_action"), "retry")
         self.assertTrue(worker_field(retry_worker, "manual_retry_required"))
         self.assertFalse(worker_has_field(retry_worker, "result"))
         self.assertFalse(worker_has_field(retry_worker, "timeout_retry_sessions"))
@@ -168,7 +168,7 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
         self.assertLessEqual(remaining_values[0], 0.01)
         timeout_worker = run["workers"]["worker"]
         self.assertEqual(worker_field(timeout_worker, "session_id"), "ses_initial")
-        self.assertEqual(worker_field(timeout_worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(timeout_worker, "status"), "timeout")
 
     def test_start_non_retry_timeout_keeps_timeout_recording_on_original_session(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -214,11 +214,11 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
         self.assertEqual(run["status"], "timeout")
         timeout_worker = run["workers"]["worker"]
         self.assertEqual(worker_field(timeout_worker, "session_id"), "ses_initial")
-        self.assertEqual(worker_field(timeout_worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(timeout_worker, "status"), "timeout")
         self.assertEqual(worker_field(timeout_worker, "retry_count"), 0)
         self.assertEqual(worker_field(timeout_worker, "failure_category"), "timeout")
         self.assertEqual(worker_field(timeout_worker, "failure_reason"), "worker timed out after 0.05s")
-        self.assertEqual(worker_field(timeout_worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_output_field(timeout_worker, "next_eligible_action"), "none")
         self.assertFalse(worker_has_field(timeout_worker, "timeout_retry_sessions"))
         self.assertFalse(worker_has_field(timeout_worker, "result"))
 

@@ -9,6 +9,7 @@ from opencode_session.worker_state import (
     mark_worker_active,
     normalize_worker,
     worker_field,
+    worker_output_field,
 )
 
 try:
@@ -145,12 +146,12 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertFalse(hasattr(step, "ready_worker_ids"))
         self.assertFalse(hasattr(step, "eligible_worker_ids"))
         self.assertEqual([transition.worker_id for transition in step.dependency_blocked_transitions], ["review"])
-        self.assertEqual(worker_field(workers["review"], "status"), "queued")
+        self.assertEqual(worker_output_field(workers["review"], "status"), "queued")
 
         latest_workers = {"review": normalize_worker(workers["review"].to_public_dict(), "review")}
         apply_worker_transition(latest_workers, step.dependency_blocked_transitions[0])
 
-        self.assertEqual(worker_field(latest_workers["review"], "status"), "blocked")
+        self.assertEqual(worker_output_field(latest_workers["review"], "status"), "blocked")
         self.assertEqual(worker_field(latest_workers["review"], "blockers"), ["dependency:build"])
 
     def test_persist_worker_transitions_rejects_illegal_transition_with_reason(self):
@@ -170,7 +171,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             persisted = scenario.load_run()
 
         self.assertIn("from lifecycle_state 'done_collect'", raised.exception.result.reason)
-        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
+        self.assertEqual(worker_output_field(persisted["workers"]["build"], "status"), "done")
 
     def test_dependency_ordered_serial_step_advances_one_worker_at_a_time_as_dependencies_finish(self):
         workers = _hydrated_workers({
