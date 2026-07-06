@@ -88,6 +88,24 @@ class WorkerTransitionMetadata:
     public_lifecycle_transition: bool = True
 
 
+@dataclass(frozen=True)
+class WorkerTransitionResult:
+    applied: bool
+    worker: object
+    reason: Optional[str] = None
+    stale_snapshot_recovery: bool = False
+
+    @property
+    def skipped(self):
+        return not self.applied
+
+
+class WorkerTransitionError(ValueError):
+    def __init__(self, result):
+        self.result = result
+        super().__init__(result.reason or "worker transition skipped")
+
+
 def _lifecycle_metadata(
     status,
     next_eligible_action,
@@ -987,7 +1005,10 @@ class WorkerRecord(dict):
         return self
 
     def apply_transition(self, transition):
-        merged = _apply_worker_transition_to_record(self, transition)
+        result = _apply_worker_transition_to_record(self, transition)
+        if result.skipped and not result.stale_snapshot_recovery:
+            raise WorkerTransitionError(result)
+        merged = result.worker
         self.clear()
         self.update(merged)
         self._worker_id = self.get("id") or self._worker_id or transition.worker_id

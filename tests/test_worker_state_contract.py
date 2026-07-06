@@ -17,6 +17,7 @@ from opencode_session.worker_state import (
     WORKER_TRANSITION_METADATA,
     WorkerRecord,
     WorkerTransition,
+    WorkerTransitionError,
     WorkerTransitionName,
     apply_worker_transition_to_worker,
     apply_worker_result,
@@ -433,7 +434,9 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["last_failure_reason"], "previous failure")
         self.assertEqual(worker["output_refs"], ["assistant:msg_assistant"])
 
-    def test_worker_transition_reducer_noops_invalid_lifecycle_transitions(self):
+    def test_worker_transition_reducer_reports_invalid_lifecycle_transitions(self):
+        from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
+
         original = normalize_worker(
             {
                 "status": "done",
@@ -465,8 +468,16 @@ class WorkerStateContractTest(unittest.TestCase):
             with self.subTest(transition=transition.name):
                 worker = deepcopy(original)
 
-                apply_worker_transition_to_worker(worker, transition)
+                result = apply_worker_transition_to_record(WorkerRecord.from_worker(worker, "review"), transition)
 
+                self.assertFalse(result.applied)
+                self.assertTrue(result.skipped)
+                self.assertIn(f"illegal worker transition '{transition.name.value}'", result.reason)
+                self.assertIn("from lifecycle_state 'done_collect'", result.reason)
+                with self.assertRaisesRegex(WorkerTransitionError, "illegal worker transition") as raised:
+                    apply_worker_transition_to_worker(worker, transition)
+                self.assertFalse(raised.exception.result.applied)
+                self.assertEqual(raised.exception.result.reason, result.reason)
                 self.assertEqual(worker, original)
 
     def test_worker_transition_reducer_allows_legal_retry_timeout_and_result_transitions(self):
@@ -585,6 +596,8 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["output_refs"], ["assistant:msg_assistant"])
 
     def test_snapshot_replay_noops_illegal_lifecycle_rewind(self):
+        from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
+
         original = normalize_worker(
             {
                 "status": "done",
@@ -606,8 +619,16 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
         worker = deepcopy(original)
+        transition = WorkerTransition.snapshot_applied(stale_snapshot)
 
-        apply_worker_transition_to_worker(worker, WorkerTransition.snapshot_applied(stale_snapshot))
+        result = apply_worker_transition_to_record(WorkerRecord.from_worker(worker, "review"), transition)
+
+        self.assertFalse(result.applied)
+        self.assertTrue(result.skipped)
+        self.assertTrue(result.stale_snapshot_recovery)
+        self.assertIn("stale snapshot ignored", result.reason)
+
+        apply_worker_transition_to_worker(worker, transition)
 
         self.assertEqual(worker, original)
 

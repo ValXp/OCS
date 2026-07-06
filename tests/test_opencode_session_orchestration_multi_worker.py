@@ -12,11 +12,12 @@ from opencode_session.multi_worker_orchestration import (
     plan_dependency_ordered_serial_step,
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
+from opencode_session.run_persistence import persist_worker_transitions
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_state import apply_worker_transition
+from opencode_session.worker_state import WorkerTransitionError, apply_worker_transition, mark_worker_active
 
 try:
     from tests.multi_worker_orchestration_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES
@@ -231,6 +232,25 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
         self.assertEqual(latest_workers["review"]["status"], "blocked")
         self.assertEqual(latest_workers["review"]["blockers"], ["dependency:build"])
+
+    def test_persist_worker_transitions_rejects_illegal_transition_with_reason(self):
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
+            scenario.add_worker("build", prompt="Build", status="done")
+            run = scenario.load_run()
+            transition = mark_worker_active(run["workers"]["build"])
+
+            with self.assertRaisesRegex(WorkerTransitionError, "illegal worker transition 'active'") as raised:
+                persist_worker_transitions(
+                    scenario.store,
+                    run,
+                    [transition],
+                    refresh_run_summary=lambda run: None,
+                    now=lambda: NOW,
+                )
+            persisted = scenario.load_run()
+
+        self.assertIn("from lifecycle_state 'done_collect'", raised.exception.result.reason)
+        self.assertEqual(persisted["workers"]["build"]["status"], "done")
 
     def test_dependency_ordered_serial_step_advances_one_worker_at_a_time_as_dependencies_finish(self):
         workers = {
