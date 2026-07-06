@@ -460,18 +460,16 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 worker = normalize_worker(worker_fields, "review")
                 transition = transition_factory(worker)
                 target_lifecycle = worker_transition_target_lifecycle_state(transition)
-                definition = WORKER_TRANSITION_DEFINITIONS[transition_name]
+                metadata = WORKER_TRANSITION_DEFINITIONS[transition_name]
 
                 self.assertIs(transition.name, transition_name)
-                self.assertIs(definition.metadata, WORKER_TRANSITION_METADATA[transition_name])
-                self.assertIn(worker_lifecycle_state(worker), definition.source_states)
-                self.assertEqual(definition.source_states, worker_lifecycle_source_states(transition_name))
-                self.assertTrue(definition.is_legal(worker, transition))
+                self.assertEqual(metadata, WORKER_TRANSITION_METADATA[transition_name])
+                self.assertIn(worker_lifecycle_state(worker), metadata.source_states)
+                self.assertEqual(metadata.source_states, worker_lifecycle_source_states(transition_name))
                 self.assertTrue(worker_transition_is_legal(worker, transition))
-                self.assertEqual(definition.target_lifecycle_state(transition), target_lifecycle)
-                if definition.target_states:
-                    self.assertIn(target_lifecycle, definition.target_states)
-                    self.assertEqual(definition.target_states, worker_lifecycle_target_states(transition_name))
+                if metadata.target_states:
+                    self.assertIn(target_lifecycle, metadata.target_states)
+                    self.assertEqual(metadata.target_states, worker_lifecycle_target_states(transition_name))
                 else:
                     self.assertIsNone(target_lifecycle)
 
@@ -481,7 +479,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 for field_name, expected_value in expected_fields.items():
                     self.assertEqual(worker_field(worker, field_name), expected_value)
 
-    def test_retry_transition_definition_carries_legality_target_and_behavior(self):
+    def test_retry_transition_metadata_carries_legality_target_and_behavior(self):
         worker = normalize_worker(
             {
                 "status": "failed",
@@ -503,6 +501,17 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         apply_worker_transition_to_worker(worker, transition)
 
         self.assertEqual(worker_lifecycle_state(worker), target_lifecycle)
+
+    def test_worker_transition_reducer_rejects_mismatched_payload_shape(self):
+        worker = normalize_worker({}, "review")
+        transition = WorkerTransition(
+            "review",
+            WorkerTransitionName.ACTIVE,
+            WorkerTransition.failed("review", "provider", "provider failed").payload,
+        )
+
+        with self.assertRaisesRegex(TypeError, "worker transition 'active' has incompatible payload"):
+            apply_worker_transition_to_worker(worker, transition)
 
     def test_snapshot_replay_allows_legal_active_to_done_transition(self):
         worker = normalize_worker({"status": "active", "prompt_ids": ["msg_initial"]}, "review")

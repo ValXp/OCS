@@ -3,14 +3,17 @@ from copy import deepcopy
 
 from opencode_session.worker_attempt_log import _finalize_attempt
 from opencode_session.worker_state import (
-    WORKER_TRANSITION_DEFINITIONS as _WORKER_TRANSITION_DEFINITIONS,
+    WORKER_TRANSITION_METADATA as _WORKER_TRANSITION_METADATA,
     WorkerRecord,
     WorkerTransition,
     WorkerTransitionName,
     WorkerTransitionResult,
     _accepted_abort,
+    apply_worker_transition_payload,
     latest_prompt_ids_are_retry_marker,
     worker_lifecycle_state,
+    worker_transition_is_legal,
+    worker_transition_target_lifecycle_state,
 )
 
 
@@ -22,15 +25,15 @@ class WorkerLifecycleReducer:
     def apply(self, transition):
         if not isinstance(transition.name, WorkerTransitionName):
             raise ValueError(f"unknown worker transition: {transition.name}")
-        definition = _worker_transition_definition(transition.name)
-        if not self._has_accepted_abort() and not definition.is_legal(self.latest_worker, transition):
+        metadata = _worker_transition_metadata(transition.name)
+        if not self._has_accepted_abort() and not worker_transition_is_legal(self.latest_worker, transition):
             return WorkerTransitionResult(
                 applied=False,
                 worker=self._unchanged_worker(transition),
-                reason=_illegal_transition_reason(self.latest_worker, transition, definition),
+                reason=_illegal_transition_reason(self.latest_worker, transition, metadata),
                 stale_snapshot_recovery=_is_stale_snapshot_recovery(transition),
             )
-        worker = definition.apply(self, transition)
+        worker = apply_worker_transition_payload(self, transition)
         _finalize_worker_attempt(worker, transition.attempt_finalization)
         return WorkerTransitionResult(
             applied=True,
@@ -57,35 +60,37 @@ def apply_worker_transition_to_record(record, transition):
     return WorkerLifecycleReducer(record).apply(transition)
 
 
-def _worker_transition_definition(name):
-    definition = _WORKER_TRANSITION_DEFINITIONS.get(name)
-    if definition is None:
+def _worker_transition_metadata(name):
+    if not isinstance(name, WorkerTransitionName):
         raise ValueError(f"unknown worker transition: {name}")
-    return definition
+    metadata = _WORKER_TRANSITION_METADATA.get(name)
+    if metadata is None:
+        raise ValueError(f"unknown worker transition: {name}")
+    return metadata
 
 
-def _illegal_transition_reason(latest_worker, transition, definition):
+def _illegal_transition_reason(latest_worker, transition, metadata):
     source_state = worker_lifecycle_state(latest_worker)
     transition_name = transition.name.value
-    target_state = _transition_target_lifecycle_state_for_reason(transition, definition)
+    target_state = _transition_target_lifecycle_state_for_reason(transition)
     target = f" to lifecycle_state '{target_state}'" if target_state is not None else ""
     if _is_stale_snapshot_recovery(transition):
         return (
             f"stale snapshot ignored for worker '{transition.worker_id}': transition "
             f"'{transition_name}' cannot move from lifecycle_state '{source_state}'{target}"
         )
-    allowed = ", ".join(sorted(definition.source_states)) or "none"
+    allowed = ", ".join(sorted(metadata.source_states)) or "none"
     return (
         f"illegal worker transition '{transition_name}' for worker '{transition.worker_id}' "
         f"from lifecycle_state '{source_state}'{target}; allowed source states: {allowed}"
     )
 
 
-def _transition_target_lifecycle_state_for_reason(transition, definition):
+def _transition_target_lifecycle_state_for_reason(transition):
     if _is_stale_snapshot_recovery(transition):
         return _snapshot_target_lifecycle_state(transition)
     try:
-        return definition.target_lifecycle_state(transition)
+        return worker_transition_target_lifecycle_state(transition)
     except (KeyError, TypeError, AttributeError):
         return None
 
