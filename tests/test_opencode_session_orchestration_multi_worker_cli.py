@@ -4,10 +4,20 @@ import unittest
 
 try:
     from tests.mocked_cli_harness import FakeOpenCodeServer, format_completed_process, load_json, run_ocs
-    from tests.orchestration_cli_harness import configure_multi_worker_server, payloads_for, request_paths
+    from tests.orchestration_cli_harness import (
+        assert_worker_session_create_payload,
+        configure_multi_worker_server,
+        payloads_for,
+        request_paths,
+    )
 except ModuleNotFoundError:
     from mocked_cli_harness import FakeOpenCodeServer, format_completed_process, load_json, run_ocs
-    from orchestration_cli_harness import configure_multi_worker_server, payloads_for, request_paths
+    from orchestration_cli_harness import (
+        assert_worker_session_create_payload,
+        configure_multi_worker_server,
+        payloads_for,
+        request_paths,
+    )
 
 from opencode_session.run_store import RunStore
 from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_failed
@@ -111,12 +121,23 @@ class DependencyOrderedSerialOrchestrationCliTest(unittest.TestCase):
                 ("POST", "/session/ses_plan/reply"),
             ],
         )
-        self.assertEqual(
-            payloads_for(scenario.requests, "POST", "/api/session"),
-            [
-                {"location": {"directory": scenario.directory}, "agent": "build", "model": "openai/gpt-5.5-mini"},
-                {"location": {"directory": scenario.directory}, "agent": "plan", "model": "openai/gpt-5.5"},
-            ],
+        session_payloads = payloads_for(scenario.requests, "POST", "/api/session")
+        self.assertEqual(len(session_payloads), 2)
+        assert_worker_session_create_payload(
+            self,
+            session_payloads[0],
+            directory=scenario.directory,
+            worker_id="docs",
+            agent="build",
+            model="openai/gpt-5.5-mini",
+        )
+        assert_worker_session_create_payload(
+            self,
+            session_payloads[1],
+            directory=scenario.directory,
+            worker_id="planner",
+            agent="plan",
+            model="openai/gpt-5.5",
         )
         self.assertIn("run=demo status=done", scenario.start.stdout)
         payload = scenario.payload
@@ -222,7 +243,14 @@ class DependencyOrderedSerialOrchestrationCliTest(unittest.TestCase):
                 ("POST", "/session/ses_build/run"),
             ],
         )
-        self.assertEqual(payloads_for(scenario.requests, "POST", "/api/session"), [{"location": {"directory": scenario.directory}}])
+        session_payloads = payloads_for(scenario.requests, "POST", "/api/session")
+        self.assertEqual(len(session_payloads), 1)
+        assert_worker_session_create_payload(
+            self,
+            session_payloads[0],
+            directory=scenario.directory,
+            worker_id="build",
+        )
         self.assertEqual(
             payloads_for(scenario.requests, "POST", "/session/ses_build/run"),
             [{"message": "Run the implementation"}],

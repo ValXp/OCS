@@ -239,14 +239,12 @@ class RemoteMutationJournalTest(unittest.TestCase):
         self.assertNotIn("journal", run)
         self.assertEqual(calls, ["persist", ("intent", "ses_latest"), ("remote", "ses_latest", "msg_1"), "persist"])
 
-    def test_runner_discards_intent_best_effort_after_remote_failure(self):
+    def test_runner_marks_intent_uncertain_after_remote_failure(self):
         run = {"name": "demo"}
         calls = []
 
         def persist_run_mutation(run, mutator):
             calls.append("persist")
-            if len(calls) == 2:
-                raise RuntimeError("forced cleanup failure")
             mutator(run)
             return run
 
@@ -267,7 +265,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
                 call_remote=reject_remote,
             )
 
-        self.assertEqual(calls, ["persist", "persist", "persist"])
+        self.assertEqual(calls, ["persist", "persist"])
         self.assertEqual(
             run["journal"],
             [
@@ -275,10 +273,11 @@ class RemoteMutationJournalTest(unittest.TestCase):
                     "id": "mutation-1",
                     "kind": "prompt",
                     "session_id": "ses_1",
-                    "cleanup_failure": {
-                        "operation": "discard_prompt",
+                    "status": "uncertain",
+                    "uncertain_failure": {
+                        "operation": "call_prompt",
                         "error_type": "RuntimeError",
-                        "message": "forced cleanup failure",
+                        "message": "remote rejected",
                         "recorded_at": "2026-07-05T00:00:00Z",
                     },
                 }

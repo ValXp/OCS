@@ -188,6 +188,19 @@ def payloads_for(requests, method, path):
     ]
 
 
+def assert_worker_session_create_payload(test_case, payload, *, directory, worker_id, run_name="demo", **expected_fields):
+    expected_payload = {"location": {"directory": directory}, **expected_fields}
+    payload_without_metadata = {key: value for key, value in payload.items() if key != "metadata"}
+    test_case.assertEqual(payload_without_metadata, expected_payload)
+    metadata = payload.get("metadata")
+    test_case.assertIsInstance(metadata, dict)
+    test_case.assertEqual(metadata.get("ocs.remote_mutation_kind"), "worker_session_create")
+    test_case.assertTrue(metadata.get("ocs.remote_mutation_id", "").startswith("worker_session_create_"))
+    test_case.assertEqual(metadata.get("ocs.worker_id"), worker_id)
+    test_case.assertEqual(metadata.get("ocs.cleanup_requested"), "false")
+    test_case.assertEqual(metadata.get("ocs.run_name"), run_name)
+
+
 def payload_directory(payload):
     payload = payload or {}
     location = payload.get("location") if isinstance(payload.get("location"), dict) else {}

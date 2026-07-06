@@ -74,6 +74,14 @@ class RemoteMutationTransaction:
             operation=self.operation.finalize_cleanup_operation,
         )
 
+    def mark_uncertain_best_effort(self, run, error):
+        return self.journal.mark_uncertain_best_effort(
+            run,
+            self.entry_id,
+            error,
+            operation=f"call_{self.operation.kind}",
+        )
+
     def _validated_record(self, record):
         self._validate_record_identity(record)
         return record
@@ -102,8 +110,8 @@ class RemoteMutationRunner:
         intent = holder["intent"]
         try:
             remote_result = call_remote(run, intent)
-        except Exception:
-            self.transaction.discard_intent_best_effort(run)
+        except Exception as remote_error:
+            self.transaction.mark_uncertain_best_effort(run, remote_error)
             raise
 
         application = RemoteMutationApplication()
@@ -219,6 +227,16 @@ class RemoteMutationJournal:
                 entry["cleanup_failure"] = dict(cleanup_failure)
                 return
 
+    def mark_uncertain(self, run, entry_id, uncertainty):
+        journal = run.get(self.field)
+        if not isinstance(journal, list):
+            return
+        for entry in journal:
+            if isinstance(entry, dict) and entry.get("id") == entry_id:
+                entry["status"] = "uncertain"
+                entry["uncertain_failure"] = dict(uncertainty)
+                return
+
     def pending_entries(self, run, *, kind=None):
         journal = run.get(self.field) if isinstance(run, dict) else None
         if not isinstance(journal, list):
@@ -279,6 +297,21 @@ class PersistedRemoteMutationJournal:
 
     def pending_entries(self, run, *, kind=None):
         return self.journal.pending_entries(run, kind=kind)
+
+    def mark_uncertain_best_effort(self, run, entry_id, remote_error, *, operation):
+        uncertainty = {
+            "operation": operation,
+            "error_type": type(remote_error).__name__,
+            "message": str(remote_error),
+            "recorded_at": self.now(),
+        }
+        try:
+            return self.persist_run_mutation(
+                run,
+                lambda latest_run: self.journal.mark_uncertain(latest_run, entry_id, uncertainty),
+            )
+        except Exception:
+            return run
 
     def _finalize_best_effort(self, run, entry_id, *, operation):
         try:

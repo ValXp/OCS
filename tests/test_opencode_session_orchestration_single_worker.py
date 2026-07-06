@@ -3,10 +3,20 @@ import tempfile
 
 try:
     from tests.mocked_cli_harness import FakeOpenCodeServer, format_completed_process, load_json, run_ocs
-    from tests.orchestration_cli_harness import configure_single_worker_server, payloads_for, request_paths
+    from tests.orchestration_cli_harness import (
+        assert_worker_session_create_payload,
+        configure_single_worker_server,
+        payloads_for,
+        request_paths,
+    )
 except ModuleNotFoundError:
     from mocked_cli_harness import FakeOpenCodeServer, format_completed_process, load_json, run_ocs
-    from orchestration_cli_harness import configure_single_worker_server, payloads_for, request_paths
+    from orchestration_cli_harness import (
+        assert_worker_session_create_payload,
+        configure_single_worker_server,
+        payloads_for,
+        request_paths,
+    )
 
 
 class SingleWorkerOrchestrationCliTest(unittest.TestCase):
@@ -82,7 +92,14 @@ class SingleWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertIn(("GET", "/doc"), paths)
         self.assertLess(paths.index(("POST", "/api/session")), paths.index(("POST", "/session/ses_new/run")))
         self.assertLess(paths.index(("POST", "/session/ses_new/run")), paths.index(("POST", "/session/ses_new/reply")))
-        self.assertEqual(payloads_for(requests, "POST", "/api/session"), [{"location": {"directory": directory}}])
+        session_payloads = payloads_for(requests, "POST", "/api/session")
+        self.assertEqual(len(session_payloads), 1)
+        assert_worker_session_create_payload(
+            self,
+            session_payloads[0],
+            directory=directory,
+            worker_id="worker",
+        )
         self.assertEqual(payloads_for(requests, "POST", "/session/ses_new/run"), [{"message": "Finish the worker task"}])
 
     def test_start_named_run_uses_modern_session_message_when_available(self):
@@ -167,9 +184,15 @@ class SingleWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(worker.returncode, 0, format_completed_process(worker))
         self.assertEqual(start.returncode, 0, format_completed_process(start))
         self.assertEqual(status.returncode, 0, format_completed_process(status))
-        self.assertEqual(
-            payloads_for(requests, "POST", "/api/session"),
-            [{"location": {"directory": directory}, "agent": "build", "model": "openai/gpt-5.5"}],
+        session_payloads = payloads_for(requests, "POST", "/api/session")
+        self.assertEqual(len(session_payloads), 1)
+        assert_worker_session_create_payload(
+            self,
+            session_payloads[0],
+            directory=directory,
+            worker_id="worker",
+            agent="build",
+            model="openai/gpt-5.5",
         )
         payload = load_json(self, status, "status")
         self.assertEqual(payload["workers"]["worker"]["agent"], "build")

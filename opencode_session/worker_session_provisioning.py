@@ -231,6 +231,7 @@ class WorkerSessionProvisioner:
                     agent=agent,
                     model=model,
                     create_session=create_session,
+                    session_metadata=worker_session_creation_metadata(latest_run, intent),
                 )
 
             run, worker, session_outcome, session_intent = self.session_journal.run_creation(
@@ -269,6 +270,7 @@ def ensure_worker_session(
     session_id=None,
     agent=None,
     model=None,
+    session_metadata=None,
     treat_falsey_session_as_missing=False,
 ):
     record = _coerce_worker_record(run, worker)
@@ -276,7 +278,10 @@ def ensure_worker_session(
     created_session_id = None
     missing_session = not worker_session_id if treat_falsey_session_as_missing else worker_session_id is None
     if missing_session:
-        create_response = client.create_session_response(run["directory"], agent=agent, model=model)
+        create_options = {"agent": agent, "model": model}
+        if session_metadata is not None:
+            create_options["metadata"] = session_metadata
+        create_response = client.create_session_response(run["directory"], **create_options)
         worker_session_id = require_session_id(create_response)
         created_session_id = worker_session_id
     record.set_session(worker_session_id, agent=agent, model=model)
@@ -292,6 +297,7 @@ def provision_worker_session(
     agent=None,
     model=None,
     create_session=True,
+    session_metadata=None,
 ):
     if create_session:
         return ensure_worker_session(
@@ -301,6 +307,7 @@ def provision_worker_session(
             session_id=session_id,
             agent=agent,
             model=model,
+            session_metadata=session_metadata,
             treat_falsey_session_as_missing=True,
         )
     record = _coerce_worker_record(run, worker)
@@ -312,6 +319,19 @@ def will_create_worker_session(worker, *, session_id=None, create_session=True):
     if not create_session:
         return False
     return not (session_id or worker.session_id)
+
+
+def worker_session_creation_metadata(run, intent):
+    metadata = {
+        "ocs.remote_mutation_kind": WORKER_SESSION_CREATE_KIND,
+        "ocs.remote_mutation_id": intent.id,
+        "ocs.worker_id": intent.worker_id,
+        "ocs.cleanup_requested": "true" if intent.cleanup_requested else "false",
+    }
+    run_name = run.get("name")
+    if isinstance(run_name, str) and run_name:
+        metadata["ocs.run_name"] = run_name
+    return metadata
 
 
 def _latest_worker(run, fallback_worker):

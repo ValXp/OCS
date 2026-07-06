@@ -58,11 +58,13 @@ class FakeResponse:
 class FakeClient:
     def __init__(self, session_ids, *, delete_failures=None):
         self.requests = []
+        self.create_session_metadata = []
         self.session_ids = list(session_ids)
         self.delete_failures = dict(delete_failures or {})
 
-    def create_session_response(self, directory, *, agent=None, model=None):
+    def create_session_response(self, directory, *, agent=None, model=None, metadata=None):
         self.requests.append(("create", directory, agent, model))
+        self.create_session_metadata.append(metadata)
         return FakeResponse({"id": self.session_ids.pop(0), "directory": directory})
 
     def delete_session_response(self, session_id):
@@ -277,7 +279,7 @@ class WorkerExecutionTest(unittest.TestCase):
             },
         )
 
-    def test_worker_session_provisioner_discards_creation_intent_when_remote_create_fails(self):
+    def test_worker_session_provisioner_marks_creation_intent_uncertain_when_remote_create_fails(self):
         run = {
             "name": "demo",
             "directory": "/workspace",
@@ -288,14 +290,13 @@ class WorkerExecutionTest(unittest.TestCase):
 
         def persist_run_mutation(run, mutator):
             calls.append("persist")
-            if len(calls) == 2:
-                raise RuntimeError("forced cleanup failure")
             mutator(run)
             return run
 
         class RejectingCreateClient(FakeClient):
-            def create_session_response(self, directory, *, agent=None, model=None):
+            def create_session_response(self, directory, *, agent=None, model=None, metadata=None):
                 self.requests.append(("create", directory, agent, model))
+                self.create_session_metadata.append(metadata)
                 raise RuntimeError("remote create rejected")
 
         journal = WorkerSessionCreationJournal(
@@ -316,20 +317,32 @@ class WorkerExecutionTest(unittest.TestCase):
                 cleanup_requested=True,
             )
 
-        self.assertEqual(calls, ["persist", "persist", "persist"])
+        self.assertEqual(calls, ["persist", "persist"])
         self.assertEqual(client.requests, [("create", "/workspace", "build", "openai/gpt-5.5")])
+        self.assertEqual(
+            client.create_session_metadata,
+            [
+                {
+                    "ocs.remote_mutation_kind": "worker_session_create",
+                    "ocs.remote_mutation_id": "worker-session-intent-1",
+                    "ocs.worker_id": "worker",
+                    "ocs.cleanup_requested": "true",
+                    "ocs.run_name": "demo",
+                }
+            ],
+        )
         self.assertIsNone(worker_field(run["workers"]["worker"], "session_id"))
         entry = run[WORKER_SESSION_JOURNAL_FIELD][0]
         self.assertEqual(entry["id"], "worker-session-intent-1")
         self.assertEqual(entry["kind"], "worker_session_create")
-        self.assertEqual(entry["status"], "intent")
+        self.assertEqual(entry["status"], "uncertain")
         self.assertTrue(entry["cleanup_requested"])
         self.assertEqual(
-            entry["cleanup_failure"],
+            entry["uncertain_failure"],
             {
-                "operation": "discard_worker_session_create",
+                "operation": "call_worker_session_create",
                 "error_type": "RuntimeError",
-                "message": "forced cleanup failure",
+                "message": "remote create rejected",
                 "recorded_at": "2026-07-05T00:00:00Z",
             },
         )
@@ -366,6 +379,18 @@ class WorkerExecutionTest(unittest.TestCase):
         )
 
         self.assertEqual(client.requests, [("create", "/workspace", "build", "openai/gpt-5.5")])
+        self.assertEqual(
+            client.create_session_metadata,
+            [
+                {
+                    "ocs.remote_mutation_kind": "worker_session_create",
+                    "ocs.remote_mutation_id": "worker-session-intent-1",
+                    "ocs.worker_id": "worker",
+                    "ocs.cleanup_requested": "true",
+                    "ocs.run_name": "demo",
+                }
+            ],
+        )
         self.assertEqual(provisioning.outcome.session_id, "ses_new")
         self.assertEqual(provisioning.outcome.created_session_id, "ses_new")
         self.assertEqual(journals[0][0]["status"], "intent")

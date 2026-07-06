@@ -304,12 +304,13 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             test_case = self
 
             class InspectingCreateClient(FakeClient):
-                def create_session_response(self, directory, *, agent=None, model=None):
+                def create_session_response(self, directory, *, agent=None, model=None, metadata=None):
                     persisted_run = scenario.store.load_run(RUN_NAME)
                     journal = persisted_run[WORKER_SESSION_JOURNAL_FIELD]
                     test_case.assertEqual(len(journal), 1)
                     observed_intent["entry"] = deepcopy(journal[0])
-                    return super().create_session_response(directory, agent=agent, model=model)
+                    observed_intent["metadata"] = metadata
+                    return super().create_session_response(directory, agent=agent, model=model, metadata=metadata)
 
             scenario.client = InspectingCreateClient(["ses_initial"])
 
@@ -337,6 +338,16 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(entry["model"], "openai/gpt-5.5")
         self.assertFalse(entry["cleanup_requested"])
         self.assertNotIn("session_id", entry)
+        self.assertEqual(
+            observed_intent["metadata"],
+            {
+                "ocs.remote_mutation_kind": "worker_session_create",
+                "ocs.remote_mutation_id": entry["id"],
+                "ocs.worker_id": "worker",
+                "ocs.cleanup_requested": "false",
+                "ocs.run_name": RUN_NAME,
+            },
+        )
         self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
 
     def test_start_persistence_failure_after_session_creation_leaves_cleanup_metadata(self):

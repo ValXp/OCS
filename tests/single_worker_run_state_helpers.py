@@ -72,7 +72,7 @@ class FakeClient:
         self.requests = []
         self.session_ids = list(session_ids or ["ses_new"])
 
-    def create_session_response(self, directory, *, agent=None, model=None):
+    def create_session_response(self, directory, *, agent=None, model=None, metadata=None):
         self.requests.append(("create", directory, agent, model))
         return FakeResponse({"id": self.session_ids.pop(0), "directory": directory})
 
