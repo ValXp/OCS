@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from enum import Enum
 from typing import Callable, Optional, Type, Union
 
@@ -697,6 +697,19 @@ WORKER_SNAPSHOT_STATE_FIELDS = (
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
 PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("status", "next_eligible_action"))
+WORKER_RECORD_OPTIONAL_FIELD_NAMES = (
+    "name",
+    "title",
+    "prompt",
+    "error",
+    "failure_retryable",
+    "manual_retry_required",
+    "cleanup",
+    "abort",
+    "attempts",
+    "result",
+)
+WORKER_RECORD_CANONICAL_FIELD_NAMES = frozenset((*WORKER_REQUIRED_FIELD_NAMES, *WORKER_RECORD_OPTIONAL_FIELD_NAMES))
 
 
 def status_priority(status):
@@ -1537,14 +1550,52 @@ def is_dependency_blockable_worker(worker):
     return WorkerSchedulingState.from_worker(worker).can_block_for_dependency()
 
 
+@dataclass(init=False)
 class WorkerRecord:
     """Hydrated worker domain object with explicit serialization boundaries."""
+
+    id: Optional[str] = None
+    name: Optional[str] = None
+    title: Optional[str] = None
+    role: Optional[str] = None
+    session_id: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
+    prompt: Optional[str] = None
+    lifecycle_state: str = WORKER_LIFECYCLE_QUEUED
+    dependencies: list = dataclass_field(default_factory=list)
+    prompt_ids: list = dataclass_field(default_factory=list)
+    retry_count: int = 0
+    retry_limit: int = 0
+    retryable_failures: list = dataclass_field(default_factory=list)
+    timeout_seconds: Optional[float] = None
+    timeout_policy: str = WORKER_STATUS_TIMEOUT
+    timeout_started_at: object = None
+    timed_out_at: object = None
+    failure_category: Optional[str] = None
+    failure_reason: Optional[str] = None
+    last_failure_category: Optional[str] = None
+    last_failure_reason: Optional[str] = None
+    blockers: list = dataclass_field(default_factory=list)
+    output_refs: list = dataclass_field(default_factory=list)
+    error: Optional[str] = None
+    failure_retryable: Optional[bool] = None
+    manual_retry_required: Optional[bool] = None
+    cleanup: Optional[dict] = None
+    abort: Optional[dict] = None
+    attempts: list = dataclass_field(default_factory=list)
+    result: Optional[dict] = None
+    extras: dict = dataclass_field(default_factory=dict)
+    _present_optional_fields: set = dataclass_field(default_factory=set, repr=False)
 
     __iter__ = None
 
     def __init__(self, worker_id, fields=None):
-        self._fields = deepcopy(dict(fields or {}))
-        self._worker_id = self._fields.get("id") or worker_id
+        self._reset_fields(worker_id)
+        if fields is not None:
+            self.merge_fields(fields)
+        if not self.id:
+            self.id = worker_id
 
     def __repr__(self):
         return f"{type(self).__name__}({self.worker_id!r}, {self.to_snapshot()!r})"
@@ -1554,44 +1605,99 @@ class WorkerRecord:
             return self.to_snapshot() == other.to_snapshot()
         return NotImplemented
 
+    def _reset_fields(self, worker_id):
+        defaults = self.default_snapshot_fields(worker_id)
+        self.extras = {}
+        self._present_optional_fields = set()
+        for field_name in WORKER_REQUIRED_FIELD_NAMES:
+            setattr(self, field_name, deepcopy(defaults[field_name]))
+        for field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
+            setattr(self, field_name, None)
+
     def _raw_field(self, field_name: str, default: object = None) -> object:
-        return self._fields.get(field_name, default)
+        if field_name in WORKER_REQUIRED_FIELD_NAMES:
+            return getattr(self, field_name)
+        if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
+            if field_name not in self._present_optional_fields:
+                return default
+            return getattr(self, field_name)
+        return self.extras.get(field_name, default)
 
     def _list_field(self, field_name: str) -> list:
         value = self._raw_field(field_name)
         return value if isinstance(value, list) else []
 
-    def field(self, field_name: str, default: object = None) -> object:
+    def _coerced_int_field(self, value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _canonical_field_value(self, field_name, value):
+        value = deepcopy(value)
         if field_name == "id":
-            return self.worker_id
+            return value or self.worker_id
         if field_name == "lifecycle_state":
-            return self.lifecycle_state
+            return value if value in WORKER_LIFECYCLE_STATES else WORKER_LIFECYCLE_QUEUED
+        if field_name in ("retry_count", "retry_limit"):
+            return self._coerced_int_field(value)
+        if field_name in WORKER_LIST_FIELDS or field_name in WORKER_OPTIONAL_LIST_FIELDS:
+            return value if isinstance(value, list) else []
+        if field_name == "timeout_policy":
+            return value or WORKER_STATUS_TIMEOUT
+        return value
+
+    def _set_canonical_field(self, field_name, value):
+        setattr(self, field_name, self._canonical_field_value(field_name, value))
+        if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
+            self._present_optional_fields.add(field_name)
+
+    def _set_field_value(self, field_name, value):
+        if field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
+            return
+        if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES:
+            self._set_canonical_field(field_name, value)
+            return
+        self.extras[field_name] = deepcopy(value)
+
+    def field(self, field_name: str, default: object = None) -> object:
         return self._raw_field(field_name, default)
 
     def has_field(self, field_name: str) -> bool:
-        return field_name in self._fields or field_name in {"id", "lifecycle_state"}
+        if field_name in WORKER_REQUIRED_FIELD_NAMES:
+            return True
+        if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
+            return field_name in self._present_optional_fields
+        return field_name in self.extras
 
     def set_field(self, field_name, value):
-        self._fields[field_name] = deepcopy(value)
-        if field_name == "id":
-            self._worker_id = self._fields.get("id") or self._worker_id
+        self._set_field_value(field_name, value)
         return self
 
     def remove_field(self, field_name):
-        self._fields.pop(field_name, None)
+        if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
+            setattr(self, field_name, None)
+            self._present_optional_fields.discard(field_name)
+        elif field_name in WORKER_REQUIRED_FIELD_NAMES:
+            default_value = self.default_snapshot_fields(self.worker_id)[field_name]
+            self._set_canonical_field(field_name, default_value)
+        else:
+            self.extras.pop(field_name, None)
         return self
 
     def merge_fields(self, fields=None, **kwargs):
         if fields is not None:
-            self._fields.update(deepcopy(_worker_fields(fields)))
+            for field_name, value in _worker_fields(fields).items():
+                self._set_field_value(field_name, value)
         if kwargs:
-            self._fields.update(deepcopy(kwargs))
-        self._worker_id = self._fields.get("id") or self._worker_id
+            for field_name, value in kwargs.items():
+                self._set_field_value(field_name, value)
         return self
 
     def replace_fields(self, fields):
-        self._fields = deepcopy(_worker_fields(fields))
-        self._worker_id = self._fields.get("id") or self._worker_id
+        worker_id = self.worker_id
+        self._reset_fields(worker_id)
+        self.merge_fields(fields)
         return self
 
     @classmethod
@@ -1637,86 +1743,7 @@ class WorkerRecord:
 
     @property
     def worker_id(self) -> str:
-        return self._fields.get("id") or self._worker_id
-
-    @property
-    def lifecycle_state(self) -> str:
-        lifecycle_state = self._raw_field("lifecycle_state")
-        if lifecycle_state in WORKER_LIFECYCLE_STATES:
-            return lifecycle_state
-        return WORKER_LIFECYCLE_QUEUED
-
-    @property
-    def role(self) -> object:
-        return self._raw_field("role")
-
-    @property
-    def session_id(self) -> object:
-        return self._raw_field("session_id")
-
-    @property
-    def agent(self) -> object:
-        return self._raw_field("agent")
-
-    @property
-    def model(self) -> object:
-        return self._raw_field("model")
-
-    @property
-    def prompt(self) -> object:
-        return self._raw_field("prompt")
-
-    @property
-    def prompt_ids(self) -> list:
-        return self._list_field("prompt_ids")
-
-    @property
-    def retry_count(self) -> int:
-        return int(self._raw_field("retry_count") or 0)
-
-    @property
-    def retry_limit(self) -> int:
-        return int(self._raw_field("retry_limit") or 0)
-
-    @property
-    def retryable_failures(self) -> list:
-        return self._list_field("retryable_failures")
-
-    @property
-    def failure_retryable(self) -> object:
-        return self._raw_field("failure_retryable")
-
-    @property
-    def failure_category(self) -> object:
-        return self._raw_field("failure_category")
-
-    @property
-    def last_failure_category(self) -> object:
-        return self._raw_field("last_failure_category")
-
-    @property
-    def timeout_seconds(self) -> object:
-        return self._raw_field("timeout_seconds")
-
-    @property
-    def timeout_policy(self) -> object:
-        return self._raw_field("timeout_policy") or WORKER_STATUS_TIMEOUT
-
-    @property
-    def timeout_started_at(self) -> object:
-        return self._raw_field("timeout_started_at")
-
-    @property
-    def output_refs(self) -> list:
-        return self._list_field("output_refs")
-
-    @property
-    def cleanup(self) -> object:
-        return self._raw_field("cleanup")
-
-    @property
-    def abort(self) -> object:
-        return self._raw_field("abort")
+        return self.id
 
     @property
     def has_prompt(self) -> bool:
@@ -1751,12 +1778,14 @@ class WorkerRecord:
 
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
-        fields = deepcopy(self._fields)
-        fields["id"] = fields.get("id") or self.worker_id
-        fields["lifecycle_state"] = self.lifecycle_state
+        for field_name in WORKER_REQUIRED_FIELD_NAMES:
+            normalized[field_name] = deepcopy(getattr(self, field_name))
+        for field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
+            if field_name in self._present_optional_fields:
+                normalized[field_name] = deepcopy(getattr(self, field_name))
+        normalized.update(deepcopy(self.extras))
         for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
-            fields.pop(public_field_name, None)
-        normalized.update(fields)
+            normalized.pop(public_field_name, None)
         normalized["id"] = normalized.get("id") or self.worker_id
         for key in WORKER_LIST_FIELDS:
             value = normalized.get(key)
@@ -1780,18 +1809,18 @@ class WorkerRecord:
         return type(self).from_worker(require_internal_worker(normalized), self.worker_id)
 
     def set_session(self, session_id, *, agent=None, model=None):
-        self.set_field("session_id", session_id)
+        self._set_canonical_field("session_id", session_id)
         if agent is not None:
-            self.set_field("agent", agent)
+            self._set_canonical_field("agent", agent)
         if model is not None:
-            self.set_field("model", model)
+            self._set_canonical_field("model", model)
         return self
 
     def remember_prompt_id(self, prompt_id):
         prompt_ids = list(self.prompt_ids)
         if prompt_id not in prompt_ids:
             prompt_ids.append(prompt_id)
-        self.set_field("prompt_ids", prompt_ids)
+        self._set_canonical_field("prompt_ids", prompt_ids)
         return self
 
     def apply_transition(self, transition):
@@ -1800,14 +1829,16 @@ class WorkerRecord:
             raise WorkerTransitionError(result)
         merged = result.worker
         self.replace_fields(merged)
-        self._worker_id = self.worker_id or self._worker_id or transition.worker_id
+        if not self.id:
+            self.id = transition.worker_id
         return self
 
     def ensure_cleanup(self):
         cleanup = self.cleanup
         if not isinstance(cleanup, dict):
             cleanup = {"requested": True, "deleted": False}
-            self.set_field("cleanup", cleanup)
+            self.cleanup = cleanup
+            self._present_optional_fields.add("cleanup")
             cleanup = self.cleanup
         return cleanup
 
@@ -2091,8 +2122,8 @@ def ensure_worker(run, worker_id, *, role):
     workers = run.setdefault("workers", {})
     worker = normalize_worker(workers.get(worker_id), worker_id)
     if not worker.role:
-        worker.set_field("role", role)
-    worker.set_field("id", worker_id)
+        worker.role = deepcopy(role)
+    worker.id = worker_id
     workers[worker_id] = worker
     return worker
 

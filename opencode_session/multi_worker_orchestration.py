@@ -35,7 +35,6 @@ from opencode_session.worker_state import (
     is_executable_worker,
     is_worker_record,
     refresh_run_summary as _refresh_worker_run_summary,
-    worker_field,
     worker_record_for_mutation,
     worker_prompt as _worker_prompt,
     workers_in_dependency_order as _workers_in_dependency_order,
@@ -138,7 +137,7 @@ class DisposableSessionTracker:
     def remember_worker_outcome(self, run, fallback_worker, outcome):
         if not self.enabled:
             return
-        current_worker = (outcome.run or run).get("workers", {}).get(worker_field(fallback_worker, "id"), fallback_worker)
+        current_worker = (outcome.run or run).get("workers", {}).get(fallback_worker.worker_id, fallback_worker)
         remember_created_worker_sessions(
             self.created_session_ids_by_worker,
             current_worker,
@@ -181,7 +180,7 @@ class SelectedSerialWorkerExecutor:
             return SerialWorkerExecutionOutcome(run)
         outcome = self._execute_single_worker(client, run, worker, capabilities, session_tracker)
         run = outcome.run or run
-        current_worker = run.get("workers", {}).get(worker_field(worker, "id"), worker)
+        current_worker = run.get("workers", {}).get(worker.worker_id, worker)
         session_tracker.remember_worker_outcome(run, current_worker, outcome)
         if outcome.error is not None:
             first_error_outcome = outcome
@@ -196,8 +195,8 @@ class SelectedSerialWorkerExecutor:
             worker,
             _worker_prompt(worker),
             capabilities,
-            agent=worker_field(worker, "agent"),
-            model=worker_field(worker, "model"),
+            agent=worker.agent,
+            model=worker.model,
             cleanup_requested=getattr(session_tracker, "enabled", False),
         )
 
@@ -248,7 +247,7 @@ class DependencyOrderedSerialRunOrchestrationService:
                 worker = _ensure_orchestration_worker(latest_run, request.worker_id, role=request.role)
                 worker_record = worker_record_for_mutation(worker, request.worker_id)
                 worker_record.set_session(
-                    request.session_id if request.session_id is not None else worker_record.field("session_id"),
+                    request.session_id if request.session_id is not None else worker_record.session_id,
                     agent=request.agent,
                     model=request.model,
                 )
@@ -410,7 +409,7 @@ def _pending_prompted_worker_ids(workers):
 
 
 def _dependency_blocked_transition(worker, blockers):
-    return WorkerTransition.dependency_blocked(worker_field(worker, "id"), blockers)
+    return WorkerTransition.dependency_blocked(worker.worker_id, blockers)
 
 
 def _normalize_execution_policy(policy):

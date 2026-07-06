@@ -6,7 +6,6 @@ from opencode_session.worker_state import (
     WorkerTransition,
     WorkerRecord,
     apply_worker_transition,
-    worker_field,
 )
 
 
@@ -38,7 +37,7 @@ def persist_worker_snapshot_updates(store, run, workers, *, refresh_run_summary,
 
 def _snapshot_update_transition(worker):
     if isinstance(worker, WorkerRecord):
-        worker_id = worker_field(worker, "id")
+        worker_id = worker.worker_id
     elif isinstance(worker, Mapping):
         worker_id = worker.get("id")
     else:

@@ -1,6 +1,7 @@
 import ast
 import inspect
 from collections.abc import Mapping, MutableMapping
+from dataclasses import fields, is_dataclass
 import unittest
 
 from opencode_session.worker_storage_adapter import (
@@ -514,6 +515,82 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker_output_field(record, "status"), "queued")
         self.assertNotIn("status", snapshot)
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
+
+    def test_worker_record_canonical_fields_are_explicit_dataclass_fields(self):
+        record = normalize_worker(
+            {
+                "id": "review",
+                "role": "reviewer",
+                "prompt": "Review the change",
+                "lifecycle_state": "active_wait",
+                "custom_persisted": {"kept": True},
+                "status": "done",
+                "next_eligible_action": "collect",
+            },
+            "review",
+        )
+
+        dataclass_field_names = {field.name for field in fields(WorkerRecord)}
+
+        self.assertTrue(is_dataclass(record))
+        self.assertNotIn("_fields", record.__dict__)
+        for field_name in (
+            "id",
+            "role",
+            "session_id",
+            "agent",
+            "model",
+            "prompt",
+            "lifecycle_state",
+            "dependencies",
+            "prompt_ids",
+            "retry_count",
+            "retry_limit",
+            "retryable_failures",
+            "timeout_seconds",
+            "timeout_policy",
+            "timeout_started_at",
+            "timed_out_at",
+            "failure_category",
+            "failure_reason",
+            "last_failure_category",
+            "last_failure_reason",
+            "blockers",
+            "output_refs",
+            "result",
+            "cleanup",
+            "abort",
+            "extras",
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertIn(field_name, dataclass_field_names)
+
+        self.assertEqual(record.worker_id, "review")
+        self.assertEqual(record.role, "reviewer")
+        self.assertEqual(record.prompt, "Review the change")
+        self.assertEqual(record.lifecycle_state, "active_wait")
+        self.assertEqual(record.extras, {"custom_persisted": {"kept": True}})
+        self.assertIsNone(record.field("status"))
+        self.assertIsNone(record.field("next_eligible_action"))
+
+    def test_worker_record_unknown_persisted_fields_round_trip_through_extras(self):
+        record = normalize_worker(
+            {
+                "id": "review",
+                "role": "reviewer",
+                "unknown_plugin_state": {"attempt": 2},
+            },
+            "review",
+        )
+
+        snapshot = record.to_snapshot()
+        round_tripped = deserialize_worker_record(snapshot, "review")
+
+        self.assertEqual(record.extras, {"unknown_plugin_state": {"attempt": 2}})
+        self.assertEqual(snapshot["unknown_plugin_state"], {"attempt": 2})
+        self.assertEqual(round_tripped.extras, {"unknown_plugin_state": {"attempt": 2}})
+        self.assertEqual(round_tripped.field("unknown_plugin_state"), {"attempt": 2})
+        self.assertNotIn("unknown_plugin_state", WorkerRecord.default_snapshot_fields("review"))
 
     def test_worker_record_mutation_updates_hydrated_object_without_sync(self):
         worker = WorkerRecord.default_fields("review")

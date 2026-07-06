@@ -20,7 +20,6 @@ from opencode_session.worker_session_provisioning import WorkerSessionCreationJo
 from opencode_session.worker_state import (
     WorkerTransition,
     is_worker_record,
-    worker_field,
     worker_record_for_mutation,
 )
 
@@ -167,7 +166,7 @@ def remember_created_worker_sessions(created_session_ids_by_worker, worker, sess
     if not session_ids:
         return
     worker.ensure_cleanup()
-    remembered_session_ids = created_session_ids_by_worker.setdefault(worker_field(worker, "id"), [])
+    remembered_session_ids = created_session_ids_by_worker.setdefault(worker.worker_id, [])
     for session_id in session_ids:
         if session_id not in remembered_session_ids:
             remembered_session_ids.append(session_id)

@@ -19,7 +19,6 @@ from opencode_session.worker_state import (
     WorkerTransition,
     apply_worker_transition_to_worker,
     mark_worker_active,
-    worker_field,
 )
 
 
@@ -151,7 +150,7 @@ class WorkerExecutionExecutor:
             created_session_ids=created_session_ids_for_attempt,
         )
         persistence.apply_worker_transition(
-            WorkerTransition.attempt_started(worker_field(persistence.worker, "id"), attempt_record),
+            WorkerTransition.attempt_started(persistence.worker.worker_id, attempt_record),
         )
         attempt = execute_single_worker_attempt(
             client,

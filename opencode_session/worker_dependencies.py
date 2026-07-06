@@ -8,7 +8,6 @@ from opencode_session.worker_state import (
     is_worker_record,
     public_worker_state,
     worker_lifecycle_state,
-    worker_field,
     worker_has_prompt,
 )
 
@@ -207,7 +206,9 @@ def _worker_has_prompt(worker):
 
 
 def _worker_dependencies(worker):
-    dependencies = worker_field(worker, "dependencies", [])
+    if not is_worker_record(worker):
+        return []
+    dependencies = worker.dependencies
     return dependencies if isinstance(dependencies, list) else []
 
 
