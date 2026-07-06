@@ -15,7 +15,7 @@ from opencode_session.run_start_core import RunStartCore, remember_created_worke
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import DomainRecord
-from opencode_session.worker_execution import RETRY_SCHEDULED
+from opencode_session.worker_execution import RETRY_SCHEDULED, WorkerExecutionOutcome
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_lifecycle import WorkerTransition
 from opencode_session.worker_scheduling import is_executable_worker
@@ -110,6 +110,90 @@ class DurableDependencyScheduler:
         return run, tick
 
 
+@dataclass
+class WorkerWaveExecutionOutcome:
+    run: DomainRecord
+    first_error_outcome: Optional[WorkerExecutionOutcome] = None
+    fail_fast_outcome: Optional[WorkerExecutionOutcome] = None
+
+
+class DisposableSessionTracker:
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+        self.created_session_ids_by_worker = {}
+
+    def remember_worker_outcome(self, run, fallback_worker, outcome):
+        if not self.enabled:
+            return
+        current_worker = (outcome.run or run).get("workers", {}).get(fallback_worker.get("id"), fallback_worker)
+        remember_created_worker_sessions(
+            self.created_session_ids_by_worker,
+            current_worker,
+            outcome.created_session_ids,
+        )
+
+    def cleanup(self, core, client, run):
+        if not self.enabled or client is None or not self.created_session_ids_by_worker:
+            return run, None
+        cleanup_result = core.cleanup_created_workers(client, run, self.created_session_ids_by_worker)
+        if cleanup_result.error is not None:
+            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
+                cleanup_result.run,
+                cleanup_result.exit_code,
+                cleanup_result.error,
+            )
+        return cleanup_result.run, None
+
+
+class ReadyWorkerWaveExecutor:
+    def __init__(self, core, *, persist_summary):
+        self.core = core
+        self.persist_summary = persist_summary
+
+    def execute_wave(
+        self,
+        run,
+        ready_worker_ids,
+        client,
+        capabilities,
+        *,
+        session_tracker,
+        execution_policy,
+    ):
+        first_error_outcome = None
+        attempt_workers = _workers_by_ids(run.get("workers", {}), ready_worker_ids)
+        while attempt_workers:
+            retry_workers = []
+            for worker in attempt_workers:
+                outcome = self._execute_single_worker(client, run, worker, capabilities)
+                run = outcome.run or run
+                current_worker = run.get("workers", {}).get(worker.get("id"), worker)
+                session_tracker.remember_worker_outcome(run, current_worker, outcome)
+                if outcome.kind == RETRY_SCHEDULED:
+                    retry_workers.append(current_worker)
+                    continue
+                if outcome.error is not None:
+                    if first_error_outcome is None:
+                        first_error_outcome = outcome
+                    if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                        return WorkerWaveExecutionOutcome(run, first_error_outcome, outcome)
+            run = self.persist_summary(run)
+            attempt_workers = retry_workers
+        return WorkerWaveExecutionOutcome(run, first_error_outcome)
+
+    def _execute_single_worker(self, client, run, worker, capabilities):
+        return self.core.execute_worker(
+            client,
+            run,
+            worker,
+            _worker_prompt(worker),
+            capabilities,
+            agent=worker.get("agent"),
+            model=worker.get("model"),
+            stop_after_retry=True,
+        )
+
+
 class DependencyOrderedSerialRunOrchestrationService:
     """Run prompted workers one at a time after their dependencies are satisfied."""
 
@@ -136,6 +220,7 @@ class DependencyOrderedSerialRunOrchestrationService:
             executor=self.executor,
             now=self.now,
         )
+        self.wave_executor = ReadyWorkerWaveExecutor(self.core, persist_summary=self._persist_summary)
 
     def start(self, request):
         run = self.store.load_run(request.name)
@@ -167,7 +252,7 @@ class DependencyOrderedSerialRunOrchestrationService:
             return early_outcome
 
         client = None
-        created_session_ids_by_worker = {}
+        session_tracker = DisposableSessionTracker(cleanup)
         first_error_outcome = None
 
         try:
@@ -177,151 +262,56 @@ class DependencyOrderedSerialRunOrchestrationService:
 
             client = probe_outcome.client
             run = self._activate_run(run)
-            run, first_error_outcome, fail_fast_outcome = self._execute_scheduled_workers(
+            execution_outcome = self._execute_ready_waves(
                 run,
                 schedule_tick,
                 client,
                 probe_outcome.capabilities,
-                created_session_ids_by_worker,
-                cleanup=cleanup,
+                session_tracker,
                 execution_policy=execution_policy,
             )
-            if fail_fast_outcome is not None:
-                run, cleanup_error = self._cleanup_after_execution(
-                    run,
-                    client,
-                    created_session_ids_by_worker,
-                    cleanup=cleanup,
-                )
-                return cleanup_error or self._execution_outcome(run, fail_fast_outcome)
+            run = execution_outcome.run
+            first_error_outcome = execution_outcome.first_error_outcome
+            if execution_outcome.fail_fast_outcome is not None:
+                run, cleanup_error = session_tracker.cleanup(self.core, client, run)
+                return cleanup_error or self._execution_outcome(run, execution_outcome.fail_fast_outcome)
         except OpenCodeApiError as error:
             run = self._mark_prompted_workers_failed(run, str(error))
-            run, cleanup_error = self._cleanup_after_execution(
-                run,
-                client,
-                created_session_ids_by_worker,
-                cleanup=cleanup,
-            )
+            run, cleanup_error = session_tracker.cleanup(self.core, client, run)
             if cleanup_error:
                 return cleanup_error
             return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
 
-        run, cleanup_error = self._cleanup_after_execution(
-            run,
-            client,
-            created_session_ids_by_worker,
-            cleanup=cleanup,
-        )
+        run, cleanup_error = session_tracker.cleanup(self.core, client, run)
         return cleanup_error or self._execution_outcome(run, first_error_outcome)
 
-    def _execute_scheduled_workers(
+    def _execute_ready_waves(
         self,
         run,
         schedule_tick,
         client,
         capabilities,
-        created_session_ids_by_worker,
+        session_tracker,
         *,
-        cleanup,
         execution_policy,
     ):
         first_error_outcome = None
         while schedule_tick.ready_worker_ids:
-            ready_workers = _workers_by_ids(run.get("workers", {}), schedule_tick.ready_worker_ids)
-            run, tick_error_outcome, fail_fast_outcome = self._execute_ready_workers_serially(
-                client,
+            wave_outcome = self.wave_executor.execute_wave(
                 run,
-                ready_workers,
+                schedule_tick.ready_worker_ids,
+                client,
                 capabilities,
-                cleanup=cleanup,
-                created_session_ids_by_worker=created_session_ids_by_worker,
+                session_tracker=session_tracker,
                 execution_policy=execution_policy,
             )
+            run = wave_outcome.run
             run, schedule_tick = self.scheduler.persist_next_tick(run)
             if first_error_outcome is None:
-                first_error_outcome = tick_error_outcome
-            if fail_fast_outcome is not None:
-                return run, first_error_outcome, fail_fast_outcome
-        return run, first_error_outcome, None
-
-    def _execute_ready_workers_serially(
-        self,
-        client,
-        run,
-        ready_workers,
-        capabilities,
-        *,
-        cleanup,
-        created_session_ids_by_worker,
-        execution_policy,
-    ):
-        first_error_outcome = None
-        attempt_workers = list(ready_workers)
-        while attempt_workers:
-            retry_workers = []
-            for worker in attempt_workers:
-                outcome = self._execute_single_ready_worker(
-                    client,
-                    run,
-                    worker,
-                    capabilities,
-                    cleanup=cleanup,
-                    created_session_ids_by_worker=created_session_ids_by_worker,
-                )
-                run = outcome.run or run
-                current_worker = run.get("workers", {}).get(worker.get("id"), worker)
-                if outcome.kind == RETRY_SCHEDULED:
-                    retry_workers.append(current_worker)
-                    continue
-                if outcome.error is not None:
-                    if first_error_outcome is None:
-                        first_error_outcome = outcome
-                    if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                        return run, first_error_outcome, outcome
-            run = self._persist_summary(run)
-            attempt_workers = retry_workers
-        return run, first_error_outcome, None
-
-    def _execute_single_ready_worker(
-        self,
-        client,
-        run,
-        worker,
-        capabilities,
-        *,
-        cleanup,
-        created_session_ids_by_worker,
-    ):
-        outcome = self.core.execute_worker(
-            client,
-            run,
-            worker,
-            _worker_prompt(worker),
-            capabilities,
-            agent=worker.get("agent"),
-            model=worker.get("model"),
-            stop_after_retry=True,
-        )
-        if cleanup:
-            current_worker = (outcome.run or run).get("workers", {}).get(worker.get("id"), worker)
-            remember_created_worker_sessions(
-                created_session_ids_by_worker,
-                current_worker,
-                outcome.created_session_ids,
-            )
-        return outcome
-
-    def _cleanup_after_execution(self, run, client, created_session_ids_by_worker, *, cleanup):
-        if not cleanup or client is None or not created_session_ids_by_worker:
-            return run, None
-        cleanup_result = self.core.cleanup_created_workers(client, run, created_session_ids_by_worker)
-        if cleanup_result.error is not None:
-            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
-                cleanup_result.run,
-                cleanup_result.exit_code,
-                cleanup_result.error,
-            )
-        return cleanup_result.run, None
+                first_error_outcome = wave_outcome.first_error_outcome
+            if wave_outcome.fail_fast_outcome is not None:
+                return WorkerWaveExecutionOutcome(run, first_error_outcome, wave_outcome.fail_fast_outcome)
+        return WorkerWaveExecutionOutcome(run, first_error_outcome)
 
     def _outcome_if_no_ready_workers(self, run, schedule_tick):
         if schedule_tick.ready_worker_ids:
