@@ -68,8 +68,8 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
         run = {
             "status": "done",
             "workers": {
-                "alpha": {"id": "alpha", "status": "done"},
-                "beta": {"id": "beta", "status": "done"},
+                "alpha": {"id": "alpha", "lifecycle_state": "done_collect", "status": "done"},
+                "beta": {"id": "beta", "lifecycle_state": "done_collect", "status": "done"},
             },
         }
         persisted_worker_ids = []

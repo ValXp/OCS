@@ -29,12 +29,14 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             "build": {
                 "id": "build",
                 "prompt": "Run the implementation",
+                "lifecycle_state": "done_collect",
                 "status": "done",
                 "dependencies": ["review"],
             },
             "review": {
                 "id": "review",
                 "prompt": "Review the implementation",
+                "lifecycle_state": "queued",
                 "status": "queued",
                 "dependencies": ["build"],
             },
@@ -53,29 +55,34 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             "deploy": {
                 "id": "deploy",
                 "prompt": "Deploy the reviewed implementation",
+                "lifecycle_state": "queued",
                 "status": "queued",
                 "dependencies": ["review"],
             },
             "review": {
                 "id": "review",
                 "prompt": "Review the implementation",
+                "lifecycle_state": "queued",
                 "status": "queued",
                 "dependencies": ["build"],
             },
             "build": {
                 "id": "build",
                 "prompt": "Run the implementation",
+                "lifecycle_state": "failed_terminal",
                 "status": "failed",
             },
             "publish": {
                 "id": "publish",
                 "prompt": "Publish the docs",
+                "lifecycle_state": "queued",
                 "status": "queued",
                 "dependencies": ["docs"],
             },
             "docs": {
                 "id": "docs",
                 "prompt": "Draft the docs",
+                "lifecycle_state": "queued",
                 "status": "queued",
                 "dependencies": ["missing"],
             },
@@ -99,19 +106,22 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             "retry": {
                 "id": "retry",
                 "prompt": "Retry transient failure",
+                "lifecycle_state": "active_retry",
                 "status": "active",
-                "next_eligible_action": "retry",
+                "next_eligible_action": "wait",
             },
             "start": {
                 "id": "start",
                 "prompt": "Start queued worker",
+                "lifecycle_state": "queued",
                 "status": "queued",
             },
             "wait": {
                 "id": "wait",
                 "prompt": "Wait for existing worker",
+                "lifecycle_state": "active_wait",
                 "status": "active",
-                "next_eligible_action": "wait",
+                "next_eligible_action": "retry",
             },
         }
 
@@ -121,12 +131,13 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
     def test_schedule_tick_returns_serial_next_worker_and_block_transitions_without_mutation(self):
         workers = {
-            "build": {"id": "build", "prompt": "Build", "status": "failed"},
-            "docs": {"id": "docs", "prompt": "Docs", "status": "queued"},
-            "lint": {"id": "lint", "prompt": "Lint", "status": "queued"},
+            "build": {"id": "build", "prompt": "Build", "lifecycle_state": "failed_terminal", "status": "failed"},
+            "docs": {"id": "docs", "prompt": "Docs", "lifecycle_state": "queued", "status": "queued"},
+            "lint": {"id": "lint", "prompt": "Lint", "lifecycle_state": "queued", "status": "queued"},
             "review": {
                 "id": "review",
                 "prompt": "Review",
+                "lifecycle_state": "queued",
                 "status": "queued",
                 "dependencies": ["build"],
             },

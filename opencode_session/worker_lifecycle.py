@@ -42,6 +42,7 @@ from opencode_session.worker_state import (
     is_runnable_status,
     is_terminal_status,
     latest_prompt_ids_are_retry_marker,
+    lifecycle_state_from_public_worker_state,
     next_eligible_worker_action,
     public_worker_state,
     public_worker_state_fields,

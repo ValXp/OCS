@@ -63,6 +63,34 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertNotIn("status", stored["workers"]["planner"])
         self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
 
+    def test_worker_status_upsert_converts_status_to_lifecycle_at_boundary(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker(
+                "demo",
+                "planner",
+                role="plan",
+                status="failed",
+                retryable_failures=["provider"],
+                retry_count=0,
+                retry_limit=1,
+            )
+
+            loaded = run_store.load_run("demo")
+            stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
+
+        assert_worker_outcome(
+            self,
+            loaded["workers"]["planner"],
+            status="failed",
+            action="retry",
+            lifecycle="failed_retry",
+        )
+        self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "failed_retry")
+        self.assertNotIn("status", stored["workers"]["planner"])
+        self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
+
     def test_update_run_preserves_concurrent_worker_update_after_stale_load(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             first = RunStore(store)
@@ -130,11 +158,15 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 refresh_run_summary=refresh_run_summary,
                 now=lambda: "2026-07-03T00:00:00Z",
             ).run
+            stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
 
         self.assertEqual(run["workers"]["build"]["status"], "active")
         self.assertNotIn("result", run["workers"]["build"])
         self.assertEqual(persisted["workers"]["build"]["status"], "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
+        self.assertEqual(stored["workers"]["build"]["lifecycle_state"], "done_collect")
+        self.assertNotIn("status", stored["workers"]["build"])
+        self.assertNotIn("next_eligible_action", stored["workers"]["build"])
 
     def test_worker_patch_preserves_concurrent_prompt_id_on_other_worker(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:

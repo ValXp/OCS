@@ -4,6 +4,7 @@ from opencode_session.status import short_status
 from opencode_session.worker_state import (
     default_worker_record,
     deserialize_worker_record,
+    lifecycle_state_from_public_worker_state,
     serialize_worker_snapshot,
 )
 
@@ -67,7 +68,9 @@ def upsert_worker_record(run, worker_id, changes, *, now):
             worker[key] = changes[key]
 
     if status_changed:
-        worker.pop("lifecycle_state", None)
+        worker["lifecycle_state"] = lifecycle_state_from_public_worker_state(worker)
+        worker.pop("status", None)
+        worker.pop("next_eligible_action", None)
     workers[worker_id] = deserialize_worker_record(worker, worker_id)
     run["updated_at"] = now
 

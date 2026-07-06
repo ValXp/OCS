@@ -187,14 +187,20 @@ class WorkerSchedulingState:
 def worker_lifecycle_state(worker):
     if not isinstance(worker, dict):
         return None
-    lifecycle_state = worker.get("lifecycle_state")
+    return _canonical_lifecycle_state(worker)
+
+
+def _canonical_lifecycle_state(worker):
+    lifecycle_state = worker.get("lifecycle_state") if isinstance(worker, dict) else None
     if lifecycle_state in WORKER_LIFECYCLE_STATES:
         return lifecycle_state
-    return infer_worker_lifecycle_state(worker)
+    return WORKER_LIFECYCLE_QUEUED
 
 
-def infer_worker_lifecycle_state(worker):
-    status = short_status(worker.get("status") if isinstance(worker, dict) else None)
+def lifecycle_state_from_public_worker_state(worker):
+    """Compatibility boundary for legacy/public records that do not carry lifecycle_state."""
+    worker = worker if isinstance(worker, dict) else {}
+    status = short_status(worker.get("status"))
     if status == WORKER_STATUS_QUEUED:
         return WORKER_LIFECYCLE_QUEUED
     if status == WORKER_STATUS_ACTIVE:
@@ -226,6 +232,24 @@ def infer_worker_lifecycle_state(worker):
             return WORKER_LIFECYCLE_TIMEOUT_ABORTED
         return WORKER_LIFECYCLE_ABORTED
     return WORKER_LIFECYCLE_QUEUED
+
+
+def infer_worker_lifecycle_state(worker):
+    return lifecycle_state_from_public_worker_state(worker)
+
+
+def canonicalize_legacy_worker_record(worker):
+    fields = dict(worker) if isinstance(worker, dict) else {}
+    if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
+        fields["lifecycle_state"] = lifecycle_state_from_public_worker_state(fields)
+    return fields
+
+
+def canonicalize_public_worker_state_update(worker):
+    fields = deepcopy(worker) if isinstance(worker, dict) else {}
+    if "status" in fields or "next_eligible_action" in fields:
+        fields["lifecycle_state"] = lifecycle_state_from_public_worker_state(fields)
+    return fields
 
 
 def latest_prompt_ids_are_retry_marker(latest_worker):
@@ -261,14 +285,12 @@ def is_dependency_blockable_worker(worker):
 class WorkerRecord:
     worker_id: str
     fields: dict
-    has_explicit_lifecycle: bool = False
 
     @classmethod
     def from_worker(cls, worker, worker_id=None):
         fields = dict(worker) if isinstance(worker, dict) else {}
         resolved_worker_id = fields.get("id") or worker_id
-        has_explicit_lifecycle = isinstance(worker, dict) and bool(worker.get("lifecycle_state"))
-        return cls(resolved_worker_id, fields, has_explicit_lifecycle)
+        return cls(resolved_worker_id, fields)
 
     @classmethod
     def default_snapshot_fields(cls, worker_id):
@@ -316,10 +338,7 @@ class WorkerRecord:
 
     @property
     def lifecycle_state(self):
-        lifecycle_state = self.fields.get("lifecycle_state")
-        if lifecycle_state in WORKER_LIFECYCLE_STATES:
-            return lifecycle_state
-        return self._infer_lifecycle_state(self.fields)
+        return _canonical_lifecycle_state(self.fields)
 
     @property
     def status(self):
@@ -344,7 +363,6 @@ class WorkerRecord:
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
         fields = dict(self.fields)
-        legacy_state_source = dict(fields)
         fields.pop("status", None)
         fields.pop("next_eligible_action", None)
         normalized.update(fields)
@@ -362,8 +380,8 @@ class WorkerRecord:
             normalized["retry_limit"] = 0
         if not normalized.get("timeout_policy"):
             normalized["timeout_policy"] = WORKER_STATUS_TIMEOUT
-        if not self.has_explicit_lifecycle or normalized.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
-            normalized["lifecycle_state"] = self._infer_lifecycle_state(legacy_state_source)
+        if normalized.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
+            normalized["lifecycle_state"] = WORKER_LIFECYCLE_QUEUED
         return normalized
 
     def to_worker(self):
@@ -374,17 +392,13 @@ class WorkerRecord:
     def serialized_public_state(self):
         return self.public_state_fields(self.lifecycle_state)
 
-    @staticmethod
-    def _infer_lifecycle_state(worker):
-        return infer_worker_lifecycle_state(worker)
-
 
 def default_worker_record(worker_id):
     return WorkerRecord.default_fields(worker_id)
 
 
 def deserialize_worker_record(worker, worker_id):
-    return WorkerRecord.from_worker(worker, worker_id).to_worker()
+    return WorkerRecord.from_worker(canonicalize_legacy_worker_record(worker), worker_id).to_worker()
 
 
 def serialize_worker_snapshot(worker, worker_id):
@@ -392,10 +406,7 @@ def serialize_worker_snapshot(worker, worker_id):
 
 
 def snapshot_state_source(worker):
-    source = deepcopy(worker)
-    if "status" in source or "next_eligible_action" in source:
-        source.pop("lifecycle_state", None)
-    return source
+    return canonicalize_public_worker_state_update(worker)
 
 
 def require_internal_worker(worker):
@@ -702,7 +713,7 @@ def normalize_worker(worker, worker_id):
 
 
 def normalize_worker_snapshot(worker, worker_id):
-    return serialize_worker_snapshot(worker, worker_id)
+    return serialize_worker_snapshot(canonicalize_public_worker_state_update(worker), worker_id)
 
 
 def _apply_worker_transition_to_record(worker, transition):

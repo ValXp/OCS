@@ -15,12 +15,14 @@ from opencode_session.worker_state import (
     mark_worker_aborted,
     mark_worker_active,
     mark_worker_failed,
+    normalize_worker_snapshot,
     next_eligible_worker_action,
     normalize_worker,
     refresh_run_summary,
     require_internal_worker,
     schedule_worker_retry,
     serialize_worker_snapshot,
+    worker_lifecycle_state,
 )
 
 try:
@@ -53,9 +55,9 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["next_eligible_action"], "retry")
 
     def test_worker_execution_eligibility_derives_canonical_action(self):
-        queued = {"id": "build", "prompt": "Build", "status": "queued"}
-        waiting = {"id": "review", "prompt": "Review", "status": "active", "next_eligible_action": "wait"}
-        retrying = {"id": "test", "prompt": "Test", "status": "active", "next_eligible_action": "retry"}
+        queued = {"id": "build", "prompt": "Build", "lifecycle_state": "queued"}
+        waiting = {"id": "review", "prompt": "Review", "lifecycle_state": "active_wait"}
+        retrying = {"id": "test", "prompt": "Test", "lifecycle_state": "active_retry"}
         stale_action = {
             "id": "docs",
             "prompt": "Docs",
@@ -114,6 +116,36 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertEqual(snapshot["lifecycle_state"], "done_collect")
         self.assertEqual(snapshot["session_id"], "ses_review")
+        self.assertNotIn("status", snapshot)
+        self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_serialize_worker_snapshot_trusts_lifecycle_not_public_status(self):
+        worker = {
+            "id": "review",
+            "lifecycle_state": "active_wait",
+            "status": "done",
+            "next_eligible_action": "collect",
+        }
+
+        snapshot = serialize_worker_snapshot(worker, "review")
+
+        self.assertEqual(worker_lifecycle_state(worker), "active_wait")
+        self.assertEqual(snapshot["lifecycle_state"], "active_wait")
+        self.assertNotIn("status", snapshot)
+        self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_normalize_worker_snapshot_converts_public_status_at_boundary(self):
+        snapshot = normalize_worker_snapshot(
+            {
+                "id": "review",
+                "lifecycle_state": "active_wait",
+                "status": "done",
+                "next_eligible_action": "collect",
+            },
+            "review",
+        )
+
+        self.assertEqual(snapshot["lifecycle_state"], "done_collect")
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
@@ -394,9 +426,9 @@ class WorkerStateContractTest(unittest.TestCase):
     def test_refresh_run_summary_and_exit_code_use_failed_precedence_for_mixed_terminal_workers(self):
         run = {
             "workers": {
-                "build": {"id": "build", "prompt": "Build", "status": "timeout"},
-                "review": {"id": "review", "prompt": "Review", "status": "aborted"},
-                "test": {"id": "test", "prompt": "Test", "status": "failed"},
+                "build": {"id": "build", "prompt": "Build", "lifecycle_state": "timeout_terminal"},
+                "review": {"id": "review", "prompt": "Review", "lifecycle_state": "aborted"},
+                "test": {"id": "test", "prompt": "Test", "lifecycle_state": "failed_terminal"},
             }
         }
 

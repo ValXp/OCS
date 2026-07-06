@@ -4,7 +4,6 @@ from opencode_session.worker_state import (
     WorkerTransition,
     apply_worker_transition,
     normalize_worker_snapshot,
-    snapshot_state_source,
 )
 
 
@@ -30,7 +29,7 @@ def persist_worker_snapshot_update(store, run, worker, *, refresh_run_summary, n
 
 def persist_worker_snapshot_updates(store, run, workers, *, refresh_run_summary, now):
     updates = [
-        WorkerTransition.snapshot_applied(normalize_worker_snapshot(snapshot_state_source(worker), worker["id"]))
+        WorkerTransition.snapshot_applied(normalize_worker_snapshot(worker, worker["id"]))
         for worker in workers
         if isinstance(worker, dict) and worker.get("id")
     ]
