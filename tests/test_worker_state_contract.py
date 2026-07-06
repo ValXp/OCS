@@ -1,3 +1,4 @@
+from copy import deepcopy
 import unittest
 from types import SimpleNamespace
 
@@ -298,7 +299,7 @@ class WorkerStateContractTest(unittest.TestCase):
     def test_apply_worker_result_done_clears_stale_current_status_metadata(self):
         worker = normalize_worker(
             {
-                "status": "failed",
+                "status": "active",
                 "blockers": ["dependency:build"],
                 "error": "previous failure",
                 "failure_category": "api",
@@ -330,6 +331,143 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["last_failure_category"], "api")
         self.assertEqual(worker["last_failure_reason"], "previous failure")
         self.assertEqual(worker["output_refs"], ["assistant:msg_assistant"])
+
+    def test_worker_transition_reducer_noops_invalid_lifecycle_transitions(self):
+        original = normalize_worker(
+            {
+                "status": "done",
+                "result": {
+                    "status": "done",
+                    "message_ids": {"assistant": "msg_done"},
+                },
+                "output_refs": ["assistant:msg_done"],
+            },
+            "review",
+        )
+        transitions = [
+            mark_worker_active(original),
+            mark_worker_failed(original, "provider", "late failure"),
+            WorkerTransition.retry_scheduled("review", "provider", "retry", retry_count=1),
+            WorkerTransition.timed_out(
+                "review",
+                "late timeout",
+                status="timeout",
+                timed_out_at="2026-07-04T00:00:00Z",
+            ),
+            WorkerTransition.result_applied(
+                "review",
+                {"status": "done", "message_ids": {"assistant": "msg_late"}},
+            ),
+        ]
+
+        for transition in transitions:
+            with self.subTest(transition=transition.name):
+                worker = deepcopy(original)
+
+                apply_worker_transition_to_worker(worker, transition)
+
+                self.assertEqual(worker, original)
+
+    def test_worker_transition_reducer_allows_legal_retry_timeout_and_result_transitions(self):
+        retry_worker = normalize_worker(
+            {
+                "status": "failed",
+                "failure_category": "provider",
+                "retryable_failures": ["provider"],
+                "retry_count": 0,
+                "retry_limit": 1,
+            },
+            "review",
+        )
+        apply_worker_transition_to_worker(retry_worker, schedule_worker_retry(retry_worker, "provider", "try again"))
+
+        assert_worker_outcome(self, retry_worker, status="active", action="retry", lifecycle="active_retry")
+        self.assertEqual(retry_worker["retry_count"], 1)
+
+        timeout_worker = normalize_worker(
+            {
+                "status": "active",
+                "retryable_failures": ["timeout"],
+                "retry_count": 0,
+                "retry_limit": 1,
+            },
+            "review",
+        )
+        apply_worker_transition_to_worker(
+            timeout_worker,
+            WorkerTransition.timed_out(
+                "review",
+                "worker timed out",
+                status="failed",
+                timed_out_at="2026-07-04T00:00:00Z",
+                retry_available=True,
+                manual_retry_required=True,
+            ),
+        )
+
+        assert_worker_outcome(self, timeout_worker, status="failed", action="retry", lifecycle="timeout_failed_retry")
+        self.assertTrue(timeout_worker["manual_retry_required"])
+
+        result_worker = normalize_worker({"status": "active"}, "review")
+        apply_worker_transition_to_worker(
+            result_worker,
+            WorkerTransition.result_applied(
+                "review",
+                {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+            ),
+        )
+
+        assert_worker_outcome(self, result_worker, status="done", action="collect", lifecycle="done_collect")
+        self.assertEqual(result_worker["output_refs"], ["assistant:msg_assistant"])
+
+    def test_snapshot_replay_allows_legal_active_to_done_transition(self):
+        worker = normalize_worker({"status": "active", "prompt_ids": ["msg_initial"]}, "review")
+        snapshot = normalize_worker_snapshot(
+            {
+                "id": "review",
+                "status": "done",
+                "prompt_ids": ["msg_done"],
+                "result": {
+                    "status": "done",
+                    "message_ids": {"assistant": "msg_assistant"},
+                },
+                "output_refs": ["assistant:msg_assistant"],
+            },
+            "review",
+        )
+
+        apply_worker_transition_to_worker(worker, WorkerTransition.snapshot_applied(snapshot))
+
+        assert_worker_outcome(self, worker, status="done", action="collect", lifecycle="done_collect")
+        self.assertEqual(worker["prompt_ids"], ["msg_initial", "msg_done"])
+        self.assertEqual(worker["output_refs"], ["assistant:msg_assistant"])
+
+    def test_snapshot_replay_noops_illegal_lifecycle_rewind(self):
+        original = normalize_worker(
+            {
+                "status": "done",
+                "prompt_ids": ["msg_done"],
+                "result": {
+                    "status": "done",
+                    "message_ids": {"assistant": "msg_assistant"},
+                },
+                "output_refs": ["assistant:msg_assistant"],
+            },
+            "review",
+        )
+        stale_snapshot = normalize_worker_snapshot(
+            {
+                "id": "review",
+                "status": "active",
+                "prompt_ids": ["msg_stale"],
+            },
+            "review",
+        )
+        worker = deepcopy(original)
+
+        apply_worker_transition_to_worker(worker, WorkerTransition.snapshot_applied(stale_snapshot))
+
+        self.assertEqual(worker, original)
 
     def test_schedule_worker_retry_clears_stale_current_status_metadata(self):
         worker = normalize_worker(

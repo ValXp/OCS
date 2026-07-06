@@ -13,6 +13,8 @@ from opencode_session.worker_state import (
     WORKER_LIFECYCLE_DONE_COLLECT,
     WORKER_LIFECYCLE_FAILED_RETRY,
     WORKER_LIFECYCLE_FAILED_TERMINAL,
+    WORKER_LIFECYCLE_QUEUED,
+    WORKER_LIFECYCLE_STATES,
     WORKER_LIFECYCLE_TIMEOUT_ABORTED,
     WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
     WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL,
@@ -41,6 +43,8 @@ class WorkerLifecycleReducer:
     def apply(self, transition):
         if not isinstance(transition.name, WorkerTransitionName):
             raise ValueError(f"unknown worker transition: {transition.name}")
+        if not self._transition_is_legal(transition):
+            return self._unchanged_worker(transition)
         worker = _WORKER_TRANSITION_APPLIERS[transition.name](self, transition)
         _finalize_worker_attempt(worker, transition.attempt_finalization)
         return WorkerRecord.from_worker(worker, self.record.worker_id or transition.worker_id).to_worker()
@@ -230,6 +234,19 @@ class WorkerLifecycleReducer:
     def _copy_latest(self):
         return deepcopy(self.latest_worker)
 
+    def _unchanged_worker(self, transition):
+        return WorkerRecord.from_worker(self.latest_worker, self.record.worker_id or transition.worker_id).to_worker()
+
+    def _transition_is_legal(self, transition):
+        if self._has_accepted_abort():
+            return True
+        if transition.name == WorkerTransitionName.SNAPSHOT_APPLIED:
+            return _snapshot_transition_is_legal(self.latest_worker, transition)
+        return worker_lifecycle_state(self.latest_worker) in _WORKER_TRANSITION_SOURCE_STATES.get(
+            transition.name,
+            frozenset(),
+        )
+
     def _has_accepted_abort(self):
         return _accepted_abort(self.latest_worker)
 
@@ -244,6 +261,24 @@ def apply_worker_transition_to_record(record, transition):
     return WorkerLifecycleReducer(record).apply(transition)
 
 
+def _snapshot_transition_is_legal(latest_worker, transition):
+    source_state = worker_lifecycle_state(latest_worker)
+    target_state = _snapshot_transition_lifecycle_state(transition)
+    if target_state is None:
+        return True
+    return target_state in _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE.get(source_state, frozenset())
+
+
+def _snapshot_transition_lifecycle_state(transition):
+    payload = transition.payload
+    if "lifecycle_state" not in payload.state_fields or "lifecycle_state" not in payload.worker:
+        return None
+    lifecycle_state = payload.worker.get("lifecycle_state")
+    if lifecycle_state in WORKER_LIFECYCLE_STATES:
+        return lifecycle_state
+    return WORKER_LIFECYCLE_QUEUED
+
+
 _WORKER_TRANSITION_APPLIERS = {
     WorkerTransitionName.PROVISIONED: WorkerLifecycleReducer.provisioned,
     WorkerTransitionName.ACTIVE: WorkerLifecycleReducer.active,
@@ -256,6 +291,100 @@ _WORKER_TRANSITION_APPLIERS = {
     WorkerTransitionName.RESULT_APPLIED: WorkerLifecycleReducer.result_applied,
     WorkerTransitionName.CLEANUP_UPDATED: WorkerLifecycleReducer.cleanup_updated,
     WorkerTransitionName.SNAPSHOT_APPLIED: WorkerLifecycleReducer.snapshot_applied,
+}
+
+_WORKER_EXECUTABLE_LIFECYCLE_STATES = frozenset(
+    {
+        WORKER_LIFECYCLE_QUEUED,
+        WORKER_LIFECYCLE_ACTIVE_RETRY,
+        WORKER_LIFECYCLE_FAILED_RETRY,
+        WORKER_LIFECYCLE_TIMEOUT_RETRY,
+        WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+    }
+)
+_WORKER_ACTIVE_SOURCE_STATES = frozenset(
+    {
+        *_WORKER_EXECUTABLE_LIFECYCLE_STATES,
+        WORKER_LIFECYCLE_ACTIVE_WAIT,
+        WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+        WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+    }
+)
+_WORKER_FAILURE_SOURCE_STATES = frozenset({*_WORKER_EXECUTABLE_LIFECYCLE_STATES, WORKER_LIFECYCLE_ACTIVE_WAIT})
+_WORKER_ABORT_SOURCE_STATES = frozenset(
+    {
+        *_WORKER_ACTIVE_SOURCE_STATES,
+        WORKER_LIFECYCLE_ABORTED,
+        WORKER_LIFECYCLE_TIMEOUT_ABORTED,
+    }
+)
+
+_WORKER_TRANSITION_SOURCE_STATES = {
+    WorkerTransitionName.PROVISIONED: frozenset({*_WORKER_EXECUTABLE_LIFECYCLE_STATES, WORKER_LIFECYCLE_ACTIVE_WAIT}),
+    WorkerTransitionName.ACTIVE: _WORKER_ACTIVE_SOURCE_STATES,
+    WorkerTransitionName.ATTEMPT_STARTED: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+    WorkerTransitionName.FAILED: _WORKER_FAILURE_SOURCE_STATES,
+    WorkerTransitionName.DEPENDENCY_BLOCKED: frozenset(
+        {
+            WORKER_LIFECYCLE_QUEUED,
+            WORKER_LIFECYCLE_ACTIVE_WAIT,
+            WORKER_LIFECYCLE_ACTIVE_RETRY,
+        }
+    ),
+    WorkerTransitionName.ABORTED: _WORKER_ABORT_SOURCE_STATES,
+    WorkerTransitionName.RETRY_SCHEDULED: frozenset(
+        {
+            WORKER_LIFECYCLE_ACTIVE_WAIT,
+            WORKER_LIFECYCLE_FAILED_RETRY,
+            WORKER_LIFECYCLE_TIMEOUT_RETRY,
+            WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+        }
+    ),
+    WorkerTransitionName.TIMED_OUT: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+    WorkerTransitionName.RESULT_APPLIED: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+    WorkerTransitionName.CLEANUP_UPDATED: WORKER_LIFECYCLE_STATES,
+}
+
+_WORKER_TRANSITION_TARGET_STATES = {
+    WorkerTransitionName.ACTIVE: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+    WorkerTransitionName.FAILED: frozenset({WORKER_LIFECYCLE_FAILED_RETRY, WORKER_LIFECYCLE_FAILED_TERMINAL}),
+    WorkerTransitionName.DEPENDENCY_BLOCKED: frozenset({WORKER_LIFECYCLE_BLOCKED_DEPENDENCY}),
+    WorkerTransitionName.ABORTED: frozenset({WORKER_LIFECYCLE_ABORTED}),
+    WorkerTransitionName.RETRY_SCHEDULED: frozenset({WORKER_LIFECYCLE_ACTIVE_RETRY}),
+    WorkerTransitionName.TIMED_OUT: frozenset(
+        {
+            WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+            WORKER_LIFECYCLE_TIMEOUT_ABORTED,
+            WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+            WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL,
+            WORKER_LIFECYCLE_TIMEOUT_RETRY,
+            WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+        }
+    ),
+    WorkerTransitionName.RESULT_APPLIED: frozenset(
+        {
+            WORKER_LIFECYCLE_ABORTED,
+            WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+            WORKER_LIFECYCLE_DONE_COLLECT,
+            WORKER_LIFECYCLE_FAILED_TERMINAL,
+            WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+        }
+    ),
+}
+
+_WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
+    source_state: frozenset(
+        {
+            source_state,
+            *(
+                target_state
+                for transition_name, source_states in _WORKER_TRANSITION_SOURCE_STATES.items()
+                if source_state in source_states
+                for target_state in _WORKER_TRANSITION_TARGET_STATES.get(transition_name, ())
+            ),
+        }
+    )
+    for source_state in WORKER_LIFECYCLE_STATES
 }
 
 
