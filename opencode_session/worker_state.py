@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Optional
 
 from opencode_session.schema_common import WORKER_REQUIRED_FIELD_NAMES
 from opencode_session.status import short_status
@@ -162,8 +163,8 @@ def is_failed_dependency_status(status):
 
 @dataclass(frozen=True)
 class WorkerSchedulingState:
-    lifecycle_state: str | None
-    status: str | None
+    lifecycle_state: Optional[str]
+    status: Optional[str]
     next_eligible_action: str
     has_prompt: bool
 
@@ -493,7 +494,7 @@ class WorkerTransition:
     worker_id: str
     name: str
     payload: object = None
-    attempt_finalization: _AttemptFinalization | None = None
+    attempt_finalization: Optional[_AttemptFinalization] = None
 
     def with_finalized_attempt(self, attempt_id, fields):
         return WorkerTransition(

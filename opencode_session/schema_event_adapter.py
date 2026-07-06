@@ -1,6 +1,7 @@
 import json
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Optional
 
 from opencode_session.schema_common import NormalizedEventRecord, first_present, set_if_present, string_value
 from opencode_session.status import short_status
@@ -21,20 +22,20 @@ ERROR_EVENT_TYPES = frozenset({"message.error", "session.error", "tool.execute.e
 
 @dataclass(frozen=True)
 class DecodedEvent:
-    event_type: str | None
-    session_id: str | None
-    message_id: str | None = None
-    status: str | None = None
-    delivery: str | None = None
-    text: str | None = None
-    tool: str | None = None
-    call_id: str | None = None
-    step: str | None = None
-    title: str | None = None
-    blocker: str | None = None
-    blocker_id: str | None = None
-    question: str | None = None
-    error: str | None = None
+    event_type: Optional[str]
+    session_id: Optional[str]
+    message_id: Optional[str] = None
+    status: Optional[str] = None
+    delivery: Optional[str] = None
+    text: Optional[str] = None
+    tool: Optional[str] = None
+    call_id: Optional[str] = None
+    step: Optional[str] = None
+    title: Optional[str] = None
+    blocker: Optional[str] = None
+    blocker_id: Optional[str] = None
+    question: Optional[str] = None
+    error: Optional[str] = None
 
 
 class ApiEventRouteDecoder:

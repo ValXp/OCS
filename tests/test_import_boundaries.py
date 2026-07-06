@@ -1,3 +1,4 @@
+import ast
 import importlib
 import sys
 import unittest
@@ -88,6 +89,33 @@ class ImportBoundaryTest(unittest.TestCase):
 
         self.assertEqual([], offenders)
         self.assertIn("from opencode_session.worker_state import", reducer_source)
+
+    def test_python_39_claim_avoids_pep604_type_union_annotations(self):
+        project_root = Path(__file__).resolve().parents[1]
+        package_dir = project_root / "opencode_session"
+        pyproject_source = (project_root / "pyproject.toml").read_text()
+        if 'requires-python = ">=3.9"' not in pyproject_source:
+            self.skipTest("Python 3.9 support is not claimed")
+
+        offenders = []
+        for path in sorted(package_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                annotations = []
+                if isinstance(node, ast.AnnAssign):
+                    annotations.append(node.annotation)
+                elif isinstance(node, ast.arg) and node.annotation is not None:
+                    annotations.append(node.annotation)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
+                    annotations.append(node.returns)
+
+                for annotation in annotations:
+                    for child in ast.walk(annotation):
+                        if isinstance(child, ast.BinOp) and isinstance(child.op, ast.BitOr):
+                            relative_path = path.relative_to(project_root)
+                            offenders.append(f"{relative_path}:{child.lineno}")
+
+        self.assertEqual([], offenders)
 
 
 if __name__ == "__main__":
