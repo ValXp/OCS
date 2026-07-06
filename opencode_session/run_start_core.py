@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional, Protocol
 
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.run_start_policy import blocking_execution_start_error
-from opencode_session.schema_common import DomainRecord
+from opencode_session.schema_common import CapabilitiesRecord, RunRecord, WorkerRecordShape
 from opencode_session.worker_execution import (
     cleanup_created_worker_sessions,
     execute_worker_attempts,
@@ -16,22 +16,42 @@ from opencode_session.worker_state import EX_UNAVAILABLE
 
 @dataclass
 class CapabilityProbeOutcome:
-    client: Any
-    capabilities: DomainRecord
+    client: "RunStartClientProtocol"
+    capabilities: CapabilitiesRecord
     start_error: Optional[str] = None
 
 
 @dataclass
 class PersistedTransitionOutcome:
-    run: DomainRecord
-    worker: Optional[DomainRecord] = None
+    run: RunRecord
+    worker: Optional[WorkerRecordShape] = None
 
 
 @dataclass
 class CleanupWorkersOutcome:
-    run: DomainRecord
+    run: RunRecord
     exit_code: int
     error: Optional[str] = None
+
+
+class RunStartClientProtocol(Protocol):
+    def configure_route_plan(self, route_plan): ...
+
+    def get_health(self, *, deadline=None): ...
+
+    def get_openapi_doc(self, *, deadline=None): ...
+
+    def create_session_response(self, directory, *, agent=None, model=None, title=None, metadata=None): ...
+
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None, deadline=None): ...
+
+    def run_session_response(self, session_id, message, *, timeout=None, deadline=None): ...
+
+    def reply_session_response(self, session_id, *, timeout=None, deadline=None): ...
+
+    def delete_session_response(self, session_id): ...
+
+    def get_session(self, session_id): ...
 
 
 class RunStartCore:

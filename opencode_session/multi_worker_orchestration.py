@@ -14,7 +14,7 @@ from opencode_session.run_persistence import (
 from opencode_session.run_start_core import RunStartCore, remember_created_worker_sessions
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
-from opencode_session.schema_common import DomainRecord
+from opencode_session.schema_common import RunRecord
 from opencode_session.worker_execution import RETRY_SCHEDULED, WorkerExecutionOutcome
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_lifecycle import WorkerTransition
@@ -53,7 +53,7 @@ class DependencyOrderedSerialRunStartRequest:
 
 @dataclass
 class DependencyOrderedSerialRunStartOutcome:
-    run: DomainRecord
+    run: RunRecord
     exit_code: int
     error: Optional[str] = None
 
@@ -112,7 +112,7 @@ class DurableDependencyScheduler:
 
 @dataclass
 class WorkerWaveExecutionOutcome:
-    run: DomainRecord
+    run: RunRecord
     first_error_outcome: Optional[WorkerExecutionOutcome] = None
     fail_fast_outcome: Optional[WorkerExecutionOutcome] = None
 

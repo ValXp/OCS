@@ -5,7 +5,7 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
-from opencode_session.schema_common import DomainRecord
+from opencode_session.schema_common import BlockingExecutionResult, RunRecord, WorkerRecordShape
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_lifecycle import WorkerTransition
@@ -41,19 +41,19 @@ class WorkerExecutionOutcome:
     created_session_ids: list = field(default_factory=list)
     error: Optional[str] = None
     failure_category: Optional[str] = None
-    run: Optional[DomainRecord] = None
+    run: Optional[RunRecord] = None
 
 
 @dataclass
 class WorkerTransitionSinkOutcome:
-    run: DomainRecord
-    worker: Optional[DomainRecord] = None
+    run: RunRecord
+    worker: Optional[WorkerRecordShape] = None
 
 
 @dataclass
 class WorkerAttemptOutcome:
     kind: str
-    result: Optional[DomainRecord] = None
+    result: Optional[BlockingExecutionResult] = None
     failure_category: Optional[str] = None
     reason: Optional[str] = None
     prompt_id: Optional[str] = None

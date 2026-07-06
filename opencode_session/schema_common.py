@@ -75,13 +75,11 @@ class NormalizedEventRecord(TypedDict, total=False):
     raw: JsonValue
 
 
-class DomainRecord(TypedDict, total=False):
+class WorkerRecordShape(TypedDict, total=False):
     id: str
     name: str
     title: str
     role: Optional[str]
-    directory: str
-    server_url: str
     session_id: Optional[str]
     agent: Optional[str]
     model: Optional[str]
@@ -89,7 +87,6 @@ class DomainRecord(TypedDict, total=False):
     status: str
     lifecycle_state: str
     next_eligible_action: str
-    workers: Dict[str, "DomainRecord"]
     dependencies: List[str]
     prompt_ids: List[str]
     retryable_failures: List[str]
@@ -108,12 +105,51 @@ class DomainRecord(TypedDict, total=False):
     error: str
     failure_retryable: bool
     manual_retry_required: bool
-    result: JsonObject
     cleanup: JsonObject
     abort: JsonObject
-    metadata: JsonObject
-    capabilities: JsonObject
+
+
+class RunRecord(TypedDict, total=False):
+    name: str
+    run_id: str
+    directory: str
+    server_url: str
+    status: str
+    retry_count: int
+    timeout_seconds: Optional[float]
+    blockers: List[str]
+    output_refs: List[str]
+    workers: Dict[str, WorkerRecordShape]
+    created_at: JsonValue
+    updated_at: JsonValue
+
+
+class CapabilitiesRecord(TypedDict, total=False):
     route_availability: JsonObject
+    blocking_message_available: bool
+    blocking_execution_available: bool
+    legacy_fallback_available: bool
+    wait_route: JsonObject
+    prompt_route: JsonObject
+
+
+class BlockingExecutionResult(TypedDict, total=False):
+    session_id: str
+    message_ids: JsonObject
+    status: str
+    raw_status: str
+    terminal_state: str
+    api_path: JsonObject
+    execution_strategy: str
+    fallback: JsonObject
+    cost: JsonValue
+    tokens: JsonValue
+    text: str
+
+
+class DomainRecord(RunRecord, WorkerRecordShape, CapabilitiesRecord, BlockingExecutionResult, total=False):
+    metadata: JsonObject
+    result: BlockingExecutionResult
     raw: JsonValue
 
 
