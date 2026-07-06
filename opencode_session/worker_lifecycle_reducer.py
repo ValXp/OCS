@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -316,7 +317,7 @@ def _snapshot_target_lifecycle_state(transition):
     payload = getattr(transition, "payload", None)
     state_fields = getattr(payload, "state_fields", ())
     worker = getattr(payload, "worker", {})
-    if "lifecycle_state" not in state_fields or not isinstance(worker, dict):
+    if "lifecycle_state" not in state_fields or not isinstance(worker, Mapping):
         return None
     return worker.get("lifecycle_state")
 
@@ -339,7 +340,7 @@ def _snapshot_transition_fields(transition):
 
 
 def _accepted_abort(worker):
-    abort = worker.get("abort") if isinstance(worker, dict) else None
+    abort = worker.get("abort") if isinstance(worker, Mapping) else None
     status = public_worker_state(worker_lifecycle_state(worker))[0]
     return isinstance(abort, dict) and abort.get("accepted") and status == WORKER_STATUS_ABORTED
 
@@ -351,7 +352,7 @@ def _abort_is_accepted(abort):
 def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
     merged_values = []
     for source in (latest_worker, worker_record):
-        values = source.get(field_name) if isinstance(source, dict) else None
+        values = source.get(field_name) if isinstance(source, Mapping) else None
         if not isinstance(values, list):
             continue
         for value in values:

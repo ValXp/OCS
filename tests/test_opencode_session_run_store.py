@@ -66,6 +66,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             lifecycle="active_wait",
         )
         self.assertIsInstance(loaded["workers"]["planner"], WorkerRecord)
+        self.assertNotIsInstance(loaded["workers"]["planner"], dict)
         self.assertIs(type(stored["workers"]["planner"]), dict)
         self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "active_wait")
         self.assertNotIn("status", stored["workers"]["planner"])

@@ -7,6 +7,7 @@ from opencode_session.schema_common import RunRecord, Worker
 from opencode_session.session_ids import require_session_id
 from opencode_session.worker_state import (
     WorkerRecord,
+    is_worker_mapping,
     sync_worker_record,
     worker_record_for_mutation,
 )
@@ -241,15 +242,15 @@ def will_create_worker_session(worker, *, session_id=None, create_session=True):
 
 
 def _latest_worker(run, fallback_worker):
-    worker_id = fallback_worker.get("id") if isinstance(fallback_worker, dict) else None
+    worker_id = fallback_worker.get("id") if is_worker_mapping(fallback_worker) else None
     latest_worker = run.get("workers", {}).get(worker_id) if isinstance(run, dict) and worker_id else None
-    return latest_worker if isinstance(latest_worker, dict) else fallback_worker
+    return latest_worker if is_worker_mapping(latest_worker) else fallback_worker
 
 
 def _ensure_latest_worker(run, worker_id):
     workers = run.setdefault("workers", {})
     worker = workers.get(worker_id)
-    if not isinstance(worker, dict):
+    if not is_worker_mapping(worker):
         worker = WorkerRecord.default_fields(worker_id)
         workers[worker_id] = worker
     return worker

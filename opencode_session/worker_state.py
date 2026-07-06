@@ -1,3 +1,4 @@
+from collections.abc import Mapping, MutableMapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -701,8 +702,16 @@ def worker_lifecycle_set_fields(worker_id, lifecycle_state):
     return {"id": worker_id, "lifecycle_state": lifecycle_state}
 
 
+def _is_worker_mapping(worker):
+    return isinstance(worker, Mapping)
+
+
+def is_worker_mapping(worker):
+    return _is_worker_mapping(worker)
+
+
 def worker_retry_available(worker, category=None):
-    if not isinstance(worker, dict):
+    if not _is_worker_mapping(worker):
         return False
     if worker.get("failure_retryable") is False:
         return False
@@ -750,7 +759,7 @@ class WorkerSchedulingState:
 
     @classmethod
     def from_worker(cls, worker):
-        if not isinstance(worker, dict):
+        if not _is_worker_mapping(worker):
             return cls(None, None, WORKER_ACTION_NONE, False)
         lifecycle_state = worker_lifecycle_state(worker)
         status, next_eligible_action = public_worker_state(lifecycle_state)
@@ -764,13 +773,13 @@ class WorkerSchedulingState:
 
 
 def worker_lifecycle_state(worker):
-    if not isinstance(worker, dict):
+    if not _is_worker_mapping(worker):
         return None
     return _canonical_lifecycle_state(worker)
 
 
 def _canonical_lifecycle_state(worker):
-    lifecycle_state = worker.get("lifecycle_state") if isinstance(worker, dict) else None
+    lifecycle_state = worker.get("lifecycle_state") if _is_worker_mapping(worker) else None
     if lifecycle_state in WORKER_LIFECYCLE_STATES:
         return lifecycle_state
     return WORKER_LIFECYCLE_QUEUED
@@ -778,7 +787,7 @@ def _canonical_lifecycle_state(worker):
 
 def _lifecycle_state_from_legacy_public_worker_state(worker):
     """Compatibility boundary for legacy/public records that do not carry lifecycle_state."""
-    worker = worker if isinstance(worker, dict) else {}
+    worker = worker if _is_worker_mapping(worker) else {}
     status = short_status(worker.get("status"))
     if status == WORKER_STATUS_QUEUED:
         return worker_lifecycle_state_for_status_alias(status)
@@ -826,7 +835,7 @@ def _lifecycle_state_from_legacy_public_worker_state(worker):
 
 
 def canonicalize_legacy_worker_record(worker):
-    fields = dict(worker) if isinstance(worker, dict) else {}
+    fields = dict(worker) if _is_worker_mapping(worker) else {}
     if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
         fields["lifecycle_state"] = _lifecycle_state_from_legacy_public_worker_state(fields)
     return fields
@@ -834,20 +843,20 @@ def canonicalize_legacy_worker_record(worker):
 
 def latest_prompt_ids_are_retry_marker(latest_worker):
     return (
-        isinstance(latest_worker, dict)
+        _is_worker_mapping(latest_worker)
         and worker_lifecycle_state(latest_worker) == WORKER_LIFECYCLE_ACTIVE_RETRY
         and latest_worker.get("last_failure_category") is not None
     )
 
 
 def next_eligible_worker_action(worker):
-    if not isinstance(worker, dict):
+    if not _is_worker_mapping(worker):
         return WORKER_ACTION_NONE
     return WorkerSchedulingState.from_worker(worker).next_eligible_action
 
 
 def worker_has_prompt(worker):
-    if not isinstance(worker, dict):
+    if not _is_worker_mapping(worker):
         return False
     prompt = worker.get("prompt")
     return prompt is not None and bool(str(prompt))
@@ -861,21 +870,46 @@ def is_dependency_blockable_worker(worker):
     return WorkerSchedulingState.from_worker(worker).can_block_for_dependency()
 
 
-class WorkerRecord(dict):
+class WorkerRecord(MutableMapping):
     """Hydrated worker domain object.
 
-    Worker records remain dict-compatible for existing orchestration code, but
-    core worker mutations should live here instead of scattered string-key
-    updates. Storage still writes sparse snapshots via to_snapshot().
+    Worker records provide mapping-style access for existing orchestration code,
+    but mutations are backed by this object rather than by persisted JSON dicts.
+    Storage still writes sparse snapshots via to_snapshot().
     """
 
     def __init__(self, worker_id, fields=None):
-        super().__init__(dict(fields or {}))
-        self._worker_id = self.get("id") or worker_id
+        self._fields = deepcopy(dict(fields or {}))
+        self._worker_id = self._fields.get("id") or worker_id
+
+    def __getitem__(self, key):
+        return self._fields[key]
+
+    def __setitem__(self, key, value):
+        self._fields[key] = value
+
+    def __delitem__(self, key):
+        del self._fields[key]
+
+    def __iter__(self):
+        return iter(self._fields)
+
+    def __len__(self):
+        return len(self._fields)
+
+    def __repr__(self):
+        return f"{type(self).__name__}({self.worker_id!r}, {self._fields!r})"
+
+    def __eq__(self, other):
+        if isinstance(other, WorkerRecord):
+            return self._fields == other._fields
+        if isinstance(other, Mapping):
+            return self._fields == dict(other)
+        return NotImplemented
 
     @classmethod
     def from_worker(cls, worker, worker_id=None):
-        fields = dict(worker) if isinstance(worker, dict) else {}
+        fields = dict(worker) if _is_worker_mapping(worker) else {}
         resolved_worker_id = fields.get("id") or worker_id
         return cls(resolved_worker_id, fields)
 
@@ -957,7 +991,7 @@ class WorkerRecord(dict):
 
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
-        fields = dict(self)
+        fields = deepcopy(dict(self))
         fields.pop("status", None)
         fields.pop("next_eligible_action", None)
         normalized.update(fields)
@@ -1053,7 +1087,7 @@ def worker_record_for_mutation(worker, worker_id=None):
 
 
 def sync_worker_record(worker, record):
-    if worker is not record and isinstance(worker, dict):
+    if worker is not record and isinstance(worker, MutableMapping):
         worker.clear()
         worker.update(record)
         return worker
@@ -1372,7 +1406,7 @@ def apply_worker_transition(latest_workers, transition):
 
 
 def next_eligible_action(worker):
-    if not isinstance(worker, dict):
+    if not _is_worker_mapping(worker):
         return WORKER_ACTION_NONE
     return WorkerRecord.from_worker(worker).next_eligible_action
 
@@ -1488,10 +1522,10 @@ def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):
 
 
 def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False):
-    prompted_workers = [worker for worker in workers.values() if isinstance(worker, dict) and worker_prompt(worker)]
+    prompted_workers = [worker for worker in workers.values() if _is_worker_mapping(worker) and worker_prompt(worker)]
     status_workers = prompted_workers
     if include_unprompted_when_no_prompts:
-        status_workers = prompted_workers or [worker for worker in workers.values() if isinstance(worker, dict)]
+        status_workers = prompted_workers or [worker for worker in workers.values() if _is_worker_mapping(worker)]
     return aggregate_run_status(_worker_status(worker) for worker in status_workers)
 
 
@@ -1521,7 +1555,7 @@ def exit_code_for_run(run):
 
 
 def has_partial_worker_success(run):
-    workers = [worker for worker in (run.get("workers") or {}).values() if isinstance(worker, dict) and worker_prompt(worker)]
+    workers = [worker for worker in (run.get("workers") or {}).values() if _is_worker_mapping(worker) and worker_prompt(worker)]
     if not workers:
         return False
     statuses = {_worker_status(worker) for worker in workers}
@@ -1539,4 +1573,4 @@ def worker_prompt(worker):
 
 
 def _worker_status(worker):
-    return WorkerRecord.from_worker(worker).status if isinstance(worker, dict) else None
+    return WorkerRecord.from_worker(worker).status if _is_worker_mapping(worker) else None

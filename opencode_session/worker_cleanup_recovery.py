@@ -8,7 +8,7 @@ from opencode_session.worker_session_provisioning import (
     WORKER_SESSION_CREATE_KIND,
     WORKER_SESSION_JOURNAL_FIELD,
 )
-from opencode_session.worker_state import sync_worker_record, worker_record_for_mutation
+from opencode_session.worker_state import is_worker_mapping, sync_worker_record, worker_record_for_mutation
 
 
 _WORKER_SESSION_RECOVERY = RemoteMutationRecovery(WORKER_SESSION_JOURNAL_FIELD)
@@ -59,7 +59,7 @@ def recoverable_created_worker_sessions_by_worker(run):
     workers = run.get("workers", {}) if isinstance(run, dict) else {}
     if isinstance(workers, dict):
         for worker_id, worker in workers.items():
-            if not isinstance(worker, dict):
+            if not is_worker_mapping(worker):
                 continue
             cleanup = worker.get("cleanup")
             if not isinstance(cleanup, dict) or cleanup.get("deleted"):

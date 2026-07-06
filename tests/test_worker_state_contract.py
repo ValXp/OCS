@@ -41,6 +41,7 @@ from opencode_session.worker_state import (
     worker_lifecycle_state,
     worker_lifecycle_state_for_status_alias,
     worker_lifecycle_target_states,
+    worker_record_for_mutation,
 )
 
 try:
@@ -133,6 +134,7 @@ class WorkerStateContractTest(unittest.TestCase):
         )
 
         self.assertIsInstance(worker, WorkerRecord)
+        self.assertNotIsInstance(worker, dict)
         self.assertEqual(worker["id"], "review")
         self.assertEqual(worker["status"], "failed")
         self.assertEqual(worker["dependencies"], [])
@@ -171,7 +173,23 @@ class WorkerStateContractTest(unittest.TestCase):
         )
 
         self.assertIsInstance(worker, WorkerRecord)
+        self.assertNotIsInstance(worker, dict)
         assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
+
+    def test_worker_record_mutation_is_object_backed_not_snapshot_backed(self):
+        snapshot = {
+            "id": "review",
+            "prompt_ids": ["msg_previous"],
+            "lifecycle_state": "active_wait",
+        }
+
+        record = worker_record_for_mutation(snapshot, "review")
+        record.remember_prompt_id("msg_new")
+
+        self.assertIsInstance(record, WorkerRecord)
+        self.assertNotIsInstance(record, dict)
+        self.assertEqual(record["prompt_ids"], ["msg_previous", "msg_new"])
+        self.assertEqual(snapshot["prompt_ids"], ["msg_previous"])
 
     def test_deserialize_worker_snapshot_hydrates_defaults_and_public_state(self):
         worker = deserialize_worker_record(

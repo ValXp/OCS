@@ -1,12 +1,13 @@
+from collections.abc import Mapping
 from copy import deepcopy
 
 
 def new_worker_attempt_record(worker, *, started_at, created_session_ids=()):
-    attempts = worker.get("attempts") if isinstance(worker, dict) else None
+    attempts = worker.get("attempts") if isinstance(worker, Mapping) else None
     attempt_count = len(attempts) if isinstance(attempts, list) else 0
     return {
         "id": f"attempt-{attempt_count + 1}",
-        "session_id": worker.get("session_id") if isinstance(worker, dict) else None,
+        "session_id": worker.get("session_id") if isinstance(worker, Mapping) else None,
         "created_session_ids": list(created_session_ids),
         "status": "active",
         "started_at": started_at,

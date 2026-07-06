@@ -23,6 +23,7 @@ from opencode_session.worker_state import (
     mark_dependency_blocked,
     mark_worker_aborted,
     mark_worker_active,
+    is_worker_mapping,
     sync_worker_record,
     worker_record_for_mutation,
 )
@@ -281,7 +282,7 @@ def recoverable_remote_mutation_entries(run, *, kind=None):
 
 def _worker_result(run, worker_id):
     worker = run.get("workers", {}).get(worker_id)
-    if not isinstance(worker, dict):
+    if not is_worker_mapping(worker):
         raise RunStoreError(f"worker '{worker_id}' not found in run '{run['name']}'", kind="missing")
     result = worker.get("result")
     if not isinstance(result, dict):
@@ -291,7 +292,7 @@ def _worker_result(run, worker_id):
 
 def _run_worker_with_session(run, worker_id):
     worker = run.get("workers", {}).get(worker_id)
-    if not isinstance(worker, dict):
+    if not is_worker_mapping(worker):
         raise RunStoreError(f"worker '{worker_id}' not found in run '{run['name']}'", kind="missing")
     if not worker.get("session_id"):
         raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no session", kind="missing")

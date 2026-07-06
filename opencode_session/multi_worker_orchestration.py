@@ -31,6 +31,7 @@ from opencode_session.worker_state import (
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
     is_executable_worker,
+    is_worker_mapping,
     refresh_run_summary as _refresh_worker_run_summary,
     sync_worker_record,
     worker_record_for_mutation,
@@ -87,7 +88,7 @@ class DependencyOrderedSerialPlanner:
             dependency_blocked_transitions=tuple(
                 _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
                 for worker_id in sorted(blocked_worker_ids)
-                if isinstance(workers.get(worker_id), dict)
+                if is_worker_mapping(workers.get(worker_id))
             ),
             blockers_by_worker_id=analysis.blockers_by_worker_id,
         )
@@ -257,7 +258,7 @@ class DependencyOrderedSerialRunOrchestrationService:
                 sync_worker_record(worker, worker_record)
 
         run = self._persist_mutation(run, prepare)
-        if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):
+        if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if is_worker_mapping(worker)):
             raise RunStoreError(f"run '{request.name}' has no worker prompts; pass --prompt or add workers with --prompt")
         return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
 
@@ -393,7 +394,7 @@ def plan_dependency_ordered_serial_step(workers):
 
 def _worker_by_id(workers, worker_id):
     worker = workers.get(worker_id) if isinstance(workers, dict) else None
-    return worker if isinstance(worker, dict) else None
+    return worker if is_worker_mapping(worker) else None
 
 
 def _pending_prompted_workers(workers):
@@ -407,7 +408,7 @@ def _pending_prompted_worker_ids(workers):
     return tuple(
         worker_id
         for worker_id in sorted(workers)
-        if isinstance(workers.get(worker_id), dict)
+        if is_worker_mapping(workers.get(worker_id))
         and is_executable_worker(workers[worker_id])
     )
 

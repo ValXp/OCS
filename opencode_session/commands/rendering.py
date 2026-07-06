@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 import json
 from dataclasses import dataclass
 
@@ -35,8 +36,16 @@ def render_command_result(args, result=None, *, raw_body=None, compact=None, exi
         write_raw(raw_body)
         return command_result.exit_code
     if getattr(args, "json", False):
-        print(json.dumps(data, sort_keys=True))
+        print(json.dumps(_json_ready(data), sort_keys=True))
         return command_result.exit_code
     if compact is not None:
         print(compact(data) if callable(compact) else compact)
     return command_result.exit_code
+
+
+def _json_ready(value):
+    if isinstance(value, Mapping):
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value

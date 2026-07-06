@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from opencode_session.worker_state import (
     WorkerTransition,
     apply_worker_transition,
+    is_worker_mapping,
     normalize_worker_snapshot,
 )
 
@@ -31,7 +32,7 @@ def persist_worker_snapshot_updates(store, run, workers, *, refresh_run_summary,
     updates = [
         WorkerTransition.snapshot_applied(normalize_worker_snapshot(worker, worker["id"]))
         for worker in workers
-        if isinstance(worker, dict) and worker.get("id")
+        if is_worker_mapping(worker) and worker.get("id")
     ]
     return persist_worker_transitions(store, run, updates, refresh_run_summary=refresh_run_summary, now=now)
 
