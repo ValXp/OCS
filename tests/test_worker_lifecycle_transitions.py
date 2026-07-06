@@ -4,6 +4,7 @@ import unittest
 
 from opencode_session.worker_state import (
     UNSET_TRANSITION_FIELD,
+    WORKER_TRANSITION_DEFINITIONS,
     WORKER_TRANSITION_METADATA,
     WorkerRecord,
     WorkerTransition,
@@ -450,19 +451,26 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(set(WorkerTransitionName), set(WORKER_TRANSITION_METADATA))
+        self.assertEqual(set(WorkerTransitionName), set(WORKER_TRANSITION_DEFINITIONS))
+        self.assertEqual(set(WORKER_TRANSITION_DEFINITIONS), set(WORKER_TRANSITION_METADATA))
         self.assertEqual(set(WorkerTransitionName), {case[0] for case in cases})
         for transition_name, worker_fields, transition_factory, expected_outcome, expected_fields in cases:
             with self.subTest(transition=transition_name):
                 worker = normalize_worker(worker_fields, "review")
                 transition = transition_factory(worker)
                 target_lifecycle = worker_transition_target_lifecycle_state(transition)
+                definition = WORKER_TRANSITION_DEFINITIONS[transition_name]
 
                 self.assertIs(transition.name, transition_name)
-                self.assertIn(worker_lifecycle_state(worker), worker_lifecycle_source_states(transition_name))
+                self.assertIs(definition.metadata, WORKER_TRANSITION_METADATA[transition_name])
+                self.assertIn(worker_lifecycle_state(worker), definition.source_states)
+                self.assertEqual(definition.source_states, worker_lifecycle_source_states(transition_name))
+                self.assertTrue(definition.is_legal(worker, transition))
                 self.assertTrue(worker_transition_is_legal(worker, transition))
-                if worker_lifecycle_target_states(transition_name):
-                    self.assertIn(target_lifecycle, worker_lifecycle_target_states(transition_name))
+                self.assertEqual(definition.target_lifecycle_state(transition), target_lifecycle)
+                if definition.target_states:
+                    self.assertIn(target_lifecycle, definition.target_states)
+                    self.assertEqual(definition.target_states, worker_lifecycle_target_states(transition_name))
                 else:
                     self.assertIsNone(target_lifecycle)
 
@@ -471,34 +479,6 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 assert_worker_outcome(self, worker, **expected_outcome)
                 for field_name, expected_value in expected_fields.items():
                     self.assertEqual(worker_field(worker, field_name), expected_value)
-
-    def test_transition_dispatch_uses_reducer_functions_not_metadata_method_names(self):
-        from opencode_session.worker_lifecycle_reducer import (
-            WorkerLifecycleReducer,
-            _WORKER_TRANSITION_DEFINITIONS,
-        )
-
-        expected_appliers = {
-            WorkerTransitionName.PROVISIONED: WorkerLifecycleReducer.provisioned,
-            WorkerTransitionName.ACTIVE: WorkerLifecycleReducer.active,
-            WorkerTransitionName.ATTEMPT_STARTED: WorkerLifecycleReducer.attempt_started,
-            WorkerTransitionName.FAILED: WorkerLifecycleReducer.failed,
-            WorkerTransitionName.DEPENDENCY_BLOCKED: WorkerLifecycleReducer.dependency_blocked,
-            WorkerTransitionName.ABORTED: WorkerLifecycleReducer.aborted,
-            WorkerTransitionName.RETRY_SCHEDULED: WorkerLifecycleReducer.retry_scheduled,
-            WorkerTransitionName.TIMED_OUT: WorkerLifecycleReducer.timed_out,
-            WorkerTransitionName.RESULT_APPLIED: WorkerLifecycleReducer.result_applied,
-            WorkerTransitionName.CLEANUP_UPDATED: WorkerLifecycleReducer.cleanup_updated,
-            WorkerTransitionName.SNAPSHOT_APPLIED: WorkerLifecycleReducer.snapshot_applied,
-        }
-
-        self.assertEqual(set(WORKER_TRANSITION_METADATA), set(_WORKER_TRANSITION_DEFINITIONS))
-        for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
-            with self.subTest(transition=transition_name):
-                self.assertNotIn("apply_method", metadata.__dataclass_fields__)
-                definition = _WORKER_TRANSITION_DEFINITIONS[transition_name]
-                self.assertIs(definition.metadata, metadata)
-                self.assertIs(definition.apply_transition, expected_appliers[transition_name])
 
     def test_retry_transition_definition_carries_legality_target_and_behavior(self):
         worker = normalize_worker(
