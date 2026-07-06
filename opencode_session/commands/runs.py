@@ -1,7 +1,7 @@
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import format_blocking_execution_compact as _format_run_compact
 from opencode_session.cli_policy import server_default
-from opencode_session.commands.rendering import render_command_result
+from opencode_session.commands.rendering import CommandResult, render_command_result
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.prompt_admission import (
     PromptAdmissionFailure,
@@ -33,10 +33,9 @@ def handle_run_command(args, *, print_error, noinput_exit, dataerr_exit, unavail
                 unsupported_exit=unsupported_exit,
             )
     except RunStoreError as error:
-        print_error(str(error))
         if error.kind == "missing":
-            return noinput_exit
-        return dataerr_exit
+            return _error_result(args, str(error), noinput_exit, print_error)
+        return _error_result(args, str(error), dataerr_exit, print_error)
     return 64
 
 
@@ -143,10 +142,8 @@ def _start_orchestration_run(args, service, *, print_error, **_context):
         )
     )
     if outcome.error is not None:
-        print_error(outcome.error)
-        return outcome.exit_code
-    print(format_run_compact(outcome.run))
-    return outcome.exit_code
+        return _error_result(args, outcome.error, outcome.exit_code, print_error)
+    return render_command_result(args, CommandResult(outcome.run, compact=format_run_compact, exit_code=outcome.exit_code))
 
 
 def _init_run(args, service, **_context):
@@ -186,16 +183,14 @@ def _collect_run_results(args, service, **_context):
     collection = service.collect_results(args.name, worker_id=args.worker)
     if collection.worker is not None:
         return _print_single_worker_result(args, collection.worker)
-    if args.json:
-        return render_command_result(
-            args,
-            [
-                {"worker": worker.get("id"), "role": worker.get("role"), "result": worker.get("result")}
-                for worker in collection.workers
-            ],
-        )
-    print("\n".join(format_worker_result_compact(worker) for worker in collection.workers))
-    return 0
+    data = [
+        {"worker": worker.get("id"), "role": worker.get("role"), "result": worker.get("result")}
+        for worker in collection.workers
+    ]
+    return render_command_result(
+        args,
+        CommandResult(data, compact="\n".join(format_worker_result_compact(worker) for worker in collection.workers)),
+    )
 
 
 def _print_single_worker_result(args, worker):
@@ -213,14 +208,11 @@ def _steer_run_worker(args, service, *, print_error, unavailable_exit, unsupport
             message_id=args.message_id,
         )
     except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
     except PromptAdmissionUnsupported as error:
-        print_error(str(error))
-        return unsupported_exit
+        return _error_result(args, str(error), unsupported_exit, print_error)
     except PromptAdmissionFailure as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
 
     run = result.run
     worker = result.worker
@@ -236,11 +228,9 @@ def _abort_run_worker(args, service, *, print_error, unavailable_exit, **_contex
     try:
         result = service.abort_worker(args.name, args.worker_id)
     except RunWorkerSessionNotFound as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
     except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
     run = result.run
     worker = result.worker
     abort = result.abort
@@ -256,6 +246,10 @@ def _positive_timeout_seconds(value, positive_float):
     if timeout.is_integer():
         return int(timeout)
     return timeout
+
+
+def _error_result(args, message, exit_code, print_error):
+    return render_command_result(args, CommandResult(error=message, exit_code=exit_code), print_error=print_error)
 
 
 _RUN_HANDLERS = {
