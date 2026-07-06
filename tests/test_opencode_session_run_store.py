@@ -199,13 +199,16 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
             run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
-            build_worker = dict(run["workers"]["build"])
+            build_worker = run["workers"]["build"].to_public_dict()
             result = {
                 "session_id": "ses_build",
                 "status": "done",
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
-            apply_worker_transition_to_worker(build_worker, apply_worker_result(build_worker, result, prompt_ids=("prompt-build",)))
+            build_worker = apply_worker_transition_to_worker(
+                build_worker,
+                apply_worker_result(build_worker, result, prompt_ids=("prompt-build",)),
+            )
 
             persisted = persist_worker_snapshot_update(
                 run_store,

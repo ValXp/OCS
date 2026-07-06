@@ -33,7 +33,6 @@ from opencode_session.worker_state import (
     is_executable_worker,
     is_worker_mapping,
     refresh_run_summary as _refresh_worker_run_summary,
-    sync_worker_record,
     worker_record_for_mutation,
     worker_prompt as _worker_prompt,
     workers_in_dependency_order as _workers_in_dependency_order,
@@ -255,7 +254,6 @@ class DependencyOrderedSerialRunOrchestrationService:
                     agent=request.agent,
                     model=request.model,
                 )
-                sync_worker_record(worker, worker_record)
 
         run = self._persist_mutation(run, prepare)
         if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if is_worker_mapping(worker)):

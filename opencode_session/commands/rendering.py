@@ -44,6 +44,9 @@ def render_command_result(args, result=None, *, raw_body=None, compact=None, exi
 
 
 def _json_ready(value):
+    to_public_dict = getattr(value, "to_public_dict", None)
+    if callable(to_public_dict):
+        return _json_ready(to_public_dict())
     if isinstance(value, Mapping):
         return {key: _json_ready(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

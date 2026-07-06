@@ -1,3 +1,4 @@
+from collections.abc import Mapping, MutableMapping
 import unittest
 
 from opencode_session.worker_state import (
@@ -19,10 +20,12 @@ from opencode_session.worker_state import (
     WorkerLifecycleDimensions,
     WorkerLifecycleStatus,
     WorkerRecord,
+    apply_worker_transition,
     deserialize_worker_record,
     exit_code_for_run,
     exit_code_for_status,
     is_executable_worker,
+    mark_worker_active,
     next_eligible_worker_action,
     normalize_worker,
     normalize_worker_snapshot,
@@ -226,6 +229,29 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIsInstance(record, dict)
         self.assertEqual(record["prompt_ids"], ["msg_previous", "msg_new"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_previous"])
+
+    def test_worker_record_is_not_mapping_hybrid(self):
+        record = WorkerRecord.default_fields("review")
+
+        self.assertNotIsInstance(record, Mapping)
+        self.assertNotIsInstance(record, MutableMapping)
+        with self.assertRaises(TypeError):
+            dict(record)
+
+    def test_worker_record_mutation_updates_hydrated_object_without_sync(self):
+        worker = WorkerRecord.default_fields("review")
+        worker["prompt"] = "Review the change"
+        workers = {"review": worker}
+
+        record = apply_worker_transition(workers, mark_worker_active(worker))
+        record.remember_prompt_id("msg_review")
+        snapshot = serialize_worker_snapshot(record, "review")
+
+        self.assertIs(record, worker)
+        self.assertIs(workers["review"], worker)
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["prompt_ids"], ["msg_review"])
+        self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
     def test_deserialize_worker_snapshot_hydrates_defaults_and_public_state(self):
         worker = deserialize_worker_record(

@@ -1,13 +1,12 @@
-from collections.abc import Mapping
 from copy import deepcopy
 
 
 def new_worker_attempt_record(worker, *, started_at, created_session_ids=()):
-    attempts = worker.get("attempts") if isinstance(worker, Mapping) else None
+    attempts = _worker_get(worker, "attempts")
     attempt_count = len(attempts) if isinstance(attempts, list) else 0
     return {
         "id": f"attempt-{attempt_count + 1}",
-        "session_id": worker.get("session_id") if isinstance(worker, Mapping) else None,
+        "session_id": _worker_get(worker, "session_id"),
         "created_session_ids": list(created_session_ids),
         "status": "active",
         "started_at": started_at,
@@ -43,3 +42,10 @@ def _finalize_attempt(worker, finalization):
             finalized.append(deepcopy(attempt))
     if found:
         worker["attempts"] = finalized
+
+
+def _worker_get(worker, field_name, default=None):
+    getter = getattr(worker, "get", None)
+    if not callable(getter):
+        return default
+    return getter(field_name, default)

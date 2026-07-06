@@ -8,7 +8,6 @@ from opencode_session.session_ids import require_session_id
 from opencode_session.worker_state import (
     WorkerRecord,
     is_worker_mapping,
-    sync_worker_record,
     worker_record_for_mutation,
 )
 
@@ -93,7 +92,6 @@ class WorkerSessionCreationJournal:
             latest_record.set_session(session_id, agent=agent, model=model)
             if intent.cleanup_requested:
                 latest_record.remember_session_for_cleanup(session_id)
-            sync_worker_record(latest_worker, latest_record)
 
         updated_run = self._transaction(intent).mark_applied(
             run,
@@ -155,6 +153,7 @@ class WorkerSessionProvisioner:
                 model=model,
                 cleanup_requested=cleanup_requested,
             )
+        worker = _coerce_worker_record(run, worker)
         try:
             session_outcome = provision_worker_session(
                 client,
@@ -196,7 +195,7 @@ def ensure_worker_session(
     model=None,
     treat_falsey_session_as_missing=False,
 ):
-    record = worker_record_for_mutation(worker)
+    record = _coerce_worker_record(run, worker)
     worker_session_id = session_id or record.get("session_id")
     created_session_id = None
     missing_session = not worker_session_id if treat_falsey_session_as_missing else worker_session_id is None
@@ -205,7 +204,6 @@ def ensure_worker_session(
         worker_session_id = require_session_id(create_response)
         created_session_id = worker_session_id
     record.set_session(worker_session_id, agent=agent, model=model)
-    sync_worker_record(worker, record)
     return WorkerSessionOutcome(worker_session_id, created_session_id)
 
 
@@ -229,9 +227,8 @@ def provision_worker_session(
             model=model,
             treat_falsey_session_as_missing=True,
         )
-    record = worker_record_for_mutation(worker)
+    record = _coerce_worker_record(run, worker)
     record.set_session(session_id or record.get("session_id"), agent=agent, model=model)
-    sync_worker_record(worker, record)
     return WorkerSessionOutcome(record.get("session_id"))
 
 
@@ -243,17 +240,33 @@ def will_create_worker_session(worker, *, session_id=None, create_session=True):
 
 def _latest_worker(run, fallback_worker):
     worker_id = fallback_worker.get("id") if is_worker_mapping(fallback_worker) else None
-    latest_worker = run.get("workers", {}).get(worker_id) if isinstance(run, dict) and worker_id else None
-    return latest_worker if is_worker_mapping(latest_worker) else fallback_worker
+    if isinstance(run, dict) and worker_id:
+        return _ensure_latest_worker(run, worker_id)
+    if isinstance(fallback_worker, WorkerRecord):
+        return fallback_worker
+    return worker_record_for_mutation(fallback_worker, worker_id).to_worker()
 
 
 def _ensure_latest_worker(run, worker_id):
     workers = run.setdefault("workers", {})
     worker = workers.get(worker_id)
-    if not is_worker_mapping(worker):
+    if isinstance(worker, WorkerRecord):
+        return worker
+    if is_worker_mapping(worker):
+        worker = worker_record_for_mutation(worker, worker_id).to_worker()
+    else:
         worker = WorkerRecord.default_fields(worker_id)
-        workers[worker_id] = worker
+    workers[worker_id] = worker
     return worker
+
+
+def _coerce_worker_record(run, worker):
+    if isinstance(worker, WorkerRecord):
+        return worker
+    worker_id = worker.get("id") if is_worker_mapping(worker) else None
+    if isinstance(run, dict) and worker_id:
+        return _ensure_latest_worker(run, worker_id)
+    return worker_record_for_mutation(worker, worker_id).to_worker()
 
 
 def _new_worker_session_journal_id():

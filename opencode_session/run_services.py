@@ -20,11 +20,10 @@ from opencode_session.status import short_status
 from opencode_session.schema_common import NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord, Worker
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 from opencode_session.worker_state import (
+    is_worker_mapping,
     mark_dependency_blocked,
     mark_worker_aborted,
     mark_worker_active,
-    is_worker_mapping,
-    sync_worker_record,
     worker_record_for_mutation,
 )
 
@@ -129,7 +128,6 @@ class RunCommandService:
                 transition = mark_dependency_blocked(worker, blockers)
             record = worker_record_for_mutation(worker, worker_id)
             record.apply_transition(transition)
-            sync_worker_record(worker, record)
             run["updated_at"] = self.now()
 
         return self.store.update_run(name, mutate)
@@ -212,7 +210,6 @@ class RunCommandService:
             latest_worker = _run_worker_with_session(latest_run, worker_id)
             latest_record = worker_record_for_mutation(latest_worker, worker_id)
             latest_record.remember_prompt_id(admitted_message_id)
-            sync_worker_record(latest_worker, latest_record)
 
         run = transaction.finalize(run, before_finalize=record_prompt_admission)
         return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
@@ -245,7 +242,6 @@ class RunCommandService:
             latest_worker = _run_worker_with_session(latest_run, worker_id)
             latest_record = worker_record_for_mutation(latest_worker, worker_id)
             latest_record.apply_transition(mark_worker_aborted(latest_record, abort))
-            sync_worker_record(latest_worker, latest_record)
             refresh_orchestration_run_summary(latest_run)
 
         run = transaction.finalize(run, before_finalize=mark_aborted)

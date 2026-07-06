@@ -8,7 +8,7 @@ from opencode_session.worker_session_provisioning import (
     WORKER_SESSION_CREATE_KIND,
     WORKER_SESSION_JOURNAL_FIELD,
 )
-from opencode_session.worker_state import is_worker_mapping, sync_worker_record, worker_record_for_mutation
+from opencode_session.worker_state import is_worker_mapping, worker_record_for_mutation
 
 
 _WORKER_SESSION_RECOVERY = RemoteMutationRecovery(WORKER_SESSION_JOURNAL_FIELD)
@@ -48,9 +48,7 @@ def cleanup_created_worker_sessions(client, worker, session_ids):
     else:
         cleanup.pop("verified", None)
     if errors:
-        sync_worker_record(worker, record)
         return WorkerCleanupOutcome(deleted_session_ids, cleanup_outcome.first_error)
-    sync_worker_record(worker, record)
     return WorkerCleanupOutcome(deleted_session_ids)
 
 

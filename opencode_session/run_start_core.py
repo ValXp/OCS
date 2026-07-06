@@ -14,7 +14,12 @@ from opencode_session.worker_execution import (
     WorkerExecutionExecutor,
 )
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
-from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition, is_worker_mapping
+from opencode_session.worker_state import (
+    EX_UNAVAILABLE,
+    WorkerTransition,
+    is_worker_mapping,
+    worker_record_for_mutation,
+)
 
 
 @dataclass
@@ -121,9 +126,12 @@ class RunStartCore:
         first_error = None
         current_run = run
         for worker_id, session_ids in created_session_ids_by_worker.items():
-            worker = current_run.get("workers", {}).get(worker_id)
+            workers = current_run.setdefault("workers", {})
+            worker = workers.get(worker_id)
             if not is_worker_mapping(worker):
                 continue
+            worker = worker_record_for_mutation(worker, worker_id).to_worker()
+            workers[worker_id] = worker
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
             persisted = self._persist_transition(current_run, WorkerTransition.cleanup_updated(worker))
             current_run = persisted.run

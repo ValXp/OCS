@@ -132,14 +132,18 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(worker["session_id"], "ses_existing")
 
     def test_cleanup_created_worker_sessions_clears_stale_sessions_after_single_session_success(self):
-        worker = {
-            "cleanup": {
-                "requested": True,
-                "deleted": False,
-                "error": "DELETE /api/session/ses_old failed: HTTP 500",
-                "sessions": ["ses_old", "ses_retry"],
-            }
-        }
+        worker = WorkerRecord.from_worker(
+            {
+                "id": "worker",
+                "cleanup": {
+                    "requested": True,
+                    "deleted": False,
+                    "error": "DELETE /api/session/ses_old failed: HTTP 500",
+                    "sessions": ["ses_old", "ses_retry"],
+                },
+            },
+            "worker",
+        ).to_worker()
         client = FakeClient([])
 
         outcome = cleanup_created_worker_sessions(client, worker, ["ses_new"])
@@ -150,7 +154,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
 
     def test_cleanup_created_worker_sessions_treats_missing_session_as_deleted(self):
-        worker = {}
+        worker = WorkerRecord.default_fields("worker")
         client = FakeClient(
             [],
             delete_failures={"ses_missing": OpenCodeApiError("session not found", status=404)},
@@ -233,8 +237,9 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(provisioning.outcome.created_session_id, "ses_new")
         self.assertEqual(journals[0][0]["status"], "intent")
         self.assertEqual(journals[1][0]["status"], "created")
-        self.assertEqual(worker["session_id"], "ses_new")
-        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_new"]})
+        self.assertIs(provisioning.worker, run["workers"]["worker"])
+        self.assertEqual(provisioning.worker["session_id"], "ses_new")
+        self.assertEqual(provisioning.worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_new"]})
 
         finalized_run, finalized_worker = provisioner.finalize_best_effort(
             provisioning.run,
@@ -243,7 +248,7 @@ class WorkerExecutionTest(unittest.TestCase):
         )
 
         self.assertIs(finalized_run, run)
-        self.assertIs(finalized_worker, worker)
+        self.assertIs(finalized_worker, provisioning.worker)
         self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
 
     def test_recoverable_created_worker_sessions_merges_cleanup_and_journal_transactions(self):

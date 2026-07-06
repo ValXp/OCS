@@ -1,4 +1,4 @@
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -799,7 +799,15 @@ def worker_lifecycle_set_fields(worker_id, lifecycle_state):
 
 
 def _is_worker_mapping(worker):
-    return isinstance(worker, Mapping)
+    return isinstance(worker, WorkerRecord) or isinstance(worker, Mapping)
+
+
+def _worker_fields(worker):
+    if isinstance(worker, WorkerRecord):
+        return worker.to_public_dict()
+    if isinstance(worker, Mapping):
+        return dict(worker)
+    return {}
 
 
 def is_worker_mapping(worker):
@@ -931,7 +939,7 @@ def _lifecycle_state_from_legacy_public_worker_state(worker):
 
 
 def canonicalize_legacy_worker_record(worker):
-    fields = dict(worker) if _is_worker_mapping(worker) else {}
+    fields = _worker_fields(worker)
     if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
         fields["lifecycle_state"] = _lifecycle_state_from_legacy_public_worker_state(fields)
     return fields
@@ -966,19 +974,25 @@ def is_dependency_blockable_worker(worker):
     return WorkerSchedulingState.from_worker(worker).can_block_for_dependency()
 
 
-class WorkerRecord(MutableMapping):
-    """Hydrated worker domain object.
+_MISSING_WORKER_FIELD = object()
 
-    Worker records provide mapping-style access for existing orchestration code,
-    but mutations are backed by this object rather than by persisted JSON dicts.
-    Storage still writes sparse snapshots via to_snapshot().
-    """
+
+class WorkerRecord:
+    """Hydrated worker domain object with explicit serialization boundaries."""
+
+    __iter__ = None
 
     def __init__(self, worker_id, fields=None):
         self._fields = deepcopy(dict(fields or {}))
         self._worker_id = self._fields.get("id") or worker_id
 
     def __getitem__(self, key):
+        if key == "id":
+            return self.worker_id
+        if key == "status":
+            return self.status
+        if key == "next_eligible_action":
+            return self.next_eligible_action
         return self._fields[key]
 
     def __setitem__(self, key, value):
@@ -987,25 +1001,48 @@ class WorkerRecord(MutableMapping):
     def __delitem__(self, key):
         del self._fields[key]
 
-    def __iter__(self):
-        return iter(self._fields)
-
-    def __len__(self):
-        return len(self._fields)
+    def __contains__(self, key):
+        return key in self._fields or key in {"id", "status", "next_eligible_action"}
 
     def __repr__(self):
-        return f"{type(self).__name__}({self.worker_id!r}, {self._fields!r})"
+        return f"{type(self).__name__}({self.worker_id!r}, {self.to_public_dict()!r})"
 
     def __eq__(self, other):
         if isinstance(other, WorkerRecord):
-            return self._fields == other._fields
+            return self.to_public_dict() == other.to_public_dict()
         if isinstance(other, Mapping):
-            return self._fields == dict(other)
+            return self.to_public_dict() == dict(other)
         return NotImplemented
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        return default
+
+    def setdefault(self, key, default=None):
+        if key not in self._fields:
+            self._fields[key] = deepcopy(default)
+        return self._fields[key]
+
+    def pop(self, key, default=_MISSING_WORKER_FIELD):
+        if default is _MISSING_WORKER_FIELD:
+            return self._fields.pop(key)
+        return self._fields.pop(key, default)
+
+    def update(self, fields=None, **kwargs):
+        if fields is not None:
+            self._fields.update(_worker_fields(fields))
+        if kwargs:
+            self._fields.update(kwargs)
+        return self
+
+    def clear(self):
+        self._fields.clear()
+        return self
 
     @classmethod
     def from_worker(cls, worker, worker_id=None):
-        fields = dict(worker) if _is_worker_mapping(worker) else {}
+        fields = _worker_fields(worker)
         resolved_worker_id = fields.get("id") or worker_id
         return cls(resolved_worker_id, fields)
 
@@ -1055,15 +1092,11 @@ class WorkerRecord(MutableMapping):
 
     @property
     def worker_id(self):
-        return self.get("id") or self._worker_id
-
-    @property
-    def fields(self):
-        return self
+        return self._fields.get("id") or self._worker_id
 
     @property
     def lifecycle_state(self):
-        return _canonical_lifecycle_state(self.fields)
+        return _canonical_lifecycle_state(self)
 
     @property
     def status(self):
@@ -1075,7 +1108,7 @@ class WorkerRecord(MutableMapping):
 
     @property
     def has_prompt(self):
-        return worker_has_prompt(self.fields)
+        return worker_has_prompt(self)
 
     def scheduling_state(self):
         return WorkerSchedulingState(
@@ -1085,9 +1118,16 @@ class WorkerRecord(MutableMapping):
             self.has_prompt,
         )
 
+    def to_public_dict(self):
+        fields = deepcopy(self._fields)
+        fields["id"] = fields.get("id") or self.worker_id
+        fields["lifecycle_state"] = self.lifecycle_state
+        fields.update(self.public_state_fields(fields["lifecycle_state"]))
+        return fields
+
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
-        fields = deepcopy(dict(self))
+        fields = self.to_public_dict()
         fields.pop("status", None)
         fields.pop("next_eligible_action", None)
         normalized.update(fields)
@@ -1180,14 +1220,6 @@ def worker_record_for_mutation(worker, worker_id=None):
     if isinstance(worker, WorkerRecord):
         return worker
     return WorkerRecord.from_worker(worker, worker_id)
-
-
-def sync_worker_record(worker, record):
-    if worker is not record and isinstance(worker, MutableMapping):
-        worker.clear()
-        worker.update(record)
-        return worker
-    return record
 
 
 def require_internal_worker(worker):
@@ -1490,7 +1522,7 @@ def _apply_worker_transition_to_record(worker, transition):
 def apply_worker_transition_to_worker(worker, transition):
     record = worker_record_for_mutation(worker, transition.worker_id)
     record.apply_transition(transition)
-    return sync_worker_record(worker, record)
+    return record
 
 
 def apply_worker_transition(latest_workers, transition):
