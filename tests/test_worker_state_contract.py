@@ -14,8 +14,10 @@ from opencode_session.worker_state import (
     schedule_worker_retry,
 )
 from opencode_session.schema_common import Worker, WorkerSnapshotRecord
-from opencode_session.worker_domain import WorkerRecord, WorkerSchedulingState, WorkerTransition
+from opencode_session.worker_lifecycle import WorkerSchedulingState
+from opencode_session.worker_lifecycle_reducer import WorkerTransition
 from opencode_session.worker_snapshot_codec import (
+    WorkerRecord,
     require_internal_worker,
     deserialize_worker_record,
     serialize_worker_snapshot,
@@ -28,18 +30,6 @@ except ModuleNotFoundError:
 
 
 class WorkerStateContractTest(unittest.TestCase):
-    def test_worker_domain_facade_exposes_decomposed_worker_helpers(self):
-        import opencode_session.worker_domain as worker_domain
-        from opencode_session.worker_attempt_log import new_worker_attempt_record
-        from opencode_session.worker_lifecycle import WorkerSchedulingState as DecomposedSchedulingState
-        from opencode_session.worker_lifecycle_reducer import WorkerTransition as DecomposedTransition
-        from opencode_session.worker_snapshot_codec import WorkerRecord as DecomposedRecord
-
-        self.assertIs(worker_domain.WorkerRecord, DecomposedRecord)
-        self.assertIs(worker_domain.WorkerSchedulingState, DecomposedSchedulingState)
-        self.assertIs(worker_domain.WorkerTransition, DecomposedTransition)
-        self.assertIs(worker_domain.new_worker_attempt_record, new_worker_attempt_record)
-
     def test_normalize_worker_applies_defaults_and_derives_next_action(self):
         worker = normalize_worker(
             {

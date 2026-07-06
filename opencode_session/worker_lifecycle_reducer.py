@@ -27,7 +27,7 @@ from opencode_session.worker_lifecycle import (
     worker_lifecycle_set_fields,
     worker_lifecycle_state,
 )
-from opencode_session.worker_snapshot_codec import WORKER_SNAPSHOT_STATE_FIELDS
+from opencode_session.worker_snapshot_codec import WORKER_SNAPSHOT_STATE_FIELDS, WorkerRecord
 
 
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
@@ -232,8 +232,6 @@ class WorkerTransition:
 
 
 def apply_worker_transition_spec(record, spec):
-    from opencode_session.worker_snapshot_codec import WorkerRecord
-
     latest_worker = record.to_snapshot()
     set_fields = deepcopy(spec.set_fields or {})
     set_if_missing_fields = deepcopy(spec.set_if_missing_fields or {})

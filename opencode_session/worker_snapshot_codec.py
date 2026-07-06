@@ -162,11 +162,6 @@ class WorkerRecord:
     def serialized_public_state(self):
         return self.public_state_fields(self.lifecycle_state)
 
-    def apply_transition_spec(self, spec):
-        from opencode_session.worker_lifecycle_reducer import apply_worker_transition_spec
-
-        return apply_worker_transition_spec(self, spec)
-
     @staticmethod
     def _infer_lifecycle_state(worker):
         return infer_worker_lifecycle_state(worker)

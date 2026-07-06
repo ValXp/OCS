@@ -21,7 +21,8 @@ from opencode_session.worker_execution import (
     WorkerExecutionOutcome,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_domain import WorkerTransition, is_executable_worker
+from opencode_session.worker_lifecycle import is_executable_worker
+from opencode_session.worker_lifecycle_reducer import WorkerTransition
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,

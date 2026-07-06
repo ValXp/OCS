@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from opencode_session.status import short_status
-from opencode_session.worker_domain import (
+from opencode_session.worker_snapshot_codec import (
     default_worker_record,
     deserialize_worker_record,
     serialize_worker_snapshot,
