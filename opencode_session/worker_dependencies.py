@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from opencode_session.worker_scheduling import (
+from opencode_session.worker_domain import (
     WorkerSchedulingState,
     is_dependency_blockable_worker,
     is_executable_worker,

@@ -1,10 +1,10 @@
 from pathlib import Path
 
 from opencode_session.status import short_status
-from opencode_session.worker_state import (
-    default_worker,
-    normalize_worker,
-    normalize_worker_snapshot,
+from opencode_session.worker_domain import (
+    default_worker_record,
+    deserialize_worker_record,
+    serialize_worker_snapshot,
 )
 
 
@@ -43,9 +43,9 @@ def upsert_worker_record(run, worker_id, changes, *, now):
     if existing is None:
         if not changes.get("role"):
             raise RunRecordError(f"worker '{worker_id}' does not exist; --role is required to create it")
-        worker = default_worker(worker_id)
+        worker = default_worker_record(worker_id)
     else:
-        worker = normalize_worker(existing, worker_id)
+        worker = deserialize_worker_record(existing, worker_id)
 
     status_changed = changes.get("status") is not None
     for key in (
@@ -68,7 +68,7 @@ def upsert_worker_record(run, worker_id, changes, *, now):
 
     if status_changed:
         worker.pop("lifecycle_state", None)
-    workers[worker_id] = normalize_worker(worker, worker_id)
+    workers[worker_id] = deserialize_worker_record(worker, worker_id)
     run["updated_at"] = now
 
 
@@ -93,7 +93,7 @@ def normalize_run(run, *, fallback_name):
         workers = {}
     elif not isinstance(workers, dict):
         raise RunRecordError(f"run record for '{fallback_name}' is corrupted: workers must be an object")
-    normalized["workers"] = {worker_id: normalize_worker(worker, worker_id) for worker_id, worker in workers.items()}
+    normalized["workers"] = {worker_id: deserialize_worker_record(worker, worker_id) for worker_id, worker in workers.items()}
     normalized.setdefault("created_at", None)
     normalized.setdefault("updated_at", None)
     return normalized
@@ -102,7 +102,7 @@ def normalize_run(run, *, fallback_name):
 def normalize_run_for_storage(run, *, fallback_name):
     normalized = normalize_run(run, fallback_name=fallback_name)
     normalized["workers"] = {
-        worker_id: normalize_worker_snapshot(worker, worker_id)
+        worker_id: serialize_worker_snapshot(worker, worker_id)
         for worker_id, worker in normalized["workers"].items()
     }
     return normalized

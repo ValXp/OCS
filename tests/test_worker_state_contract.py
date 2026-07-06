@@ -13,9 +13,7 @@ from opencode_session.worker_state import (
     refresh_run_summary,
     schedule_worker_retry,
 )
-from opencode_session.worker_lifecycle import WorkerTransition
-from opencode_session.worker_normalization import WorkerRecord
-from opencode_session.worker_scheduling import WorkerSchedulingState
+from opencode_session.worker_domain import WorkerRecord, WorkerSchedulingState, WorkerTransition
 
 
 class WorkerStateContractTest(unittest.TestCase):

@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 
-from opencode_session.worker_lifecycle import WorkerTransition
-from opencode_session.worker_normalization import snapshot_state_source
+from opencode_session.worker_domain import WorkerTransition, snapshot_state_source
 from opencode_session.worker_state import apply_worker_transition, normalize_worker_snapshot
 
 

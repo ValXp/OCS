@@ -17,8 +17,7 @@ from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import RunRecord
 from opencode_session.worker_execution import RETRY_SCHEDULED, WorkerExecutionOutcome
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_lifecycle import WorkerTransition
-from opencode_session.worker_scheduling import is_executable_worker
+from opencode_session.worker_domain import WorkerTransition, is_executable_worker
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,

@@ -9,7 +9,7 @@ from opencode_session.status_policy import (
     exit_code_for_status,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_lifecycle import (
+from opencode_session.worker_domain import (
     UNSET_TRANSITION_FIELD,
     WORKER_ACTION_NONE,
     WORKER_STATUS_ABORTED,
@@ -18,21 +18,24 @@ from opencode_session.worker_lifecycle import (
     WORKER_STATUS_FAILED,
     WORKER_STATUS_TIMEOUT,
     WorkerTransition,
+    WorkerRecord,
+    deserialize_worker_record,
+    latest_prompt_ids_are_retry_marker,
+    serialize_worker_snapshot,
     worker_retry_available,
 )
-from opencode_session.worker_normalization import WorkerRecord, latest_prompt_ids_are_retry_marker
 
 
 def default_worker(worker_id):
-    return WorkerRecord.default_fields(worker_id)
+    return deserialize_worker_record({}, worker_id)
 
 
 def normalize_worker(worker, worker_id):
-    return WorkerRecord.from_worker(worker, worker_id).to_worker()
+    return deserialize_worker_record(worker, worker_id)
 
 
 def normalize_worker_snapshot(worker, worker_id):
-    return WorkerRecord.from_worker(worker, worker_id).to_snapshot()
+    return serialize_worker_snapshot(worker, worker_id)
 
 
 def _apply_worker_transition_to_record(worker, transition):
