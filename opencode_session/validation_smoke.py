@@ -1,7 +1,7 @@
 import uuid
 from pathlib import Path
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
 from opencode_session.blocking_execution import (
     BlockingProviderFailure,

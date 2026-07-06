@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_start_core import RunStartCore
 from opencode_session.worker_attempt_execution import WorkerPromptExecution

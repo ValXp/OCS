@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
 from opencode_session.remote_journal import RemoteMutationRecovery
 from opencode_session.worker_session_provisioning import (

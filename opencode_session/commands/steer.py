@@ -1,4 +1,5 @@
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.commands.rendering import CommandResult, render_command_result
 from opencode_session.prompt_admission import (

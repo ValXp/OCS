@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.cli_policy import (

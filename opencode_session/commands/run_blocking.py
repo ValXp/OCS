@@ -1,7 +1,8 @@
 import sys
 from pathlib import Path
 
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import (
     BlockingProviderFailure,
     blocking_execution_strategy,

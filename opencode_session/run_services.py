@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,

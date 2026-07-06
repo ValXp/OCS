@@ -6,6 +6,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+_MISSING = object()
+
+
 class BlockedModuleFinder:
     def __init__(self, blocked_modules):
         self.blocked_modules = set(blocked_modules)
@@ -19,15 +22,33 @@ class BlockedModuleFinder:
 @contextmanager
 def temporarily_unimported(*module_names):
     saved = {}
+    saved_package_attrs = {}
     for module_name in module_names:
         if module_name in sys.modules:
             saved[module_name] = sys.modules.pop(module_name)
+        if "." in module_name:
+            parent_name, attr_name = module_name.rsplit(".", 1)
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                saved_package_attrs[module_name] = getattr(parent, attr_name, _MISSING)
+                if hasattr(parent, attr_name):
+                    delattr(parent, attr_name)
     try:
         yield
     finally:
         for module_name in module_names:
             sys.modules.pop(module_name, None)
         sys.modules.update(saved)
+        for module_name, attr_value in saved_package_attrs.items():
+            parent_name, attr_name = module_name.rsplit(".", 1)
+            parent = sys.modules.get(parent_name)
+            if parent is None:
+                continue
+            if attr_value is _MISSING:
+                if hasattr(parent, attr_name):
+                    delattr(parent, attr_name)
+            else:
+                setattr(parent, attr_name, attr_value)
 
 
 class ImportBoundaryTest(unittest.TestCase):
@@ -50,6 +71,36 @@ class ImportBoundaryTest(unittest.TestCase):
                 sys.meta_path.remove(blocked)
 
         self.assertTrue(hasattr(api_transport, "OpenCodeApiTransport"))
+
+    def test_api_client_does_not_redeclare_domain_transport_forwarders(self):
+        from opencode_session.api_client import OpenCodeApiClient
+
+        redundant_forwarders = (
+            "get_json",
+            "get_response",
+            "post_json",
+            "post_response",
+            "delete_json",
+            "delete_response",
+        )
+
+        declared = [name for name in redundant_forwarders if name in OpenCodeApiClient.__dict__]
+
+        self.assertEqual([], declared)
+
+    def test_api_error_imports_use_transport_owner(self):
+        project_root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for root in (project_root / "opencode_session", project_root / "tests"):
+            for path in sorted(root.rglob("*.py")):
+                tree = ast.parse(path.read_text(), filename=str(path))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.ImportFrom) or node.module != "opencode_session.api_client":
+                        continue
+                    if any(alias.name == "OpenCodeApiError" for alias in node.names):
+                        offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+
+        self.assertEqual([], offenders)
 
     def test_run_record_import_does_not_require_execution_api_or_session_parsing(self):
         blocked = BlockedModuleFinder(

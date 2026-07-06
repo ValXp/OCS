@@ -1,6 +1,7 @@
 import json
 
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities, format_compact, unsupported_reasons
 
 

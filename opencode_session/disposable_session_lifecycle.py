@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 
 
 @dataclass(frozen=True)

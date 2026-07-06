@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.schema_common import ExecutionResultRecord
 from opencode_session.timeout_boundary import TimeoutExpired

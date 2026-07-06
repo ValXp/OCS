@@ -1,6 +1,7 @@
 import argparse
 
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.validation_cleanup import cleanup_disposable_command
 from opencode_session.validation_live import (
     LIVE_SESSION_PREFIX,

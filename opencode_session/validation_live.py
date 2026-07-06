@@ -2,7 +2,7 @@ import os
 import uuid
 from pathlib import Path
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
 from opencode_session.capabilities import unsupported_reasons
 from opencode_session.cli_policy import EX_UNAVAILABLE, EX_UNSUPPORTED

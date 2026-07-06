@@ -1,4 +1,4 @@
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.schema_session_adapter import session_value
 
 

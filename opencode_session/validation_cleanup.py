@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import capabilities_from_openapi_doc, configure_client_route_plan
 from opencode_session.commands.rendering import CommandResult, render_command_result
 from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session

@@ -2,7 +2,8 @@ import argparse
 import unittest
 
 from opencode_session.api_profile import OpenCodeServerProfile
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 
 try:

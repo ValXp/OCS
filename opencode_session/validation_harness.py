@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
 

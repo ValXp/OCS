@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocker_inventory import blocker_session_id, collection_blockers
 
 

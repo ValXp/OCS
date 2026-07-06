@@ -1,6 +1,7 @@
 import json
 
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocker_formatting import (
     format_permission_compact,
     format_permission_reply_compact,

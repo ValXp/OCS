@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunStartRequest
 from opencode_session.run_prompt_worker import ensure_prompt_worker
 

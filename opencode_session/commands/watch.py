@@ -1,6 +1,7 @@
 import json
 
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.event_watcher import SessionEventWatcher, is_invalid_event_stream_error
 from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event

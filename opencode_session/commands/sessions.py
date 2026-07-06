@@ -1,4 +1,5 @@
-from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
+from opencode_session.api_client import OpenCodeApiClient
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.commands.rendering import render_command_result
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.session_formatting import format_fork_compact, format_session_compact, format_session_table

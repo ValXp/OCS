@@ -1,7 +1,7 @@
 import json
 import uuid
 
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.api_profile import (
     OpenCodeServerProfile,
     server_profile_from_capabilities,

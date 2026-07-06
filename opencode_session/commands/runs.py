@@ -1,4 +1,4 @@
-from opencode_session.api_client import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import format_blocking_execution_compact as _format_run_compact
 from opencode_session.cli_policy import server_default
 from opencode_session.commands.rendering import CommandResult, render_command_result
