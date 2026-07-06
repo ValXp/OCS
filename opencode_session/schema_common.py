@@ -75,6 +75,20 @@ class NormalizedEventRecord(TypedDict, total=False):
     raw: JsonValue
 
 
+class WorkerAttemptRecord(TypedDict, total=False):
+    id: str
+    session_id: Optional[str]
+    created_session_ids: List[str]
+    status: str
+    started_at: JsonValue
+    finished_at: JsonValue
+    failure_category: Optional[str]
+    error: str
+    result_status: str
+    user_message_id: str
+    assistant_message_id: str
+
+
 class WorkerSnapshotRecord(TypedDict, total=False):
     id: str
     name: str
@@ -90,6 +104,7 @@ class WorkerSnapshotRecord(TypedDict, total=False):
     retryable_failures: List[str]
     blockers: List[str]
     output_refs: List[str]
+    attempts: List[WorkerAttemptRecord]
     retry_count: int
     retry_limit: int
     timeout_seconds: Optional[float]

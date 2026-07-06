@@ -48,6 +48,7 @@ WORKER_LIST_FIELDS = (
     "retryable_failures",
     "blockers",
     "output_refs",
+    "attempts",
 )
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
@@ -85,6 +86,7 @@ WORKER_SNAPSHOT_STATE_FIELDS = (
     "failure_retryable",
     "manual_retry_required",
     "result",
+    "attempts",
     "cleanup",
     "abort",
 )
@@ -96,6 +98,8 @@ class WorkerTransitionSpec:
     delete_fields: tuple = ()
     set_if_missing_fields: dict = field(default_factory=dict)
     merge_unique_fields: dict = field(default_factory=dict)
+    append_attempt: dict = field(default_factory=dict)
+    finalize_attempt: dict = field(default_factory=dict)
     replace_worker: bool = False
     preserve_accepted_abort: bool = True
 
@@ -116,6 +120,22 @@ class WorkerTransition:
     def _from_spec(cls, worker_id, name, spec):
         return cls(worker_id, name, spec)
 
+    def with_finalized_attempt(self, attempt_id, fields):
+        return self._from_spec(
+            self.worker_id,
+            self.name,
+            _transition_spec(
+                set_fields=self.spec.set_fields,
+                delete_fields=self.spec.delete_fields,
+                set_if_missing_fields=self.spec.set_if_missing_fields,
+                merge_unique_fields=self.spec.merge_unique_fields,
+                append_attempt=self.spec.append_attempt,
+                finalize_attempt={"id": attempt_id, "fields": fields},
+                replace_worker=self.spec.replace_worker,
+                preserve_accepted_abort=self.spec.preserve_accepted_abort,
+            ),
+        )
+
     @classmethod
     def provisioned(cls, worker):
         worker_id = worker["id"]
@@ -135,6 +155,14 @@ class WorkerTransition:
                 timeout_started_at=timeout_started_at,
                 clear_prompt_ids=clear_prompt_ids,
             ),
+        )
+
+    @classmethod
+    def attempt_started(cls, worker_id, attempt):
+        return cls._from_spec(
+            worker_id,
+            "attempt_started",
+            _transition_spec(append_attempt=attempt),
         )
 
     @classmethod
@@ -374,6 +402,7 @@ class WorkerRecord:
             "last_failure_reason": None,
             "blockers": [],
             "output_refs": [],
+            "attempts": [],
         }
 
     @classmethod
@@ -469,6 +498,8 @@ class WorkerRecord:
                     merged[field_name] = deepcopy(value)
             if "abort" not in set_fields and "abort" in latest_worker:
                 merged["abort"] = deepcopy(latest_worker["abort"])
+        _append_attempt(merged, spec.append_attempt)
+        _finalize_attempt(merged, spec.finalize_attempt)
         return WorkerRecord.from_worker(merged, self.worker_id).to_worker()
 
     @staticmethod
@@ -525,6 +556,19 @@ def deserialize_worker_record(worker, worker_id):
 
 def serialize_worker_snapshot(worker, worker_id):
     return WorkerRecord.from_worker(worker, worker_id).to_snapshot()
+
+
+def new_worker_attempt_record(worker, *, started_at, created_session_ids=()):
+    attempts = worker.get("attempts") if isinstance(worker, dict) else None
+    attempt_count = len(attempts) if isinstance(attempts, list) else 0
+    return {
+        "id": f"attempt-{attempt_count + 1}",
+        "session_id": worker.get("session_id") if isinstance(worker, dict) else None,
+        "created_session_ids": list(created_session_ids),
+        "status": "active",
+        "started_at": started_at,
+        "finished_at": None,
+    }
 
 
 def worker_lifecycle_state(worker):
@@ -597,12 +641,44 @@ def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
     target[field_name] = merged_values
 
 
+def _append_attempt(worker, attempt):
+    if not attempt:
+        return
+    attempts = worker.get("attempts") if isinstance(worker.get("attempts"), list) else []
+    attempt = deepcopy(attempt)
+    if any(isinstance(existing, dict) and existing.get("id") == attempt.get("id") for existing in attempts):
+        return
+    worker["attempts"] = [*deepcopy(attempts), attempt]
+
+
+def _finalize_attempt(worker, finalization):
+    if not finalization:
+        return
+    attempt_id = finalization.get("id")
+    fields = finalization.get("fields") if isinstance(finalization.get("fields"), dict) else {}
+    attempts = worker.get("attempts") if isinstance(worker.get("attempts"), list) else []
+    finalized = []
+    found = False
+    for attempt in attempts:
+        if isinstance(attempt, dict) and attempt.get("id") == attempt_id:
+            updated = deepcopy(attempt)
+            updated.update(deepcopy(fields))
+            finalized.append(updated)
+            found = True
+        else:
+            finalized.append(deepcopy(attempt))
+    if found:
+        worker["attempts"] = finalized
+
+
 def _transition_spec(
     *,
     set_fields=None,
     delete_fields=(),
     set_if_missing_fields=None,
     merge_unique_fields=None,
+    append_attempt=None,
+    finalize_attempt=None,
     replace_worker=False,
     preserve_accepted_abort=True,
 ):
@@ -611,6 +687,8 @@ def _transition_spec(
         delete_fields=tuple(delete_fields),
         set_if_missing_fields=deepcopy(set_if_missing_fields or {}),
         merge_unique_fields=deepcopy(merge_unique_fields or {}),
+        append_attempt=deepcopy(append_attempt or {}),
+        finalize_attempt=deepcopy(finalize_attempt or {}),
         replace_worker=replace_worker,
         preserve_accepted_abort=preserve_accepted_abort,
     )

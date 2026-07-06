@@ -8,7 +8,7 @@ from opencode_session.disposable_session_lifecycle import cleanup_disposable_ses
 from opencode_session.schema_common import ExecutionResultRecord, RunRecord, WorkerRecordShape
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
-from opencode_session.worker_domain import WorkerTransition
+from opencode_session.worker_domain import WorkerTransition, new_worker_attempt_record
 from opencode_session.worker_state import (
     apply_worker_transition_to_worker,
     apply_worker_result,
@@ -200,6 +200,7 @@ def execute_worker_attempts(
     transition_sink=None,
 ):
     created_session_ids = []
+    created_session_ids_for_next_attempt = []
     session_outcome = provision_worker_session(
         client,
         run,
@@ -211,6 +212,7 @@ def execute_worker_attempts(
     )
     if session_outcome.created_session_id is not None:
         created_session_ids.append(session_outcome.created_session_id)
+        created_session_ids_for_next_attempt.append(session_outcome.created_session_id)
     sink_outcome = _record_worker_transition(
         transition_sink,
         run,
@@ -225,6 +227,20 @@ def execute_worker_attempts(
         sink_outcome = _record_worker_transition(transition_sink, run, worker, active_transition)
         run = sink_outcome.run
         worker = sink_outcome.worker
+        attempt_record = new_worker_attempt_record(
+            worker,
+            started_at=now(),
+            created_session_ids=created_session_ids_for_next_attempt,
+        )
+        created_session_ids_for_next_attempt = []
+        sink_outcome = _record_worker_transition(
+            transition_sink,
+            run,
+            worker,
+            WorkerTransition.attempt_started(worker["id"], attempt_record),
+        )
+        run = sink_outcome.run
+        worker = sink_outcome.worker
         attempt = execute_single_worker_attempt(
             client,
             worker,
@@ -235,6 +251,14 @@ def execute_worker_attempts(
         transition = apply_worker_attempt_transition(client, run, worker, attempt, now=now, agent=agent, model=model)
         if transition.created_session_id is not None:
             created_session_ids.append(transition.created_session_id)
+            created_session_ids_for_next_attempt.append(transition.created_session_id)
+        transition.worker_transition = _with_finalized_attempt(
+            transition.worker_transition,
+            attempt_record["id"],
+            transition,
+            attempt,
+            finished_at=now(),
+        )
         sink_outcome = _record_worker_transition(transition_sink, run, worker, transition.worker_transition)
         run = sink_outcome.run
         worker = sink_outcome.worker
@@ -264,6 +288,44 @@ def _record_worker_transition(transition_sink, run, worker, transition):
     if persisted_worker is None:
         persisted_worker = worker
     return WorkerTransitionSinkOutcome(persisted_run, persisted_worker)
+
+
+def _with_finalized_attempt(worker_transition, attempt_id, transition, attempt, *, finished_at):
+    if worker_transition is None:
+        return None
+    return worker_transition.with_finalized_attempt(
+        attempt_id,
+        _attempt_finalization_fields(transition, attempt, finished_at=finished_at),
+    )
+
+
+def _attempt_finalization_fields(transition, attempt, *, finished_at):
+    fields = {
+        "status": _attempt_status(transition),
+        "finished_at": finished_at,
+    }
+    if transition.error is not None:
+        fields["error"] = transition.error
+    if transition.failure_category is not None:
+        fields["failure_category"] = transition.failure_category
+    if isinstance(attempt.result, dict):
+        fields["result_status"] = attempt.result.get("status")
+        message_ids = attempt.result.get("message_ids") if isinstance(attempt.result.get("message_ids"), dict) else {}
+        if message_ids.get("user") is not None:
+            fields["user_message_id"] = message_ids["user"]
+        if message_ids.get("assistant") is not None:
+            fields["assistant_message_id"] = message_ids["assistant"]
+    if attempt.prompt_id is not None:
+        fields["user_message_id"] = attempt.prompt_id
+    return fields
+
+
+def _attempt_status(transition):
+    if transition.kind == COMPLETED:
+        return "completed"
+    if transition.kind == RETRY_SCHEDULED:
+        return "retry_scheduled"
+    return "failed"
 
 
 def _apply_completed_attempt(worker, result):
