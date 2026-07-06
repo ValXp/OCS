@@ -13,6 +13,7 @@ from opencode_session.status import short_status
 
 
 DEFAULT_BLOCKING_EXECUTION_TIMEOUT_SECONDS = 120
+TERMINAL_BLOCKING_STATUSES = {"done", "failed", "aborted", "timeout"}
 
 
 class BlockingProviderFailure(Exception):
@@ -58,9 +59,20 @@ def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=
         route=route,
         source="legacy run response",
     )
+    _require_message_id(
+        run_record,
+        source="legacy run response",
+        prompt_id=None,
+        label="user",
+    )
     reply_record = _normalize_known_message_record(
         reply_message,
         route=route,
+        source="legacy reply response",
+        prompt_id=run_record.get("id"),
+    )
+    _require_final_assistant_success_invariants(
+        reply_record,
         source="legacy reply response",
         prompt_id=run_record.get("id"),
     )
@@ -164,6 +176,12 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, p
             error,
             prompt_id=run_record.get("id"),
         )
+    _require_message_id(
+        run_record,
+        source="legacy run response",
+        prompt_id=None,
+        label="user",
+    )
     reply_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         reply_kwargs["deadline"] = deadline
@@ -205,6 +223,11 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
         source="blocking message response",
         prompt_id=prompt_message_id,
     )
+    _require_final_assistant_success_invariants(
+        assistant_record,
+        source="blocking message response",
+        prompt_id=prompt_message_id,
+    )
     raw_status = _message_raw_status(assistant_record, default="completed")
     status = short_status(raw_status)
     return {
@@ -242,6 +265,43 @@ def _normalize_known_message_record(message, *, route, source, prompt_id=None):
             prompt_id=prompt_id,
         )
     return record
+
+
+def _require_message_id(record, *, source, prompt_id, label):
+    if record.get("id"):
+        return
+    _raise_incomplete_message_schema(
+        source,
+        f"missing {label} message id",
+        prompt_id=prompt_id,
+    )
+
+
+def _require_final_assistant_success_invariants(record, *, source, prompt_id):
+    _require_message_id(record, source=source, prompt_id=prompt_id, label="assistant")
+    if _has_message_text(record) or _has_explicit_terminal_status(record):
+        return
+    _raise_incomplete_message_schema(
+        source,
+        "missing assistant text or explicit terminal status",
+        prompt_id=prompt_id,
+    )
+
+
+def _has_message_text(record):
+    return record.get("text") not in (None, "")
+
+
+def _has_explicit_terminal_status(record):
+    raw_status = _message_raw_status(record)
+    return raw_status is not None and short_status(raw_status) in TERMINAL_BLOCKING_STATUSES
+
+
+def _raise_incomplete_message_schema(source, reason, *, prompt_id):
+    raise BlockingProviderFailure(
+        f"incomplete message schema from {source}: {reason}",
+        prompt_id=prompt_id,
+    )
 
 
 def _legacy_api_path(capabilities):

@@ -67,6 +67,17 @@ class _UnknownSessionMessageClient:
         return _Response({"unexpected": {"shape": True}})
 
 
+class _PayloadSessionMessageClient:
+    def __init__(self, payload):
+        self.timeout = 3
+        self.payload = payload
+        self.requests = []
+
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None):
+        self.requests.append(("message", session_id, message, message_id, timeout))
+        return _Response(self.payload)
+
+
 class _UnknownLegacyRunClient:
     def __init__(self):
         self.timeout = 3
@@ -92,6 +103,33 @@ class _UnknownLegacyReplyClient:
     def reply_session_response(self, session_id, *, timeout=None):
         self.requests.append(("reply", session_id, None, None, timeout))
         return _Response({"tokenUsage": {"output": 1}})
+
+
+class _IncompleteLegacyRunClient:
+    def __init__(self):
+        self.timeout = 3
+        self.requests = []
+
+    def run_session_response(self, session_id, message, *, timeout=None):
+        self.requests.append(("run", session_id, message, None, timeout))
+        return _Response({"status": "submitted"})
+
+    def reply_session_response(self, session_id, *, timeout=None):
+        raise AssertionError("reply should not be requested after incomplete run schema")
+
+
+class _IncompleteLegacyReplyClient:
+    def __init__(self):
+        self.timeout = 3
+        self.requests = []
+
+    def run_session_response(self, session_id, message, *, timeout=None):
+        self.requests.append(("run", session_id, message, None, timeout))
+        return _Response({"id": "msg_user_legacy", "status": "submitted"})
+
+    def reply_session_response(self, session_id, *, timeout=None):
+        self.requests.append(("reply", session_id, None, None, timeout))
+        return _Response({"text": "legacy finished"})
 
 
 class BlockingExecutionServiceTest(unittest.TestCase):
@@ -182,6 +220,42 @@ class BlockingExecutionServiceTest(unittest.TestCase):
             {"run": "/custom/{sessionID}/run", "reply": "/custom/{sessionID}/reply"},
         )
 
+    def test_provider_failure_extracts_error_only_message(self):
+        from opencode_session.blocking_execution import provider_failure
+        from opencode_session.schema_message_adapter import SESSION_MESSAGE_ROUTE
+
+        self.assertEqual(
+            provider_failure({"data": {"reason": "quota exceeded"}}, route=SESSION_MESSAGE_ROUTE),
+            "quota exceeded",
+        )
+
+    def test_rejects_incomplete_success_shaped_session_message_payloads(self):
+        from opencode_session.blocking_execution import (
+            BlockingProviderFailure,
+            execute_blocking_prompt,
+        )
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc(
+            {"paths": {"/session/{sessionID}/message": {"post": {}}}}
+        )
+        incomplete_payloads = (
+            ({"text": "looks done"}, "missing assistant message id"),
+            ({"id": "msg_assistant_empty"}, "missing assistant text or explicit terminal status"),
+            ({"status": "completed"}, "missing assistant message id"),
+        )
+
+        for payload, expected_reason in incomplete_payloads:
+            with self.subTest(payload=payload):
+                client = _PayloadSessionMessageClient(payload)
+
+                with self.assertRaises(BlockingProviderFailure) as raised:
+                    execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+                self.assertIn("incomplete message schema from blocking message response", str(raised.exception))
+                self.assertIn(expected_reason, str(raised.exception))
+                self.assertTrue(raised.exception.prompt_id.startswith("msg_"))
+
     def test_rejects_unknown_session_message_schema_instead_of_completed_result(self):
         from opencode_session.blocking_execution import (
             BlockingProviderFailure,
@@ -236,6 +310,44 @@ class BlockingExecutionServiceTest(unittest.TestCase):
 
         self.assertIn(
             "unrecognized message schema from legacy reply response",
+            str(raised.exception),
+        )
+        self.assertEqual(raised.exception.prompt_id, "msg_user_legacy")
+        self.assertEqual([request[0] for request in client.requests], ["run", "reply"])
+
+    def test_rejects_incomplete_legacy_run_schema_before_reply(self):
+        from opencode_session.blocking_execution import (
+            BlockingProviderFailure,
+            execute_blocking_prompt,
+        )
+
+        capabilities = {"route_availability": {}, "legacy_fallback_available": True}
+        client = _IncompleteLegacyRunClient()
+
+        with self.assertRaises(BlockingProviderFailure) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn(
+            "incomplete message schema from legacy run response: missing user message id",
+            str(raised.exception),
+        )
+        self.assertIsNone(raised.exception.prompt_id)
+        self.assertEqual([request[0] for request in client.requests], ["run"])
+
+    def test_rejects_incomplete_legacy_reply_schema_instead_of_completed_result(self):
+        from opencode_session.blocking_execution import (
+            BlockingProviderFailure,
+            execute_blocking_prompt,
+        )
+
+        capabilities = {"route_availability": {}, "legacy_fallback_available": True}
+        client = _IncompleteLegacyReplyClient()
+
+        with self.assertRaises(BlockingProviderFailure) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn(
+            "incomplete message schema from legacy reply response: missing assistant message id",
             str(raised.exception),
         )
         self.assertEqual(raised.exception.prompt_id, "msg_user_legacy")
