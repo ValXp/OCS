@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
@@ -16,6 +17,9 @@ from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord, Worker
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_aborted
+
+
+REMOTE_MUTATION_JOURNAL_FIELD = "remote_mutation_journal"
 
 
 @dataclass
@@ -123,27 +127,74 @@ class RunCommandService:
         client = self.client_factory(run["server_url"])
         capabilities = self.capability_detector(client)
         configure_client_route_plan(client, capabilities)
-        result = admit_prompt(client, capabilities, worker["session_id"], text, delivery, message_id=message_id)
+        prompt_message_id = message_id or _new_prompt_message_id()
+        mutation_id = _new_remote_mutation_id()
+
+        def record_prompt_intent(latest_run):
+            latest_worker = _run_worker_with_session(latest_run, worker_id)
+            _append_remote_mutation(
+                latest_run,
+                {
+                    "id": mutation_id,
+                    "kind": "steer_prompt",
+                    "worker_id": worker_id,
+                    "session_id": latest_worker["session_id"],
+                    "message_id": prompt_message_id,
+                    "delivery": delivery,
+                    "text": text,
+                },
+            )
+
+        self._update_run(name, record_prompt_intent)
+        try:
+            result = admit_prompt(
+                client,
+                capabilities,
+                worker["session_id"],
+                text,
+                delivery,
+                message_id=prompt_message_id,
+            )
+        except Exception:
+            self._discard_remote_mutation_best_effort(name, mutation_id)
+            raise
         admission = result.record
         admitted_message_id = admission["message_id"]
 
-        def append_prompt_id(latest_run):
+        def record_prompt_admission(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
             prompt_ids = latest_worker.setdefault("prompt_ids", [])
             if admitted_message_id not in prompt_ids:
                 prompt_ids.append(admitted_message_id)
+            _remove_remote_mutation(latest_run, mutation_id)
 
-        run = self._update_run(name, append_prompt_id)
+        run = self._update_run(name, record_prompt_admission)
         return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
 
     def abort_worker(self, name, worker_id):
         run = self.store.load_run(name)
         worker = _run_worker_with_session(run, worker_id)
         client = self.client_factory(run["server_url"])
+        mutation_id = _new_remote_mutation_id()
+
+        def record_abort_intent(latest_run):
+            latest_worker = _run_worker_with_session(latest_run, worker_id)
+            _append_remote_mutation(
+                latest_run,
+                {
+                    "id": mutation_id,
+                    "kind": "abort_worker",
+                    "worker_id": worker_id,
+                    "session_id": latest_worker["session_id"],
+                },
+            )
+
+        self._update_run(name, record_abort_intent)
         try:
             response = client.abort_session_response(worker["session_id"])
-        except OpenCodeApiError as error:
-            if is_session_not_found_error(error):
+        except Exception as error:
+            self._discard_remote_mutation_best_effort(name, mutation_id)
+            if isinstance(error, OpenCodeApiError) and is_session_not_found_error(error):
                 raise RunWorkerSessionNotFound(worker["session_id"]) from error
             raise
         abort = abort_record(worker["session_id"], response.data)
@@ -152,6 +203,7 @@ class RunCommandService:
             latest_worker = _run_worker_with_session(latest_run, worker_id)
             apply_worker_transition_to_worker(latest_worker, mark_worker_aborted(latest_worker, abort))
             refresh_orchestration_run_summary(latest_run)
+            _remove_remote_mutation(latest_run, mutation_id)
 
         run = self._update_run(name, mark_aborted)
         return RunAbortResult(run=run, worker=run["workers"][worker_id], abort=abort, raw_body=response.body)
@@ -162,6 +214,13 @@ class RunCommandService:
             run["updated_at"] = self.now()
 
         return self.store.update_run(name, update)
+
+    def _discard_remote_mutation_best_effort(self, name, mutation_id):
+        try:
+            self._update_run(name, lambda latest_run: _remove_remote_mutation(latest_run, mutation_id))
+        except Exception:
+            pass
+
 
 class RunWorkerSessionNotFound(Exception):
     def __init__(self, session_id):
@@ -186,6 +245,34 @@ def _run_worker_with_session(run, worker_id):
     if not worker.get("session_id"):
         raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no session", kind="missing")
     return worker
+
+
+def _append_remote_mutation(run, mutation):
+    journal = run.get(REMOTE_MUTATION_JOURNAL_FIELD)
+    if not isinstance(journal, list):
+        journal = []
+    journal.append(mutation)
+    run[REMOTE_MUTATION_JOURNAL_FIELD] = journal
+
+
+def _remove_remote_mutation(run, mutation_id):
+    journal = run.get(REMOTE_MUTATION_JOURNAL_FIELD)
+    if not isinstance(journal, list):
+        run.pop(REMOTE_MUTATION_JOURNAL_FIELD, None)
+        return
+    remaining = [mutation for mutation in journal if not isinstance(mutation, dict) or mutation.get("id") != mutation_id]
+    if remaining:
+        run[REMOTE_MUTATION_JOURNAL_FIELD] = remaining
+    else:
+        run.pop(REMOTE_MUTATION_JOURNAL_FIELD, None)
+
+
+def _new_prompt_message_id():
+    return f"msg_{uuid.uuid4().hex}"
+
+
+def _new_remote_mutation_id():
+    return f"remote_mutation_{uuid.uuid4().hex}"
 
 
 def _utc_now():
