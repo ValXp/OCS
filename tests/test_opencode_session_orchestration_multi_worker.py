@@ -13,7 +13,8 @@ from opencode_session.multi_worker_orchestration import (
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore, RunStoreError
-from opencode_session.worker_execution import WORKER_SESSION_JOURNAL_FIELD, WorkerExecutionOutcome
+from opencode_session.worker_execution import WorkerExecutionOutcome
+from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import apply_worker_transition
 

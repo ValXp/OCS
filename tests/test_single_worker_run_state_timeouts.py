@@ -25,8 +25,9 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
             )
             client = FakeClient()
 
-            def execute_prompt(client, session_id, prompt, capabilities):
+            def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
                 client.requests.append(("execute", session_id, prompt))
+                self.assertIsNotNone(deadline)
                 raise WorkerExecutionTimeout()
 
             service = DependencyOrderedSerialRunOrchestrationService(
@@ -180,8 +181,9 @@ class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
             )
             client = FakeClient(session_ids=["ses_initial", "ses_unused"])
 
-            def execute_prompt(client, session_id, prompt, capabilities):
+            def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
                 client.requests.append(("execute", session_id, prompt))
+                self.assertIsNotNone(deadline)
                 raise WorkerExecutionTimeout()
 
             service = DependencyOrderedSerialRunOrchestrationService(

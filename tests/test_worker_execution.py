@@ -6,15 +6,21 @@ from unittest.mock import patch
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_start_core import RunStartCore
-from opencode_session.worker_execution import (
-    WORKER_SESSION_JOURNAL_FIELD,
-    WorkerExecutionTimeout,
-    WorkerSessionCreationJournal,
+from opencode_session.worker_attempt_execution import WorkerPromptExecution
+from opencode_session.worker_cleanup_recovery import (
     cleanup_created_worker_sessions,
-    ensure_worker_session,
-    execute_worker_attempts,
-    provision_worker_session,
     recoverable_created_worker_sessions_by_worker,
+)
+from opencode_session.worker_execution import (
+    WorkerExecutionTimeout,
+    execute_worker_attempts,
+)
+from opencode_session.worker_session_provisioning import (
+    WORKER_SESSION_JOURNAL_FIELD,
+    WorkerSessionCreationJournal,
+    WorkerSessionProvisioner,
+    ensure_worker_session,
+    provision_worker_session,
 )
 from opencode_session.worker_state import WorkerRecord, apply_worker_transition, ensure_worker
 
@@ -195,6 +201,51 @@ class WorkerExecutionTest(unittest.TestCase):
             },
         )
 
+    def test_worker_session_provisioner_records_created_session_before_finalize(self):
+        run = {"name": "demo", "directory": "/workspace", "workers": {"worker": {"id": "worker"}}}
+        worker = run["workers"]["worker"]
+        journals = []
+
+        def persist_run_mutation(run, mutator):
+            mutator(run)
+            journals.append(deepcopy(run.get(WORKER_SESSION_JOURNAL_FIELD)))
+            return run
+
+        journal = WorkerSessionCreationJournal(
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+            id_factory=lambda: "worker-session-intent-1",
+        )
+        provisioner = WorkerSessionProvisioner(session_journal=journal)
+        client = FakeClient(["ses_new"])
+
+        provisioning = provisioner.provision(
+            client,
+            run,
+            worker,
+            agent="build",
+            model="openai/gpt-5.5",
+            cleanup_requested=True,
+        )
+
+        self.assertEqual(client.requests, [("create", "/workspace", "build", "openai/gpt-5.5")])
+        self.assertEqual(provisioning.outcome.session_id, "ses_new")
+        self.assertEqual(provisioning.outcome.created_session_id, "ses_new")
+        self.assertEqual(journals[0][0]["status"], "intent")
+        self.assertEqual(journals[1][0]["status"], "created")
+        self.assertEqual(worker["session_id"], "ses_new")
+        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_new"]})
+
+        finalized_run, finalized_worker = provisioner.finalize_best_effort(
+            provisioning.run,
+            provisioning.worker,
+            provisioning,
+        )
+
+        self.assertIs(finalized_run, run)
+        self.assertIs(finalized_worker, worker)
+        self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
+
     def test_recoverable_created_worker_sessions_merges_cleanup_and_journal_transactions(self):
         run = {
             "workers": {
@@ -317,6 +368,40 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(attempt.get("user_message_id"), "msg_user")
         self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
 
+    def test_execute_worker_attempts_uses_executor_protocol_request_with_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            worker["timeout_seconds"] = 1
+            client = FakeClient(["ses_initial"])
+            executions = []
+
+            class RecordingExecutor:
+                def execute_prompt(self, execution):
+                    executions.append(execution)
+                    return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
+
+            outcome = execute_worker_attempts(
+                client,
+                run,
+                worker,
+                "Finish the worker task",
+                CAPABILITIES,
+                executor=RecordingExecutor(),
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+        self.assertEqual(outcome.kind, "completed")
+        self.assertEqual(len(executions), 1)
+        execution = executions[0]
+        self.assertIsInstance(execution, WorkerPromptExecution)
+        self.assertIs(execution.client, client)
+        self.assertEqual(execution.session_id, "ses_initial")
+        self.assertEqual(execution.prompt, "Finish the worker task")
+        self.assertEqual(execution.capabilities, CAPABILITIES)
+        self.assertIsNotNone(execution.deadline)
+        self.assertLessEqual(execution.deadline.remaining(), 1)
+
     def test_execute_worker_attempts_skips_automatic_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
@@ -428,9 +513,9 @@ class WorkerExecutionTest(unittest.TestCase):
             worker["retryable_failures"] = ["timeout"]
             client = FakeClient(["ses_initial", "ses_retry"])
 
-            def execute_prompt(client, session_id, prompt, capabilities, *, timeout=None):
+            def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
                 client.requests.append(("execute", session_id, prompt, capabilities["legacy_fallback_available"]))
-                self.assertLessEqual(timeout, 0.05)
+                self.assertLessEqual(deadline.require_time(), 0.05)
                 raise WorkerExecutionTimeout()
 
             outcome = execute_worker_attempts(

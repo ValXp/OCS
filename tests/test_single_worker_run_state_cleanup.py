@@ -102,8 +102,10 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                         store.upsert_worker("demo", "worker", role="worker", **worker_options)
                     client = FakeClient()
 
-                    def execute_prompt(client, session_id, prompt, capabilities):
+                    def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
                         client.requests.append(("execute", session_id, prompt))
+                        if worker_options.get("timeout_seconds") is not None:
+                            self.assertIsNotNone(deadline)
                         raise error_factory()
 
                     service = DependencyOrderedSerialRunOrchestrationService(
