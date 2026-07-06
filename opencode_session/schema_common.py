@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, TypedDict, Union
+from typing import Dict, List, Optional, TypedDict, Union
 
 
 JsonValue = Union[None, bool, int, float, str, List["JsonValue"], Dict[str, "JsonValue"]]
@@ -51,7 +51,7 @@ class NormalizedAbortRecord(TypedDict):
     response: JsonObject
 
 
-class NormalizedEventRecord(TypedDict):
+class NormalizedEventRecord(TypedDict, total=False):
     kind: str
     session_id: Optional[str]
     target_session_id: Optional[str]
@@ -74,7 +74,46 @@ class NormalizedEventRecord(TypedDict):
     raw: JsonValue
 
 
-DomainRecord = Dict[str, Any]
+class DomainRecord(TypedDict, total=False):
+    id: str
+    name: str
+    title: str
+    role: Optional[str]
+    directory: str
+    server_url: str
+    session_id: Optional[str]
+    agent: Optional[str]
+    model: Optional[str]
+    prompt: str
+    status: str
+    lifecycle_state: str
+    next_eligible_action: str
+    workers: Dict[str, "DomainRecord"]
+    dependencies: List[str]
+    prompt_ids: List[str]
+    retryable_failures: List[str]
+    blockers: List[str]
+    output_refs: List[str]
+    retry_count: int
+    retry_limit: int
+    timeout_seconds: Optional[float]
+    timeout_policy: str
+    timeout_started_at: JsonValue
+    timed_out_at: JsonValue
+    failure_category: Optional[str]
+    failure_reason: Optional[str]
+    last_failure_category: Optional[str]
+    last_failure_reason: Optional[str]
+    error: str
+    failure_retryable: bool
+    manual_retry_required: bool
+    result: JsonObject
+    cleanup: JsonObject
+    abort: JsonObject
+    metadata: JsonObject
+    capabilities: JsonObject
+    route_availability: JsonObject
+    raw: JsonValue
 
 
 def collection_records(collection, *names):

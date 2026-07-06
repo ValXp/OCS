@@ -1,6 +1,7 @@
 import unittest
 
 from opencode_session.events import normalize_event
+from opencode_session.schema_common import DomainRecord, NormalizedEventRecord
 from opencode_session.schema_normalization import (
     iter_normalized_message_records,
     normalize_admission_record,
@@ -10,6 +11,10 @@ from opencode_session.schema_normalization import (
 
 
 class SchemaNormalizationTest(unittest.TestCase):
+    def test_sparse_schema_boundaries_are_marked_total_false(self):
+        self.assertFalse(NormalizedEventRecord.__total__)
+        self.assertFalse(DomainRecord.__total__)
+
     def test_normalizes_session_aliases_in_wrapped_collections(self):
         payload = {
             "sessions": [
