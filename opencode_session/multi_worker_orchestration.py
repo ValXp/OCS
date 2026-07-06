@@ -26,7 +26,6 @@ from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import RunRecord
 from opencode_session.worker_execution import (
-    RETRY_SCHEDULED,
     WorkerExecutionOutcome,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
@@ -178,20 +177,16 @@ class SelectedSerialWorkerExecutor:
     ):
         first_error_outcome = None
         worker = _worker_by_id(run.get("workers", {}), worker_id)
-        while worker is not None:
-            outcome = self._execute_single_worker(client, run, worker, capabilities, session_tracker)
-            run = outcome.run or run
-            current_worker = run.get("workers", {}).get(worker_field(worker, "id"), worker)
-            session_tracker.remember_worker_outcome(run, current_worker, outcome)
-            if outcome.kind == RETRY_SCHEDULED:
-                worker = current_worker
-                continue
-            if outcome.error is not None:
-                if first_error_outcome is None:
-                    first_error_outcome = outcome
-                if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                    return SerialWorkerExecutionOutcome(run, first_error_outcome, outcome)
-            worker = None
+        if worker is None:
+            return SerialWorkerExecutionOutcome(run)
+        outcome = self._execute_single_worker(client, run, worker, capabilities, session_tracker)
+        run = outcome.run or run
+        current_worker = run.get("workers", {}).get(worker_field(worker, "id"), worker)
+        session_tracker.remember_worker_outcome(run, current_worker, outcome)
+        if outcome.error is not None:
+            first_error_outcome = outcome
+            if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                return SerialWorkerExecutionOutcome(run, first_error_outcome, outcome)
         return SerialWorkerExecutionOutcome(run, first_error_outcome)
 
     def _execute_single_worker(self, client, run, worker, capabilities, session_tracker):
@@ -204,7 +199,6 @@ class SelectedSerialWorkerExecutor:
             agent=worker_field(worker, "agent"),
             model=worker_field(worker, "model"),
             cleanup_requested=getattr(session_tracker, "enabled", False),
-            stop_after_retry=True,
         )
 
 

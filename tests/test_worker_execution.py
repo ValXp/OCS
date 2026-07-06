@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from opencode_session.api_transport import OpenCodeApiError
+from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_start_core import RunStartCore
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
@@ -591,6 +592,44 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIsNotNone(execution.deadline)
         self.assertLessEqual(execution.deadline.remaining(), 1)
 
+    def test_execute_worker_attempts_returns_retry_scheduled_after_one_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            worker.set_field("retry_limit", 1)
+            worker.set_field("retryable_failures", ["provider"])
+            client = FakeClient(["ses_initial"])
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append((session_id, prompt))
+                if len(executions) > 1:
+                    self.fail("worker execution should return retry_scheduled instead of retrying inline")
+                raise BlockingProviderFailure("transient provider outage", prompt_id="msg_user_failed")
+
+            outcome = execute_worker_attempts(
+                client,
+                run,
+                worker,
+                "Finish the worker task",
+                CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+        self.assertEqual(outcome.kind, "retry_scheduled")
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.failure_category, "provider")
+        self.assertEqual(outcome.created_session_ids, ["ses_initial"])
+        self.assertEqual(executions, [("ses_initial", "Finish the worker task")])
+        self.assertEqual(worker_output_field(worker, "status"), "active")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_field(worker, "retry_count"), 1)
+        self.assertEqual(worker_field(worker, "last_failure_category"), "provider")
+        self.assertEqual(worker_field(worker, "last_failure_reason"), "transient provider outage")
+        attempt = self.assert_single_worker_attempt(worker, status="retry_scheduled", session_id="ses_initial")
+        self.assertEqual(attempt.get("user_message_id"), "msg_user_failed")
+
     def test_execute_worker_attempts_skips_automatic_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
@@ -739,7 +778,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertFalse(worker_has_field(worker, "result"))
         self.assertFalse(worker_has_field(worker, "timeout_retry_sessions"))
 
-    def test_execute_worker_attempts_does_not_schedule_timeout_retry_when_requested(self):
+    def test_execute_worker_attempts_does_not_schedule_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
@@ -761,7 +800,6 @@ class WorkerExecutionTest(unittest.TestCase):
                 CAPABILITIES,
                 executor=execute_prompt,
                 now=lambda: "2026-07-03T00:00:00Z",
-                stop_after_retry=True,
             )
 
         self.assertEqual(outcome.kind, "terminal_failure")

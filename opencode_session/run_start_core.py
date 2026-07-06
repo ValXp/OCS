@@ -107,7 +107,6 @@ class RunStartCore:
         agent=None,
         model=None,
         cleanup_requested=False,
-        stop_after_retry=False,
     ):
         return self.worker_executor.execute(
             client,
@@ -120,7 +119,6 @@ class RunStartCore:
             model=model,
             create_session=True,
             cleanup_requested=cleanup_requested,
-            stop_after_retry=stop_after_retry,
         )
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):

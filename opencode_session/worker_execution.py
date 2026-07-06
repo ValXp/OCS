@@ -121,10 +121,9 @@ class WorkerExecutionExecutor:
         model=None,
         create_session=True,
         cleanup_requested=False,
-        stop_after_retry=False,
     ):
         created_session_ids = []
-        created_session_ids_for_next_attempt = []
+        created_session_ids_for_attempt = []
         persistence = self.persistence_boundary_factory(
             run=run,
             worker=worker,
@@ -142,52 +141,47 @@ class WorkerExecutionExecutor:
         )
         if session_outcome.created_session_id is not None:
             created_session_ids.append(session_outcome.created_session_id)
-            created_session_ids_for_next_attempt.append(session_outcome.created_session_id)
+            created_session_ids_for_attempt.append(session_outcome.created_session_id)
 
-        while True:
-            active_transition = mark_worker_active(persistence.worker, now=self.now)
-            persistence.apply_worker_transition(active_transition)
-            attempt_record = new_worker_attempt_record(
-                persistence.worker,
-                started_at=self.now(),
-                created_session_ids=created_session_ids_for_next_attempt,
-            )
-            created_session_ids_for_next_attempt = []
-            persistence.apply_worker_transition(
-                WorkerTransition.attempt_started(worker_field(persistence.worker, "id"), attempt_record),
-            )
-            attempt = execute_single_worker_attempt(
-                client,
-                persistence.worker,
-                prompt,
-                capabilities,
-                executor=self.executor,
-            )
-            transition = apply_worker_attempt_transition(
-                persistence.worker,
-                attempt,
-                now=self.now,
-            )
-            if transition.created_session_id is not None:
-                created_session_ids.append(transition.created_session_id)
-                created_session_ids_for_next_attempt.append(transition.created_session_id)
-            transition.worker_transition = _with_finalized_attempt(
-                transition.worker_transition,
-                attempt_record["id"],
-                transition,
-                attempt,
-                finished_at=self.now(),
-            )
-            persistence.apply_worker_transition(transition.worker_transition)
-            if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
-                continue
-            return WorkerExecutionOutcome(
-                transition.kind,
-                created_session_ids,
-                transition.error,
-                transition.failure_category,
-                persistence.run,
-            )
+        active_transition = mark_worker_active(persistence.worker, now=self.now)
+        persistence.apply_worker_transition(active_transition)
+        attempt_record = new_worker_attempt_record(
+            persistence.worker,
+            started_at=self.now(),
+            created_session_ids=created_session_ids_for_attempt,
+        )
+        persistence.apply_worker_transition(
+            WorkerTransition.attempt_started(worker_field(persistence.worker, "id"), attempt_record),
+        )
+        attempt = execute_single_worker_attempt(
+            client,
+            persistence.worker,
+            prompt,
+            capabilities,
+            executor=self.executor,
+        )
+        transition = apply_worker_attempt_transition(
+            persistence.worker,
+            attempt,
+            now=self.now,
+        )
+        if transition.created_session_id is not None:
+            created_session_ids.append(transition.created_session_id)
+        transition.worker_transition = _with_finalized_attempt(
+            transition.worker_transition,
+            attempt_record["id"],
+            transition,
+            attempt,
+            finished_at=self.now(),
+        )
+        persistence.apply_worker_transition(transition.worker_transition)
+        return WorkerExecutionOutcome(
+            transition.kind,
+            created_session_ids,
+            transition.error,
+            transition.failure_category,
+            persistence.run,
+        )
 
 
 def execute_worker_attempts(
@@ -203,7 +197,6 @@ def execute_worker_attempts(
     agent=None,
     model=None,
     create_session=True,
-    stop_after_retry=False,
 ):
     return WorkerExecutionExecutor(
         apply_transition=_apply_in_memory_worker_transition,
@@ -220,7 +213,6 @@ def execute_worker_attempts(
         model=model,
         create_session=create_session,
         cleanup_requested=False,
-        stop_after_retry=stop_after_retry,
     )
 
 

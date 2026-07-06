@@ -3,7 +3,9 @@ import tempfile
 import unittest
 
 from opencode_session.api_transport import OpenCodeApiError
+from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import (
+    DependencyOrderedSerialPlanner,
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
     EXECUTION_POLICY_FAIL_FAST,
@@ -72,7 +74,6 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                 agent=None,
                 model=None,
                 cleanup_requested=False,
-                stop_after_retry=False,
             ):
                 self.calls.append(
                     {
@@ -85,7 +86,6 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                         "agent": agent,
                         "model": model,
                         "cleanup_requested": cleanup_requested,
-                        "stop_after_retry": stop_after_retry,
                     }
                 )
                 updated_run = deepcopy(run)
@@ -122,9 +122,128 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(core.calls[0]["agent"], "build")
         self.assertEqual(core.calls[0]["model"], "openai/gpt-5.5")
         self.assertFalse(core.calls[0]["cleanup_requested"])
-        self.assertTrue(core.calls[0]["stop_after_retry"])
         self.assertEqual(worker_output_field(session_tracker.remembered[0][1], "status"), "done")
         self.assertEqual(session_tracker.remembered[0][2], "completed")
+
+    def test_next_eligible_worker_executor_returns_retry_scheduled_without_retrying_inline(self):
+        run = {
+            "workers": {
+                "worker": normalize_worker(
+                    {
+                        "id": "worker",
+                        "prompt": "Finish the worker task",
+                        "retry_limit": 1,
+                        "retryable_failures": ["provider"],
+                    },
+                    "worker",
+                )
+            }
+        }
+        client = object()
+        test_case = self
+
+        class RetryCore:
+            def __init__(self):
+                self.calls = 0
+
+            def execute_worker(
+                self,
+                client,
+                run,
+                worker,
+                prompt,
+                capabilities,
+                *,
+                session_id=None,
+                agent=None,
+                model=None,
+                cleanup_requested=False,
+            ):
+                self.calls += 1
+                if self.calls > 1:
+                    test_case.fail("selected serial worker execution should not retry inline")
+                updated_run = deepcopy(run)
+                updated_worker = updated_run["workers"][worker_field(worker, "id")]
+                updated_worker.set_field("lifecycle_state", "active_retry")
+                updated_worker.set_field("retry_count", 1)
+                updated_worker.set_field("last_failure_category", "provider")
+                updated_worker.set_field("last_failure_reason", "transient provider outage")
+                return WorkerExecutionOutcome("retry_scheduled", failure_category="provider", run=updated_run)
+
+        class RecordingSessionTracker:
+            def __init__(self):
+                self.remembered = []
+
+            def remember_worker_outcome(self, run, fallback_worker, outcome):
+                self.remembered.append((run, fallback_worker, outcome.kind))
+
+        core = RetryCore()
+        session_tracker = RecordingSessionTracker()
+
+        outcome = SelectedSerialWorkerExecutor(core).execute_next(
+            run,
+            "worker",
+            client,
+            CAPABILITIES,
+            session_tracker=session_tracker,
+            execution_policy=EXECUTION_POLICY_FAIL_FAST,
+        )
+
+        self.assertEqual(core.calls, 1)
+        worker = outcome.run["workers"]["worker"]
+        self.assertEqual(worker_output_field(worker, "status"), "active")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_field(worker, "retry_count"), 1)
+        self.assertIsNone(outcome.first_error_outcome)
+        self.assertIsNone(outcome.fail_fast_outcome)
+        self.assertEqual(session_tracker.remembered[0][2], "retry_scheduled")
+
+    def test_start_replans_from_persisted_retry_state_before_retry_attempt(self):
+        class RecordingPlanner:
+            def __init__(self):
+                self.delegate = DependencyOrderedSerialPlanner()
+                self.snapshots = []
+
+            def plan(self, workers):
+                worker = workers["worker"]
+                self.snapshots.append(
+                    (
+                        worker_output_field(worker, "status"),
+                        worker_output_field(worker, "next_eligible_action"),
+                        worker_field(worker, "retry_count"),
+                    )
+                )
+                return self.delegate.plan(workers)
+
+        with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_initial"]) as scenario:
+            scenario.add_worker(
+                "worker",
+                prompt="Finish the worker task",
+                retry_limit=1,
+                retryable_failures=["provider"],
+            )
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append(session_id)
+                if len(executions) == 1:
+                    raise BlockingProviderFailure("transient provider outage", prompt_id="msg_user_failed")
+                return {"status": "done", "message_ids": {"user": "msg_user_retry", "assistant": "msg_assistant"}}
+
+            planner = RecordingPlanner()
+            service = scenario.service(executor=execute_prompt)
+            service.scheduler.planner = planner
+            outcome = service.start(scenario.request("worker"))
+            run = scenario.load_run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(executions, ["ses_initial", "ses_initial"])
+        self.assertEqual(planner.snapshots[0], ("queued", "start", 0))
+        self.assertIn(("active", "retry", 1), planner.snapshots)
+        self.assertEqual(planner.snapshots[-1], ("done", "collect", 1))
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker_output_field(worker, "status"), "done")
+        self.assertEqual(worker_field(worker, "retry_count"), 1)
 
     def test_start_persists_active_attempt_before_provider_call(self):
         with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_initial"]) as scenario:
