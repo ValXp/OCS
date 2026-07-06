@@ -1307,7 +1307,7 @@ def worker_lifecycle_set_fields(worker_id, lifecycle_state):
     return {"id": worker_id, "lifecycle_state": lifecycle_state}
 
 
-def _is_worker_mapping(worker):
+def _is_worker_record(worker):
     return isinstance(worker, WorkerRecord)
 
 
@@ -1341,8 +1341,8 @@ def worker_has_field(worker, field_name):
     return _require_worker_record(worker).has_field(field_name)
 
 
-def is_worker_mapping(worker):
-    return _is_worker_mapping(worker)
+def is_worker_record(worker):
+    return _is_worker_record(worker)
 
 
 def worker_retry_available(worker, category=None):
@@ -2091,10 +2091,10 @@ def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):
 
 
 def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False):
-    prompted_workers = [worker for worker in workers.values() if _is_worker_mapping(worker) and worker_prompt(worker)]
+    prompted_workers = [worker for worker in workers.values() if _is_worker_record(worker) and worker_prompt(worker)]
     status_workers = prompted_workers
     if include_unprompted_when_no_prompts:
-        status_workers = prompted_workers or [worker for worker in workers.values() if _is_worker_mapping(worker)]
+        status_workers = prompted_workers or [worker for worker in workers.values() if _is_worker_record(worker)]
     return aggregate_run_status(_worker_status(worker) for worker in status_workers)
 
 
@@ -2120,7 +2120,7 @@ def workers_in_dependency_order(workers):
 
 
 def has_partial_worker_success(run):
-    workers = [worker for worker in (run.get("workers") or {}).values() if _is_worker_mapping(worker) and worker_prompt(worker)]
+    workers = [worker for worker in (run.get("workers") or {}).values() if _is_worker_record(worker) and worker_prompt(worker)]
     if not workers:
         return False
     statuses = {_worker_status(worker) for worker in workers}

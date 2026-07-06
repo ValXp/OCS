@@ -5,7 +5,7 @@ from opencode_session.worker_state import (
     is_executable_worker,
     is_failed_dependency_status,
     is_runnable_status,
-    is_worker_mapping,
+    is_worker_record,
     public_worker_state,
     worker_lifecycle_state,
     worker_field,
@@ -47,7 +47,7 @@ def _worker_dependency_graph(workers):
     return {
         worker_id: tuple(_worker_dependencies(worker))
         for worker_id, worker in workers.items()
-        if is_worker_mapping(worker)
+        if is_worker_record(worker)
     }
 
 
@@ -129,7 +129,7 @@ def _dependency_blocker_seeds(workers, dependency_graph):
         blockers = []
         for dependency in dependency_graph.get(worker_id, ()):
             dependency_worker = workers.get(dependency)
-            if not is_worker_mapping(dependency_worker) or is_failed_dependency_status(_worker_status(dependency_worker)):
+            if not is_worker_record(dependency_worker) or is_failed_dependency_status(_worker_status(dependency_worker)):
                 blockers.append(f"dependency:{dependency}")
         if blockers:
             blockers_by_worker_id[worker_id] = tuple(blockers)
@@ -181,13 +181,13 @@ def _merge_blocker_maps(*blocker_maps):
 def _dependencies_done(worker_id, workers, dependency_graph):
     for dependency in dependency_graph.get(worker_id, ()):
         dependency_worker = workers.get(dependency)
-        if not is_worker_mapping(dependency_worker) or _worker_status(dependency_worker) != "done":
+        if not is_worker_record(dependency_worker) or _worker_status(dependency_worker) != "done":
             return False
     return True
 
 
 def _non_runnable_dependency(worker):
-    if not is_worker_mapping(worker):
+    if not is_worker_record(worker):
         return False
     if not is_runnable_status(_worker_status(worker)):
         return False

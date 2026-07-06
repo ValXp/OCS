@@ -7,7 +7,7 @@ from opencode_session.schema_common import HydratedWorker, RunRecord
 from opencode_session.session_ids import require_session_id
 from opencode_session.worker_state import (
     WorkerRecord,
-    is_worker_mapping,
+    is_worker_record,
     worker_field,
     worker_record_for_mutation,
 )
@@ -268,7 +268,7 @@ def will_create_worker_session(worker, *, session_id=None, create_session=True):
 
 
 def _latest_worker(run, fallback_worker):
-    worker_id = worker_field(fallback_worker, "id") if is_worker_mapping(fallback_worker) else None
+    worker_id = worker_field(fallback_worker, "id") if is_worker_record(fallback_worker) else None
     if isinstance(run, dict) and worker_id:
         return _ensure_latest_worker(run, worker_id)
     if isinstance(fallback_worker, WorkerRecord):
@@ -281,7 +281,7 @@ def _ensure_latest_worker(run, worker_id):
     worker = workers.get(worker_id)
     if isinstance(worker, WorkerRecord):
         return worker
-    if is_worker_mapping(worker):
+    if is_worker_record(worker):
         worker = worker_record_for_mutation(worker, worker_id).to_worker()
     else:
         worker = WorkerRecord.default_fields(worker_id)
@@ -292,7 +292,7 @@ def _ensure_latest_worker(run, worker_id):
 def _coerce_worker_record(run, worker):
     if isinstance(worker, WorkerRecord):
         return worker
-    worker_id = worker_field(worker, "id") if is_worker_mapping(worker) else None
+    worker_id = worker_field(worker, "id") if is_worker_record(worker) else None
     if isinstance(run, dict) and worker_id:
         return _ensure_latest_worker(run, worker_id)
     return worker_record_for_mutation(worker, worker_id).to_worker()

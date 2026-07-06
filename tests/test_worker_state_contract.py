@@ -22,7 +22,7 @@ from opencode_session.worker_state import (
     canonicalize_legacy_worker_record,
     deserialize_worker_record,
     is_executable_worker,
-    is_worker_mapping,
+    is_worker_record,
     mark_worker_active,
     next_eligible_action,
     next_eligible_worker_action,
@@ -278,11 +278,11 @@ class WorkerStateContractTest(unittest.TestCase):
                 self.assertEqual(next_eligible_action(record), expected_action)
                 self.assertEqual(is_executable_worker(record), executable)
 
-    def test_core_worker_helpers_reject_raw_mappings(self):
+    def test_core_worker_record_helpers_reject_raw_mappings(self):
         worker = {"id": "review", "prompt": "Review", "lifecycle_state": "queued"}
 
-        self.assertFalse(is_worker_mapping(worker))
-        self.assertTrue(is_worker_mapping(normalize_worker(worker, "review")))
+        self.assertFalse(is_worker_record(worker))
+        self.assertTrue(is_worker_record(normalize_worker(worker, "review")))
         for helper in (
             lambda: worker_field(worker, "id"),
             lambda: worker_lifecycle_state(worker),

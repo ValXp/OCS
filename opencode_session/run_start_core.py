@@ -17,7 +17,7 @@ from opencode_session.worker_execution import (
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
 from opencode_session.worker_state import (
     WorkerTransition,
-    is_worker_mapping,
+    is_worker_record,
     worker_field,
     worker_record_for_mutation,
 )
@@ -127,7 +127,7 @@ class RunStartCore:
         for worker_id, session_ids in created_session_ids_by_worker.items():
             workers = current_run.setdefault("workers", {})
             worker = workers.get(worker_id)
-            if not is_worker_mapping(worker):
+            if not is_worker_record(worker):
                 continue
             worker = worker_record_for_mutation(worker, worker_id).to_worker()
             workers[worker_id] = worker
