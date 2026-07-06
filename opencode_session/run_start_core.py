@@ -7,14 +7,10 @@ from opencode_session.capabilities import configure_client_route_plan, detect_ca
 from opencode_session.run_start_policy import blocking_execution_start_error
 from opencode_session.schema_common import DomainRecord
 from opencode_session.worker_execution import (
-    RETRY_SCHEDULED,
-    WorkerExecutionOutcome,
-    apply_worker_attempt_transition,
     cleanup_created_worker_sessions,
-    execute_single_worker_attempt,
-    provision_worker_session,
+    execute_worker_attempts,
 )
-from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition, mark_worker_active
+from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition
 
 
 @dataclass
@@ -74,49 +70,21 @@ class RunStartCore:
         model=None,
         stop_after_retry=False,
     ):
-        created_session_ids = []
-        session_outcome = provision_worker_session(
+        return execute_worker_attempts(
             client,
             run,
             worker,
+            prompt,
+            capabilities,
+            executor=self.executor,
+            now=self.now,
             session_id=session_id,
             agent=agent,
             model=model,
             create_session=True,
+            stop_after_retry=stop_after_retry,
+            transition_sink=self._persist_execution_transition,
         )
-        if session_outcome.created_session_id is not None:
-            created_session_ids.append(session_outcome.created_session_id)
-        persisted = self._persist_transition(run, WorkerTransition.provisioned(worker))
-        run = persisted.run
-        worker = persisted.worker
-
-        while True:
-            active_transition = mark_worker_active(worker, now=self.now)
-            persisted = self._persist_transition(run, active_transition)
-            run = persisted.run
-            worker = persisted.worker
-            attempt = execute_single_worker_attempt(
-                client,
-                worker,
-                prompt,
-                capabilities,
-                executor=self.executor,
-            )
-            transition = apply_worker_attempt_transition(client, run, worker, attempt, now=self.now, agent=agent, model=model)
-            if transition.created_session_id is not None:
-                created_session_ids.append(transition.created_session_id)
-            persisted = self._persist_transition(run, transition.worker_transition)
-            run = persisted.run
-            worker = persisted.worker
-            if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
-                continue
-            return WorkerExecutionOutcome(
-                transition.kind,
-                created_session_ids,
-                transition.error,
-                transition.failure_category,
-                run,
-            )
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):
         first_error = None
@@ -144,6 +112,9 @@ class RunStartCore:
         result = self.persist_worker_transition(run, transition)
         worker = result.workers[0] if result.workers else result.run.get("workers", {}).get(transition.worker_id)
         return PersistedTransitionOutcome(result.run, worker)
+
+    def _persist_execution_transition(self, run, _worker, transition):
+        return self._persist_transition(run, transition)
 
 
 def remember_created_worker_sessions(created_session_ids_by_worker, worker, session_ids):
