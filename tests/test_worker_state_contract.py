@@ -203,43 +203,48 @@ class WorkerStateContractTest(unittest.TestCase):
                 self.assertEqual(metadata.source_states, expected_source_states)
                 self.assertEqual(metadata.target_states, expected_target_states)
 
-    def test_transition_specs_have_typed_callable_boundaries(self):
+    def test_transition_specs_are_table_driven_reducer_rows(self):
         annotations = WorkerTransitionSpec.__annotations__
-        for field_name in (
-            "payload_type",
-            "payload_factory",
-            "applier",
-            "target_resolver",
-            "legality_checker",
-        ):
+        for field_name in ("name", "source_states", "target_states", "target_state", "payload_type", "applier"):
             with self.subTest(field_name=field_name):
                 self.assertNotEqual(annotations[field_name], object)
+        for removed_hook in ("payload_factory", "target_resolver", "legality_checker"):
+            with self.subTest(removed_hook=removed_hook):
+                self.assertNotIn(removed_hook, annotations)
 
         for spec in WORKER_TRANSITION_DEFINITIONS.values():
             with self.subTest(transition=spec.name):
                 self.assertIsInstance(spec.payload_type, type)
-                self.assertTrue(callable(spec.payload_factory))
                 self.assertTrue(callable(spec.applier))
-                if spec.target_resolver is not None:
-                    self.assertTrue(callable(spec.target_resolver))
-                if spec.legality_checker is not None:
-                    self.assertTrue(callable(spec.legality_checker))
+                self.assertIs(spec.metadata, spec)
+                self.assertIs(WORKER_TRANSITION_METADATA[spec.name], spec)
+                if spec.target_state is not None:
+                    self.assertIn(spec.target_state, spec.target_states)
 
         with self.assertRaisesRegex(ValueError, "missing payload type"):
             WorkerTransitionSpec(
                 WorkerTransitionName.ACTIVE,
-                frozenset(),
-                object(),
-                lambda: None,
-                lambda reducer, transition: {},
+                source_states=frozenset(),
+                target_states=frozenset(),
+                payload_type=object(),
+                applier=lambda reducer, transition, payload, target_state: {},
             )
-        with self.assertRaisesRegex(ValueError, "missing payload factory"):
+        with self.assertRaisesRegex(ValueError, "missing applier"):
             WorkerTransitionSpec(
                 WorkerTransitionName.ACTIVE,
-                frozenset(),
-                object,
-                object(),
-                lambda reducer, transition: {},
+                source_states=frozenset(),
+                target_states=frozenset(),
+                payload_type=object,
+                applier=object(),
+            )
+        with self.assertRaisesRegex(ValueError, "configured unknown target lifecycle state"):
+            WorkerTransitionSpec(
+                WorkerTransitionName.ACTIVE,
+                source_states=frozenset(),
+                target_states=frozenset({"active_wait"}),
+                payload_type=object,
+                applier=lambda reducer, transition, payload, target_state: {},
+                target_state="missing",
             )
 
     def test_core_worker_state_invariants_use_worker_record_accessors(self):
