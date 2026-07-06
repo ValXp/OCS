@@ -12,6 +12,8 @@ from opencode_session.worker_state import (
     apply_worker_transition_to_worker,
     mark_worker_aborted,
     refresh_run_summary,
+    worker_field,
+    worker_has_field,
 )
 
 try:
@@ -164,7 +166,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
         self.assertEqual(run["status"], "active")
         self.assertIn("planner", run["workers"])
-        self.assertEqual(run["workers"]["planner"]["role"], "plan")
+        self.assertEqual(worker_field(run["workers"]["planner"], "role"), "plan")
 
     def test_concurrent_worker_upserts_preserve_both_workers(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
@@ -219,9 +221,9 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             ).run
             stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(run["workers"]["build"]["status"], "active")
-        self.assertNotIn("result", run["workers"]["build"])
-        self.assertEqual(persisted["workers"]["build"]["status"], "done")
+        self.assertEqual(worker_field(run["workers"]["build"], "status"), "active")
+        self.assertFalse(worker_has_field(run["workers"]["build"], "result"))
+        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
         self.assertEqual(stored["workers"]["build"]["lifecycle_state"], "done_collect")
         self.assertNotIn("status", stored["workers"]["build"])
@@ -235,10 +237,10 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
 
-            run_store.update_run(
-                "demo",
-                lambda latest_run: latest_run["workers"]["docs"]["prompt_ids"].append("prompt-docs"),
-            )
+            def steer_docs(latest_run):
+                latest_run["workers"]["docs"].remember_prompt_id("prompt-docs")
+
+            run_store.update_run("demo", steer_docs)
             build_worker = run["workers"]["build"]
             result = {
                 "session_id": "ses_build",
@@ -256,8 +258,8 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
             persisted = RunStore(store).load_run("demo")
 
-        self.assertEqual(persisted["workers"]["docs"]["prompt_ids"], ["prompt-docs"])
-        self.assertEqual(persisted["workers"]["build"]["status"], "done")
+        self.assertEqual(worker_field(persisted["workers"]["docs"], "prompt_ids"), ["prompt-docs"])
+        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
 
     def test_worker_patch_preserves_concurrent_prompt_id_on_same_worker(self):
@@ -267,10 +269,10 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
 
-            run_store.update_run(
-                "demo",
-                lambda latest_run: latest_run["workers"]["build"]["prompt_ids"].append("prompt-steer"),
-            )
+            def steer_build(latest_run):
+                latest_run["workers"]["build"].remember_prompt_id("prompt-steer")
+
+            run_store.update_run("demo", steer_build)
             build_worker = run["workers"]["build"]
             result = {
                 "session_id": "ses_build",
@@ -288,8 +290,8 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
             persisted = RunStore(store).load_run("demo")
 
-        self.assertEqual(persisted["workers"]["build"]["prompt_ids"], ["prompt-steer", "prompt-build"])
-        self.assertEqual(persisted["workers"]["build"]["status"], "done")
+        self.assertEqual(worker_field(persisted["workers"]["build"], "prompt_ids"), ["prompt-steer", "prompt-build"])
+        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
 
     def test_worker_patch_preserves_concurrent_worker_configuration_edits_on_same_worker(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
@@ -313,7 +315,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 model="openai/gpt-5.5",
             )
             build_worker = run["workers"]["build"]
-            build_worker["session_id"] = "ses_created_from_stale_snapshot"
+            build_worker.set_field("session_id", "ses_created_from_stale_snapshot")
             result = {
                 "session_id": "ses_created_from_stale_snapshot",
                 "status": "done",
@@ -331,18 +333,18 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         build = persisted["workers"]["build"]
-        self.assertEqual(build["status"], "done")
-        self.assertEqual(build["prompt"], "Build with new instructions")
-        self.assertEqual(build["dependencies"], ["docs"])
-        self.assertEqual(build["retry_limit"], 3)
-        self.assertEqual(build["retryable_failures"], ["api"])
-        self.assertEqual(build["timeout_seconds"], 45)
-        self.assertEqual(build["timeout_policy"], "blocked")
-        self.assertEqual(build["session_id"], "ses_user")
-        self.assertEqual(build["agent"], "plan")
-        self.assertEqual(build["model"], "openai/gpt-5.5")
-        self.assertEqual(build["prompt_ids"], ["prompt-build"])
-        self.assertEqual(build["output_refs"], ["assistant:msg_build"])
+        self.assertEqual(worker_field(build, "status"), "done")
+        self.assertEqual(worker_field(build, "prompt"), "Build with new instructions")
+        self.assertEqual(worker_field(build, "dependencies"), ["docs"])
+        self.assertEqual(worker_field(build, "retry_limit"), 3)
+        self.assertEqual(worker_field(build, "retryable_failures"), ["api"])
+        self.assertEqual(worker_field(build, "timeout_seconds"), 45)
+        self.assertEqual(worker_field(build, "timeout_policy"), "blocked")
+        self.assertEqual(worker_field(build, "session_id"), "ses_user")
+        self.assertEqual(worker_field(build, "agent"), "plan")
+        self.assertEqual(worker_field(build, "model"), "openai/gpt-5.5")
+        self.assertEqual(worker_field(build, "prompt_ids"), ["prompt-build"])
+        self.assertEqual(worker_field(build, "output_refs"), ["assistant:msg_build"])
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
 
     def test_worker_patch_does_not_overwrite_concurrent_abort(self):
@@ -388,9 +390,9 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         build = persisted["workers"]["build"]
-        self.assertEqual(build["status"], "aborted")
-        self.assertEqual(build["abort"], {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}})
-        self.assertNotIn("result", build)
+        self.assertEqual(worker_field(build, "status"), "aborted")
+        self.assertEqual(worker_field(build, "abort"), {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}})
+        self.assertFalse(worker_has_field(build, "result"))
         self.assertEqual(persisted["status"], "aborted")
         self.assertEqual(persisted["output_refs"], [])
 

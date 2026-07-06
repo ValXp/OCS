@@ -21,6 +21,8 @@ from opencode_session.worker_state import (
     worker_lifecycle_source_states,
     worker_lifecycle_state,
     worker_lifecycle_target_states,
+    worker_field,
+    worker_has_field,
     worker_transition_is_legal,
     worker_transition_target_lifecycle_state,
 )
@@ -209,12 +211,12 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(worker["status"], "aborted")
-        self.assertEqual(worker["next_eligible_action"], "none")
-        self.assertEqual(worker["abort"], {"session_id": "ses_build", "accepted": True})
-        self.assertEqual(worker["prompt_ids"], ["msg_initial", "msg_user"])
-        self.assertNotIn("result", worker)
-        self.assertEqual(worker["output_refs"], [])
+        self.assertEqual(worker_field(worker, "status"), "aborted")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_field(worker, "abort"), {"session_id": "ses_build", "accepted": True})
+        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_initial", "msg_user"])
+        self.assertFalse(worker_has_field(worker, "result"))
+        self.assertEqual(worker_field(worker, "output_refs"), [])
 
     def test_worker_scenario_asserts_retry_to_success_outcome(self):
         result = {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
@@ -301,7 +303,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         apply_worker_transition_to_worker(retry_worker, schedule_worker_retry(retry_worker, "provider", "try again"))
 
         assert_worker_outcome(self, retry_worker, status="active", action="retry", lifecycle="active_retry")
-        self.assertEqual(retry_worker["retry_count"], 1)
+        self.assertEqual(worker_field(retry_worker, "retry_count"), 1)
 
         timeout_worker = normalize_worker(
             {
@@ -325,7 +327,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         )
 
         assert_worker_outcome(self, timeout_worker, status="failed", action="retry", lifecycle="timeout_failed_retry")
-        self.assertTrue(timeout_worker["manual_retry_required"])
+        self.assertTrue(worker_field(timeout_worker, "manual_retry_required"))
 
         result_worker = normalize_worker({"status": "active"}, "review")
         apply_worker_transition_to_worker(
@@ -337,7 +339,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         )
 
         assert_worker_outcome(self, result_worker, status="done", action="collect", lifecycle="done_collect")
-        self.assertEqual(result_worker["output_refs"], ["assistant:msg_assistant"])
+        self.assertEqual(worker_field(result_worker, "output_refs"), ["assistant:msg_assistant"])
 
     def test_worker_transition_names_dispatch_through_public_transitions(self):
         cases = (
@@ -359,7 +361,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 WorkerTransitionName.ATTEMPT_STARTED,
                 {"status": "active"},
                 lambda worker: WorkerTransition.attempt_started(
-                    worker["id"],
+                    worker_field(worker, "id"),
                     {"id": "attempt-1", "status": "active", "session_id": "ses_review"},
                 ),
                 {"status": "active", "action": "wait", "lifecycle": "active_wait"},
@@ -403,7 +405,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 WorkerTransitionName.TIMED_OUT,
                 {"status": "active"},
                 lambda worker: WorkerTransition.timed_out(
-                    worker["id"],
+                    worker_field(worker, "id"),
                     "worker timed out",
                     status="timeout",
                     timed_out_at="2026-07-04T00:00:00Z",
@@ -415,7 +417,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 WorkerTransitionName.RESULT_APPLIED,
                 {"status": "active"},
                 lambda worker: WorkerTransition.result_applied(
-                    worker["id"],
+                    worker_field(worker, "id"),
                     {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
                 ),
                 {"status": "done", "action": "collect", "lifecycle": "done_collect"},
@@ -434,13 +436,13 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 lambda worker: WorkerTransition.snapshot_applied(
                     normalize_worker_snapshot(
                         {
-                            "id": worker["id"],
+                            "id": worker_field(worker, "id"),
                             "lifecycle_state": "done_collect",
                             "prompt_ids": ["msg_done"],
                             "result": {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
                             "output_refs": ["assistant:msg_assistant"],
                         },
-                        worker["id"],
+                        worker_field(worker, "id"),
                     )
                 ),
                 {"status": "done", "action": "collect", "lifecycle": "done_collect"},
@@ -468,7 +470,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
                 assert_worker_outcome(self, worker, **expected_outcome)
                 for field_name, expected_value in expected_fields.items():
-                    self.assertEqual(worker[field_name], expected_value)
+                    self.assertEqual(worker_field(worker, field_name), expected_value)
 
     def test_retry_transition_definition_carries_legality_target_and_behavior(self):
         worker = normalize_worker(
@@ -512,8 +514,8 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         apply_worker_transition_to_worker(worker, WorkerTransition.snapshot_applied(snapshot))
 
         assert_worker_outcome(self, worker, status="done", action="collect", lifecycle="done_collect")
-        self.assertEqual(worker["prompt_ids"], ["msg_initial", "msg_done"])
-        self.assertEqual(worker["output_refs"], ["assistant:msg_assistant"])
+        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_initial", "msg_done"])
+        self.assertEqual(worker_field(worker, "output_refs"), ["assistant:msg_assistant"])
 
     def test_snapshot_replay_noops_illegal_lifecycle_rewind(self):
         from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
@@ -595,20 +597,20 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
         apply_worker_transition_to_worker(worker, mark_worker_active(worker))
 
-        self.assertEqual(worker["status"], "active")
-        self.assertEqual(worker["lifecycle_state"], "active_wait")
-        self.assertEqual(worker["prompt_ids"], [])
+        self.assertEqual(worker_field(worker, "status"), "active")
+        self.assertEqual(worker_field(worker, "lifecycle_state"), "active_wait")
+        self.assertEqual(worker_field(worker, "prompt_ids"), [])
 
     def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
         worker = normalize_worker({"status": "active", "next_eligible_action": "wait"}, "planner")
 
         apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": False}))
 
-        self.assertEqual(worker["status"], "active")
-        self.assertEqual(worker["next_eligible_action"], "wait")
+        self.assertEqual(worker_field(worker, "status"), "active")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "wait")
 
         apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": True}))
 
-        self.assertEqual(worker["status"], "aborted")
-        self.assertEqual(worker["next_eligible_action"], "none")
-        self.assertEqual(worker["abort"], {"accepted": True})
+        self.assertEqual(worker_field(worker, "status"), "aborted")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_field(worker, "abort"), {"accepted": True})

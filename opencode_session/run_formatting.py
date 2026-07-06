@@ -4,7 +4,7 @@ from opencode_session.formatting import (
     format_table as _format_table,
 )
 from opencode_session.schema_common import tokens_total as _tokens_total
-from opencode_session.worker_state import is_worker_mapping, normalize_worker
+from opencode_session.worker_state import is_worker_mapping, normalize_worker, worker_field
 
 
 def format_run_compact(run):
@@ -38,10 +38,10 @@ def format_run_compact(run):
 
 
 def format_worker_result_compact(worker):
-    result = worker["result"]
+    result = worker_field(worker, "result")
     fields = [
-        ("worker", worker.get("id")),
-        ("role", worker.get("role")),
+        ("worker", worker_field(worker, "id")),
+        ("role", worker_field(worker, "role")),
         ("session", result["session_id"]),
         ("status", result["status"]),
         ("user", result["message_ids"]["user"]),
@@ -55,18 +55,18 @@ def format_worker_result_compact(worker):
 
 def _format_worker_compact(worker):
     fields = [
-        ("worker", worker.get("id")),
-        ("role", worker.get("role")),
-        ("status", worker.get("status")),
-        ("session", worker.get("session_id")),
-        ("agent", worker.get("agent")),
-        ("model", worker.get("model")),
-        ("deps", _compact_list(worker.get("dependencies"))),
-        ("prompts", _compact_list(worker.get("prompt_ids"))),
-        ("retries", worker.get("retry_count")),
-        ("timeout", worker.get("timeout_seconds")),
-        ("blockers", _compact_list(worker.get("blockers"))),
-        ("outputs", _compact_list(worker.get("output_refs"))),
+        ("worker", worker_field(worker, "id")),
+        ("role", worker_field(worker, "role")),
+        ("status", worker_field(worker, "status")),
+        ("session", worker_field(worker, "session_id")),
+        ("agent", worker_field(worker, "agent")),
+        ("model", worker_field(worker, "model")),
+        ("deps", _compact_list(worker_field(worker, "dependencies"))),
+        ("prompts", _compact_list(worker_field(worker, "prompt_ids"))),
+        ("retries", worker_field(worker, "retry_count")),
+        ("timeout", worker_field(worker, "timeout_seconds")),
+        ("blockers", _compact_list(worker_field(worker, "blockers"))),
+        ("outputs", _compact_list(worker_field(worker, "output_refs"))),
     ]
     return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
@@ -76,18 +76,18 @@ def _format_worker_table(workers):
     for worker in workers:
         rows.append(
             [
-                worker.get("id"),
-                worker.get("role"),
-                worker.get("status"),
-                worker.get("session_id"),
-                worker.get("agent"),
-                worker.get("model"),
-                _compact_list(worker.get("dependencies")),
-                _compact_list(worker.get("prompt_ids")),
-                worker.get("retry_count"),
-                worker.get("timeout_seconds"),
-                _compact_list(worker.get("blockers")),
-                _compact_list(worker.get("output_refs")),
+                worker_field(worker, "id"),
+                worker_field(worker, "role"),
+                worker_field(worker, "status"),
+                worker_field(worker, "session_id"),
+                worker_field(worker, "agent"),
+                worker_field(worker, "model"),
+                _compact_list(worker_field(worker, "dependencies")),
+                _compact_list(worker_field(worker, "prompt_ids")),
+                worker_field(worker, "retry_count"),
+                worker_field(worker, "timeout_seconds"),
+                _compact_list(worker_field(worker, "blockers")),
+                _compact_list(worker_field(worker, "output_refs")),
             ]
         )
     return _format_table(
@@ -99,7 +99,7 @@ def _format_worker_table(workers):
 def _worker_status_counts(workers):
     counts = {"queued": 0, "active": 0, "done": 0, "blocked": 0, "failed": 0, "aborted": 0, "timeout": 0}
     for worker_id, worker in workers.items():
-        status = normalize_worker(worker, worker_id).get("status") if is_worker_mapping(worker) else None
+        status = worker_field(normalize_worker(worker, worker_id), "status") if is_worker_mapping(worker) else None
         if status in counts:
             counts[status] += 1
     return counts

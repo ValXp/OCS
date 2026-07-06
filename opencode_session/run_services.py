@@ -29,6 +29,7 @@ from opencode_session.worker_state import (
     mark_dependency_blocked,
     mark_worker_aborted,
     mark_worker_active,
+    worker_field,
     worker_record_for_mutation,
 )
 
@@ -215,7 +216,7 @@ class RunCommandService:
             only_worker_id = next(iter(workers))
             return RunCollectResult(run, worker=_worker_result(run, only_worker_id))
         completed_workers = tuple(
-            worker for worker in workers_in_dependency_order(workers) if isinstance(worker.get("result"), dict)
+            worker for worker in workers_in_dependency_order(workers) if isinstance(worker_field(worker, "result"), dict)
         )
         if not completed_workers:
             raise RunStoreError(f"run '{name}' has no collected worker results", kind="missing")
@@ -236,7 +237,7 @@ class RunCommandService:
             return SteerPromptIntentRecord(
                 id=mutation_id,
                 worker_id=worker_id,
-                session_id=latest_worker["session_id"],
+                session_id=worker_field(latest_worker, "session_id"),
                 message_id=prompt_message_id,
                 delivery=delivery,
                 text=text,
@@ -247,7 +248,7 @@ class RunCommandService:
             result = admit_prompt(
                 client,
                 capabilities,
-                worker["session_id"],
+                worker_field(worker, "session_id"),
                 text,
                 delivery,
                 message_id=prompt_message_id,
@@ -278,18 +279,18 @@ class RunCommandService:
             return AbortWorkerIntentRecord(
                 id=mutation_id,
                 worker_id=worker_id,
-                session_id=latest_worker["session_id"],
+                session_id=worker_field(latest_worker, "session_id"),
             )
 
         run = transaction.record_intent_from(run, abort_intent)
         try:
-            response = client.abort_session_response(worker["session_id"])
+            response = client.abort_session_response(worker_field(worker, "session_id"))
         except Exception as error:
             transaction.discard_intent_best_effort(run)
             if isinstance(error, OpenCodeApiError) and is_session_not_found_error(error):
-                raise RunWorkerSessionNotFound(worker["session_id"]) from error
+                raise RunWorkerSessionNotFound(worker_field(worker, "session_id")) from error
             raise
-        abort = abort_record(worker["session_id"], response.data)
+        abort = abort_record(worker_field(worker, "session_id"), response.data)
 
         def mark_aborted(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
@@ -331,7 +332,7 @@ def _worker_result(run, worker_id):
     worker = run.get("workers", {}).get(worker_id)
     if not is_worker_mapping(worker):
         raise RunStoreError(f"worker '{worker_id}' not found in run '{run['name']}'", kind="missing")
-    result = worker.get("result")
+    result = worker_field(worker, "result")
     if not isinstance(result, dict):
         raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no collected result", kind="missing")
     return worker
@@ -341,7 +342,7 @@ def _run_worker_with_session(run, worker_id):
     worker = run.get("workers", {}).get(worker_id)
     if not is_worker_mapping(worker):
         raise RunStoreError(f"worker '{worker_id}' not found in run '{run['name']}'", kind="missing")
-    if not worker.get("session_id"):
+    if not worker_field(worker, "session_id"):
         raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no session", kind="missing")
     return worker
 

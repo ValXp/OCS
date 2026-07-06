@@ -7,6 +7,7 @@ from opencode_session.worker_state import (
     is_failed_dependency_status,
     is_runnable_status,
     is_worker_mapping,
+    worker_field,
     worker_has_prompt,
 )
 
@@ -205,7 +206,7 @@ def _worker_has_prompt(worker):
 
 
 def _worker_dependencies(worker):
-    dependencies = worker.get("dependencies", [])
+    dependencies = worker_field(worker, "dependencies", [])
     return dependencies if isinstance(dependencies, list) else []
 
 

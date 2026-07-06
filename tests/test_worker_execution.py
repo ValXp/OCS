@@ -24,7 +24,7 @@ from opencode_session.worker_session_provisioning import (
     ensure_worker_session,
     provision_worker_session,
 )
-from opencode_session.worker_state import WorkerRecord, apply_worker_transition, ensure_worker
+from opencode_session.worker_state import WorkerRecord, apply_worker_transition, ensure_worker, worker_field, worker_has_field
 
 
 CAPABILITIES = {
@@ -70,7 +70,7 @@ class FakeClient:
 
 class WorkerExecutionTest(unittest.TestCase):
     def assert_single_worker_attempt(self, worker, *, status, session_id):
-        attempts = worker.get("attempts")
+        attempts = worker_field(worker, "attempts")
         self.assertIsInstance(attempts, list)
         self.assertEqual(len(attempts), 1)
         attempt = attempts[0]
@@ -158,7 +158,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIsInstance(worker, WorkerRecord)
         self.assertEqual(outcome.session_id, "ses_new")
         self.assertEqual(calls, [("worker", "ses_new", "build", "openai/gpt-5.5")])
-        self.assertEqual(worker["session_id"], "ses_new")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_new")
 
     def test_provision_without_create_uses_worker_record_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -186,7 +186,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(client.requests, [])
         self.assertEqual(outcome.session_id, "ses_existing")
         self.assertEqual(calls, [("worker", "ses_existing", "plan", "openai/gpt-5.5")])
-        self.assertEqual(worker["session_id"], "ses_existing")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_existing")
 
     def test_cleanup_created_worker_sessions_clears_stale_sessions_after_single_session_success(self):
         worker = WorkerRecord.from_worker(
@@ -208,7 +208,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(client.requests, [("delete", "ses_new"), ("get", "ses_new")])
         self.assertEqual(outcome.deleted_session_ids, ["ses_new"])
         self.assertIsNone(outcome.error)
-        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
 
     def test_cleanup_created_worker_sessions_treats_missing_session_as_deleted(self):
         worker = WorkerRecord.default_fields("worker")
@@ -222,7 +222,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(client.requests, [("delete", "ses_missing"), ("get", "ses_missing")])
         self.assertEqual(outcome.deleted_session_ids, ["ses_missing"])
         self.assertIsNone(outcome.error)
-        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
 
     def test_worker_session_journal_records_cleanup_failure_when_discard_fails(self):
         run = {"name": "demo", "directory": "/workspace", "workers": {"worker": {"id": "worker"}}}
@@ -295,8 +295,11 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(journals[0][0]["status"], "intent")
         self.assertEqual(journals[1][0]["status"], "created")
         self.assertIs(provisioning.worker, run["workers"]["worker"])
-        self.assertEqual(provisioning.worker["session_id"], "ses_new")
-        self.assertEqual(provisioning.worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_new"]})
+        self.assertEqual(worker_field(provisioning.worker, "session_id"), "ses_new")
+        self.assertEqual(
+            worker_field(provisioning.worker, "cleanup"),
+            {"requested": True, "deleted": False, "sessions": ["ses_new"]},
+        )
 
         finalized_run, finalized_worker = provisioner.finalize_best_effort(
             provisioning.run,
@@ -384,10 +387,10 @@ class WorkerExecutionTest(unittest.TestCase):
                 )
 
         self.assertEqual(client.requests, [("create", directory, "build", "openai/gpt-5.5")])
-        self.assertIsNone(worker["session_id"])
-        self.assertIsNone(worker["agent"])
-        self.assertIsNone(worker["model"])
-        self.assertNotIn("result", worker)
+        self.assertIsNone(worker_field(worker, "session_id"))
+        self.assertIsNone(worker_field(worker, "agent"))
+        self.assertIsNone(worker_field(worker, "model"))
+        self.assertFalse(worker_has_field(worker, "result"))
 
     def test_execute_worker_attempts_applies_active_attempt_before_executor(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -398,7 +401,7 @@ class WorkerExecutionTest(unittest.TestCase):
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 executions.append((session_id, prompt))
-                self.assertEqual(worker["status"], "active")
+                self.assertEqual(worker_field(worker, "status"), "active")
                 attempt = self.assert_single_worker_attempt(worker, status="active", session_id="ses_initial")
                 self.assertEqual(attempt.get("id"), "attempt-1")
                 self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -420,7 +423,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(executions, [("ses_initial", "Finish the worker task")])
         self.assertEqual(client.requests, [("create", directory, None, None)])
         self.assertEqual(outcome.kind, "completed")
-        self.assertEqual(worker["status"], "done")
+        self.assertEqual(worker_field(worker, "status"), "done")
         attempt = self.assert_single_worker_attempt(worker, status="completed", session_id="ses_initial")
         self.assertEqual(attempt.get("id"), "attempt-1")
         self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -434,7 +437,7 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker["timeout_seconds"] = 1
+            worker.set_field("timeout_seconds", 1)
             client = FakeClient(["ses_initial"])
             executions = []
 
@@ -468,9 +471,9 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker["timeout_seconds"] = 0.05
-            worker["retry_limit"] = 1
-            worker["retryable_failures"] = ["timeout"]
+            worker.set_field("timeout_seconds", 0.05)
+            worker.set_field("retry_limit", 1)
+            worker.set_field("retryable_failures", ["timeout"])
             client = FakeClient(["ses_initial", "ses_unused"])
 
             def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
@@ -498,14 +501,14 @@ class WorkerExecutionTest(unittest.TestCase):
                 ("execute", "ses_initial", "Finish the worker task"),
             ],
         )
-        self.assertEqual(worker["session_id"], "ses_initial")
-        self.assertEqual(worker["status"], "timeout")
-        self.assertEqual(worker["retry_count"], 0)
-        self.assertTrue(worker["manual_retry_required"])
-        self.assertEqual(worker["next_eligible_action"], "retry")
-        self.assertEqual(worker["failure_reason"], "worker timed out after 0.05s")
-        self.assertNotIn("timeout_retry_sessions", worker)
-        self.assertNotIn("result", worker)
+        self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
+        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_field(worker, "retry_count"), 0)
+        self.assertTrue(worker_field(worker, "manual_retry_required"))
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_field(worker, "failure_reason"), "worker timed out after 0.05s")
+        self.assertFalse(worker_has_field(worker, "timeout_retry_sessions"))
+        self.assertFalse(worker_has_field(worker, "result"))
 
     def test_run_start_core_persists_attempt_record_before_blocking_executor(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -524,8 +527,8 @@ class WorkerExecutionTest(unittest.TestCase):
                 client.requests.append(("execute", session_id, prompt))
                 self.assertTrue(persisted_workers)
                 persisted_worker = persisted_workers[-1]
-                self.assertEqual(persisted_worker["status"], "active")
-                self.assertEqual(persisted_worker["next_eligible_action"], "wait")
+                self.assertEqual(worker_field(persisted_worker, "status"), "active")
+                self.assertEqual(worker_field(persisted_worker, "next_eligible_action"), "wait")
                 attempt = self.assert_single_worker_attempt(
                     persisted_worker,
                     status="active",
@@ -555,8 +558,8 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(outcome.kind, "completed")
         self.assertTrue(persisted_workers)
         persisted_worker = persisted_workers[-1]
-        self.assertEqual(persisted_worker["status"], "done")
-        self.assertEqual(persisted_worker["next_eligible_action"], "collect")
+        self.assertEqual(worker_field(persisted_worker, "status"), "done")
+        self.assertEqual(worker_field(persisted_worker, "next_eligible_action"), "collect")
         attempt = self.assert_single_worker_attempt(persisted_worker, status="completed", session_id="ses_initial")
         self.assertEqual(attempt.get("id"), "attempt-1")
         self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -570,9 +573,9 @@ class WorkerExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker["timeout_seconds"] = 0.05
-            worker["retry_limit"] = 1
-            worker["retryable_failures"] = ["timeout"]
+            worker.set_field("timeout_seconds", 0.05)
+            worker.set_field("retry_limit", 1)
+            worker.set_field("retryable_failures", ["timeout"])
             client = FakeClient(["ses_initial", "ses_retry"])
 
             def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
@@ -602,23 +605,23 @@ class WorkerExecutionTest(unittest.TestCase):
                 ("execute", "ses_initial", "Finish the worker task", True),
             ],
         )
-        self.assertEqual(worker["status"], "timeout")
-        self.assertEqual(worker["session_id"], "ses_initial")
-        self.assertEqual(worker["retry_count"], 0)
-        self.assertEqual(worker["last_failure_category"], "timeout")
-        self.assertEqual(worker["last_failure_reason"], "worker timed out after 0.05s")
-        self.assertEqual(worker["next_eligible_action"], "retry")
-        self.assertTrue(worker["manual_retry_required"])
-        self.assertNotIn("result", worker)
-        self.assertNotIn("timeout_retry_sessions", worker)
+        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
+        self.assertEqual(worker_field(worker, "retry_count"), 0)
+        self.assertEqual(worker_field(worker, "last_failure_category"), "timeout")
+        self.assertEqual(worker_field(worker, "last_failure_reason"), "worker timed out after 0.05s")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "retry")
+        self.assertTrue(worker_field(worker, "manual_retry_required"))
+        self.assertFalse(worker_has_field(worker, "result"))
+        self.assertFalse(worker_has_field(worker, "timeout_retry_sessions"))
 
     def test_execute_worker_attempts_does_not_schedule_timeout_retry_when_requested(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
-            worker["timeout_seconds"] = 0.05
-            worker["retry_limit"] = 1
-            worker["retryable_failures"] = ["timeout"]
+            worker.set_field("timeout_seconds", 0.05)
+            worker.set_field("retry_limit", 1)
+            worker.set_field("retryable_failures", ["timeout"])
             client = FakeClient(["ses_initial", "ses_retry"])
 
             def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
@@ -648,9 +651,9 @@ class WorkerExecutionTest(unittest.TestCase):
                 ("execute", "ses_initial", "Finish the worker task"),
             ],
         )
-        self.assertEqual(worker["status"], "timeout")
-        self.assertEqual(worker["next_eligible_action"], "retry")
-        self.assertEqual(worker["session_id"], "ses_initial")
+        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "retry")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
 
 
 if __name__ == "__main__":

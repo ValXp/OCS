@@ -34,6 +34,7 @@ from opencode_session.worker_state import (
     worker_lifecycle_state_for_dimensions,
     worker_lifecycle_state_for_status_alias,
     worker_lifecycle_target_states,
+    worker_field,
     worker_timeout_lifecycle_state,
     worker_record_for_mutation,
 )
@@ -165,13 +166,13 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertIsInstance(worker, WorkerRecord)
         self.assertNotIsInstance(worker, dict)
-        self.assertEqual(worker["id"], "review")
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(worker["dependencies"], [])
-        self.assertEqual(worker["prompt_ids"], [])
-        self.assertEqual(worker["timeout_policy"], "timeout")
-        self.assertEqual(worker["lifecycle_state"], "failed_retry")
-        self.assertEqual(worker["next_eligible_action"], "retry")
+        self.assertEqual(worker.field("id"), "review")
+        self.assertEqual(worker.status, "failed")
+        self.assertEqual(worker.field("dependencies"), [])
+        self.assertEqual(worker.field("prompt_ids"), [])
+        self.assertEqual(worker.field("timeout_policy"), "timeout")
+        self.assertEqual(worker.lifecycle_state, "failed_retry")
+        self.assertEqual(worker.next_eligible_action, "retry")
 
     def test_worker_execution_eligibility_derives_canonical_action(self):
         queued = {"id": "build", "prompt": "Build", "lifecycle_state": "queued"}
@@ -218,7 +219,7 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertIsInstance(record, WorkerRecord)
         self.assertNotIsInstance(record, dict)
-        self.assertEqual(record["prompt_ids"], ["msg_previous", "msg_new"])
+        self.assertEqual(record.field("prompt_ids"), ["msg_previous", "msg_new"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_previous"])
 
     def test_worker_record_is_not_mapping_hybrid(self):
@@ -228,10 +229,29 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIsInstance(record, MutableMapping)
         with self.assertRaises(TypeError):
             dict(record)
+        with self.assertRaises(TypeError):
+            record["id"]
+        with self.assertRaises(TypeError):
+            record["role"] = "review"
+        for method_name in ("get", "setdefault", "pop", "update", "clear"):
+            self.assertFalse(hasattr(record, method_name), method_name)
+
+    def test_worker_record_explicit_api_replaces_dict_mutation(self):
+        record = WorkerRecord.default_fields("review")
+
+        record.set_field("prompt", "Review the change")
+        record.remember_prompt_id("msg_review")
+        snapshot = record.to_snapshot()
+
+        self.assertEqual(record.field("prompt"), "Review the change")
+        self.assertEqual(record.field("prompt_ids"), ["msg_review"])
+        self.assertEqual(worker_field(record, "status"), "queued")
+        self.assertNotIn("status", snapshot)
+        self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
     def test_worker_record_mutation_updates_hydrated_object_without_sync(self):
         worker = WorkerRecord.default_fields("review")
-        worker["prompt"] = "Review the change"
+        worker.set_field("prompt", "Review the change")
         workers = {"review": worker}
 
         record = apply_worker_transition(workers, mark_worker_active(worker))
@@ -240,8 +260,8 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertIs(record, worker)
         self.assertIs(workers["review"], worker)
-        self.assertEqual(worker["status"], "active")
-        self.assertEqual(worker["prompt_ids"], ["msg_review"])
+        self.assertEqual(worker.status, "active")
+        self.assertEqual(worker.field("prompt_ids"), ["msg_review"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
     def test_deserialize_worker_snapshot_hydrates_defaults_and_public_state(self):
@@ -254,9 +274,9 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
 
-        self.assertEqual(worker["id"], "review")
-        self.assertIsNone(worker["session_id"])
-        self.assertEqual(worker["dependencies"], [])
+        self.assertEqual(worker.field("id"), "review")
+        self.assertIsNone(worker.field("session_id"))
+        self.assertEqual(worker.field("dependencies"), [])
         assert_worker_outcome(self, worker, status="active", action="retry", lifecycle="active_retry")
 
     def test_serialize_worker_snapshot_keeps_public_state_out_of_persisted_json(self):

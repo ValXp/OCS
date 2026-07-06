@@ -5,6 +5,7 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
+from opencode_session.worker_state import worker_field, worker_has_field
 
 try:
     from tests.single_worker_run_state_helpers import (
@@ -52,10 +53,10 @@ class SingleWorkerCanonicalOrchestrationTest(unittest.TestCase):
         self.assertIn("unsupported route behavior", outcome.error)
         worker = run["workers"]["worker"]
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(worker["failure_category"], "api")
-        self.assertEqual(worker["retryable_failures"], ["api"])
-        self.assertEqual(worker["next_eligible_action"], "none")
+        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertEqual(worker_field(worker, "failure_category"), "api")
+        self.assertEqual(worker_field(worker, "retryable_failures"), ["api"])
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
 
     def test_start_api_setup_failure_is_not_retryable(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -95,10 +96,10 @@ class SingleWorkerCanonicalOrchestrationTest(unittest.TestCase):
         self.assertEqual(outcome.error, "api failure: capability probe failed")
         worker = run["workers"]["worker"]
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(worker["failure_category"], "api")
-        self.assertEqual(worker["retryable_failures"], ["api"])
-        self.assertEqual(worker["next_eligible_action"], "none")
+        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertEqual(worker_field(worker, "failure_category"), "api")
+        self.assertEqual(worker_field(worker, "retryable_failures"), ["api"])
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
 
     def test_start_success_persists_worker_result_and_run_summary(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -147,14 +148,14 @@ class SingleWorkerCanonicalOrchestrationTest(unittest.TestCase):
         self.assertEqual(run["status"], "done")
         self.assertEqual(run["output_refs"], ["worker:msg_assistant_1"])
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "done")
-        self.assertEqual(worker["session_id"], "ses_new")
-        self.assertEqual(worker["role"], "worker")
-        self.assertEqual(worker["prompt"], "Finish the worker task")
-        self.assertEqual(worker["prompt_ids"], ["msg_user_1"])
-        self.assertEqual(worker["output_refs"], ["assistant:msg_assistant_1"])
-        self.assertEqual(worker["next_eligible_action"], "collect")
-        self.assertEqual(worker["result"]["text"], "Worker finished.")
+        self.assertEqual(worker_field(worker, "status"), "done")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_new")
+        self.assertEqual(worker_field(worker, "role"), "worker")
+        self.assertEqual(worker_field(worker, "prompt"), "Finish the worker task")
+        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_user_1"])
+        self.assertEqual(worker_field(worker, "output_refs"), ["assistant:msg_assistant_1"])
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "collect")
+        self.assertEqual(worker_field(worker, "result")["text"], "Worker finished.")
 
     def test_start_treats_empty_stored_session_id_as_missing(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -207,9 +208,9 @@ class SingleWorkerCanonicalOrchestrationTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "done")
-        self.assertEqual(worker["session_id"], "ses_created")
-        self.assertEqual(worker["result"]["session_id"], "ses_created")
+        self.assertEqual(worker_field(worker, "status"), "done")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_created")
+        self.assertEqual(worker_field(worker, "result")["session_id"], "ses_created")
 
     def test_start_rejects_create_response_without_session_id_before_execution(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -247,12 +248,12 @@ class SingleWorkerCanonicalOrchestrationTest(unittest.TestCase):
         self.assertEqual(client.requests, [("create", directory, None, None)])
         self.assertEqual(run["status"], "failed")
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "failed")
-        self.assertIsNone(worker["session_id"])
-        self.assertEqual(worker["failure_category"], "api")
-        self.assertEqual(worker["failure_reason"], "session creation returned malformed response: missing session id")
-        self.assertEqual(worker["next_eligible_action"], "none")
-        self.assertNotIn("result", worker)
+        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertIsNone(worker_field(worker, "session_id"))
+        self.assertEqual(worker_field(worker, "failure_category"), "api")
+        self.assertEqual(worker_field(worker, "failure_reason"), "session creation returned malformed response: missing session id")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertFalse(worker_has_field(worker, "result"))
 
     def test_start_records_terminal_provider_failure_without_result(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -287,17 +288,17 @@ class SingleWorkerCanonicalOrchestrationTest(unittest.TestCase):
         self.assertEqual(outcome.error, "provider failure: provider rejected request")
         self.assertEqual(run["status"], "failed")
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(worker["session_id"], "ses_new")
-        self.assertEqual(worker["prompt_ids"], ["msg_user_1"])
-        self.assertEqual(worker["output_refs"], [])
-        self.assertEqual(worker["error"], "provider rejected request")
-        self.assertEqual(worker["failure_category"], "provider")
-        self.assertEqual(worker["failure_reason"], "provider rejected request")
-        self.assertEqual(worker["last_failure_category"], "provider")
-        self.assertEqual(worker["last_failure_reason"], "provider rejected request")
-        self.assertEqual(worker["next_eligible_action"], "none")
-        self.assertNotIn("result", worker)
+        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_new")
+        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_user_1"])
+        self.assertEqual(worker_field(worker, "output_refs"), [])
+        self.assertEqual(worker_field(worker, "error"), "provider rejected request")
+        self.assertEqual(worker_field(worker, "failure_category"), "provider")
+        self.assertEqual(worker_field(worker, "failure_reason"), "provider rejected request")
+        self.assertEqual(worker_field(worker, "last_failure_category"), "provider")
+        self.assertEqual(worker_field(worker, "last_failure_reason"), "provider rejected request")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
+        self.assertFalse(worker_has_field(worker, "result"))
 
 if __name__ == "__main__":
     unittest.main()

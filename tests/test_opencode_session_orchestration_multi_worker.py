@@ -3,7 +3,7 @@ import unittest
 from opencode_session.multi_worker_orchestration import plan_dependency_ordered_serial_step
 from opencode_session.run_persistence import persist_worker_transitions
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_state import WorkerTransitionError, apply_worker_transition, mark_worker_active
+from opencode_session.worker_state import WorkerTransitionError, apply_worker_transition, mark_worker_active, worker_field
 
 try:
     from tests.multi_worker_orchestration_helpers import NOW, DependencyOrderedSerialServiceScenario
@@ -144,8 +144,8 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         latest_workers = {"review": dict(workers["review"])}
         apply_worker_transition(latest_workers, step.dependency_blocked_transitions[0])
 
-        self.assertEqual(latest_workers["review"]["status"], "blocked")
-        self.assertEqual(latest_workers["review"]["blockers"], ["dependency:build"])
+        self.assertEqual(worker_field(latest_workers["review"], "status"), "blocked")
+        self.assertEqual(worker_field(latest_workers["review"], "blockers"), ["dependency:build"])
 
     def test_persist_worker_transitions_rejects_illegal_transition_with_reason(self):
         with DependencyOrderedSerialServiceScenario(self) as scenario:
@@ -164,7 +164,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             persisted = scenario.load_run()
 
         self.assertIn("from lifecycle_state 'done_collect'", raised.exception.result.reason)
-        self.assertEqual(persisted["workers"]["build"]["status"], "done")
+        self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
 
     def test_dependency_ordered_serial_step_advances_one_worker_at_a_time_as_dependencies_finish(self):
         workers = {

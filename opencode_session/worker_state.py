@@ -781,6 +781,22 @@ def _worker_fields(worker):
     return {}
 
 
+def worker_field(worker, field_name, default=None):
+    if isinstance(worker, WorkerRecord):
+        return worker.field(field_name, default)
+    if isinstance(worker, Mapping):
+        return worker.get(field_name, default)
+    return default
+
+
+def worker_has_field(worker, field_name):
+    if isinstance(worker, WorkerRecord):
+        return worker.has_field(field_name)
+    if isinstance(worker, Mapping):
+        return field_name in worker
+    return False
+
+
 def is_worker_mapping(worker):
     return _is_worker_mapping(worker)
 
@@ -788,18 +804,18 @@ def is_worker_mapping(worker):
 def worker_retry_available(worker, category=None):
     if not _is_worker_mapping(worker):
         return False
-    if worker.get("failure_retryable") is False:
+    if worker_field(worker, "failure_retryable") is False:
         return False
-    retryable = set(worker.get("retryable_failures") or [])
+    retryable = set(worker_field(worker, "retryable_failures") or [])
     if not retryable:
         return False
     if category is None:
-        category = worker.get("failure_category") or worker.get("last_failure_category")
+        category = worker_field(worker, "failure_category") or worker_field(worker, "last_failure_category")
     if category and category not in retryable and "all" not in retryable:
         return False
     try:
-        retry_count = int(worker.get("retry_count") or 0)
-        retry_limit = int(worker.get("retry_limit") or 0)
+        retry_count = int(worker_field(worker, "retry_count") or 0)
+        retry_limit = int(worker_field(worker, "retry_limit") or 0)
     except (TypeError, ValueError):
         return False
     return retry_count < retry_limit
@@ -854,7 +870,7 @@ def worker_lifecycle_state(worker):
 
 
 def _canonical_lifecycle_state(worker):
-    lifecycle_state = worker.get("lifecycle_state") if _is_worker_mapping(worker) else None
+    lifecycle_state = worker_field(worker, "lifecycle_state") if _is_worker_mapping(worker) else None
     if lifecycle_state in WORKER_LIFECYCLE_STATES:
         return lifecycle_state
     return WORKER_LIFECYCLE_QUEUED
@@ -863,16 +879,16 @@ def _canonical_lifecycle_state(worker):
 def _lifecycle_state_from_legacy_public_worker_state(worker):
     """Compatibility boundary for legacy/public records that do not carry lifecycle_state."""
     worker = worker if _is_worker_mapping(worker) else {}
-    status = short_status(worker.get("status"))
+    status = short_status(worker_field(worker, "status"))
     if status == WORKER_STATUS_QUEUED:
         return worker_lifecycle_state_for_status_alias(status)
     if status == WORKER_STATUS_ACTIVE:
-        if worker.get("next_eligible_action") == WORKER_ACTION_RETRY:
+        if worker_field(worker, "next_eligible_action") == WORKER_ACTION_RETRY:
             return worker_lifecycle_state_for_public_state(status, WORKER_ACTION_RETRY)
         return worker_lifecycle_state_for_status_alias(status)
     if is_blocked_status(status):
-        timeout_origin = worker.get("failure_category") == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(
-            worker.get("blockers") or []
+        timeout_origin = worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(
+            worker_field(worker, "blockers") or []
         )
         return worker_lifecycle_state_for_public_state(
             status,
@@ -882,7 +898,7 @@ def _lifecycle_state_from_legacy_public_worker_state(worker):
     if status == WORKER_STATUS_DONE:
         return worker_lifecycle_state_for_status_alias(status)
     if status == WORKER_STATUS_FAILED:
-        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
+        if worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT:
             return worker_lifecycle_state_for_public_state(
                 status,
                 WORKER_ACTION_RETRY if worker_retry_available(worker, WORKER_STATUS_TIMEOUT) else WORKER_ACTION_NONE,
@@ -899,7 +915,7 @@ def _lifecycle_state_from_legacy_public_worker_state(worker):
             timeout_origin=True,
         )
     if status == WORKER_STATUS_ABORTED:
-        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
+        if worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT:
             return worker_lifecycle_state_for_public_state(
                 status,
                 WORKER_ACTION_NONE,
@@ -920,7 +936,7 @@ def latest_prompt_ids_are_retry_marker(latest_worker):
     return (
         _is_worker_mapping(latest_worker)
         and worker_lifecycle_state(latest_worker) == WORKER_LIFECYCLE_ACTIVE_RETRY
-        and latest_worker.get("last_failure_category") is not None
+        and worker_field(latest_worker, "last_failure_category") is not None
     )
 
 
@@ -933,7 +949,7 @@ def next_eligible_worker_action(worker):
 def worker_has_prompt(worker):
     if not _is_worker_mapping(worker):
         return False
-    prompt = worker.get("prompt")
+    prompt = worker_field(worker, "prompt")
     return prompt is not None and bool(str(prompt))
 
 
@@ -945,9 +961,6 @@ def is_dependency_blockable_worker(worker):
     return WorkerSchedulingState.from_worker(worker).can_block_for_dependency()
 
 
-_MISSING_WORKER_FIELD = object()
-
-
 class WorkerRecord:
     """Hydrated worker domain object with explicit serialization boundaries."""
 
@@ -956,24 +969,6 @@ class WorkerRecord:
     def __init__(self, worker_id, fields=None):
         self._fields = deepcopy(dict(fields or {}))
         self._worker_id = self._fields.get("id") or worker_id
-
-    def __getitem__(self, key):
-        if key == "id":
-            return self.worker_id
-        if key == "status":
-            return self.status
-        if key == "next_eligible_action":
-            return self.next_eligible_action
-        return self._fields[key]
-
-    def __setitem__(self, key, value):
-        self._fields[key] = value
-
-    def __delitem__(self, key):
-        del self._fields[key]
-
-    def __contains__(self, key):
-        return key in self._fields or key in {"id", "status", "next_eligible_action"}
 
     def __repr__(self):
         return f"{type(self).__name__}({self.worker_id!r}, {self.to_public_dict()!r})"
@@ -985,30 +980,44 @@ class WorkerRecord:
             return self.to_public_dict() == dict(other)
         return NotImplemented
 
-    def get(self, key, default=None):
-        if key in self:
-            return self[key]
-        return default
+    def _raw_field(self, field_name, default=None):
+        return self._fields.get(field_name, default)
 
-    def setdefault(self, key, default=None):
-        if key not in self._fields:
-            self._fields[key] = deepcopy(default)
-        return self._fields[key]
+    def field(self, field_name, default=None):
+        if field_name == "id":
+            return self.worker_id
+        if field_name == "lifecycle_state":
+            return self.lifecycle_state
+        if field_name == "status":
+            return self.status
+        if field_name == "next_eligible_action":
+            return self.next_eligible_action
+        return self._raw_field(field_name, default)
 
-    def pop(self, key, default=_MISSING_WORKER_FIELD):
-        if default is _MISSING_WORKER_FIELD:
-            return self._fields.pop(key)
-        return self._fields.pop(key, default)
+    def has_field(self, field_name):
+        return field_name in self._fields or field_name in {"id", "lifecycle_state", "status", "next_eligible_action"}
 
-    def update(self, fields=None, **kwargs):
-        if fields is not None:
-            self._fields.update(_worker_fields(fields))
-        if kwargs:
-            self._fields.update(kwargs)
+    def set_field(self, field_name, value):
+        self._fields[field_name] = deepcopy(value)
+        if field_name == "id":
+            self._worker_id = self._fields.get("id") or self._worker_id
         return self
 
-    def clear(self):
-        self._fields.clear()
+    def remove_field(self, field_name):
+        self._fields.pop(field_name, None)
+        return self
+
+    def merge_fields(self, fields=None, **kwargs):
+        if fields is not None:
+            self._fields.update(deepcopy(_worker_fields(fields)))
+        if kwargs:
+            self._fields.update(deepcopy(kwargs))
+        self._worker_id = self._fields.get("id") or self._worker_id
+        return self
+
+    def replace_fields(self, fields):
+        self._fields = deepcopy(_worker_fields(fields))
+        self._worker_id = self._fields.get("id") or self._worker_id
         return self
 
     @classmethod
@@ -1067,7 +1076,10 @@ class WorkerRecord:
 
     @property
     def lifecycle_state(self):
-        return _canonical_lifecycle_state(self)
+        lifecycle_state = self._raw_field("lifecycle_state")
+        if lifecycle_state in WORKER_LIFECYCLE_STATES:
+            return lifecycle_state
+        return WORKER_LIFECYCLE_QUEUED
 
     @property
     def status(self):
@@ -1129,20 +1141,20 @@ class WorkerRecord:
         return self.public_state_fields(self.lifecycle_state)
 
     def set_session(self, session_id, *, agent=None, model=None):
-        self["session_id"] = deepcopy(session_id)
+        self.set_field("session_id", session_id)
         if agent is not None:
-            self["agent"] = deepcopy(agent)
+            self.set_field("agent", agent)
         if model is not None:
-            self["model"] = deepcopy(model)
+            self.set_field("model", model)
         return self
 
     def remember_prompt_id(self, prompt_id):
-        prompt_ids = self.get("prompt_ids")
+        prompt_ids = self.field("prompt_ids")
         if not isinstance(prompt_ids, list):
             prompt_ids = []
         if prompt_id not in prompt_ids:
             prompt_ids.append(prompt_id)
-        self["prompt_ids"] = prompt_ids
+        self.set_field("prompt_ids", prompt_ids)
         return self
 
     def apply_transition(self, transition):
@@ -1150,16 +1162,16 @@ class WorkerRecord:
         if result.skipped and not result.stale_snapshot_recovery:
             raise WorkerTransitionError(result)
         merged = result.worker
-        self.clear()
-        self.update(merged)
-        self._worker_id = self.get("id") or self._worker_id or transition.worker_id
+        self.replace_fields(merged)
+        self._worker_id = self.field("id") or self._worker_id or transition.worker_id
         return self
 
     def ensure_cleanup(self):
-        cleanup = self.get("cleanup")
+        cleanup = self.field("cleanup")
         if not isinstance(cleanup, dict):
             cleanup = {"requested": True, "deleted": False}
-            self["cleanup"] = cleanup
+            self.set_field("cleanup", cleanup)
+            cleanup = self.field("cleanup")
         return cleanup
 
     def remember_session_for_cleanup(self, session_id):
@@ -1306,14 +1318,14 @@ class WorkerTransition:
 
     @classmethod
     def provisioned(cls, worker):
-        worker_id = worker["id"]
+        worker_id = worker_field(worker, "id")
         return cls(
             worker_id,
             WorkerTransitionName.PROVISIONED,
             _ProvisionedTransition(
-                session_id=deepcopy(worker.get("session_id")),
-                agent=_copy_present(worker.get("agent")),
-                model=_copy_present(worker.get("model")),
+                session_id=deepcopy(worker_field(worker, "session_id")),
+                agent=_copy_present(worker_field(worker, "agent")),
+                model=_copy_present(worker_field(worker, "model")),
             ),
         )
 
@@ -1435,21 +1447,21 @@ class WorkerTransition:
 
     @classmethod
     def cleanup_updated(cls, worker):
-        worker_id = worker["id"]
+        worker_id = worker_field(worker, "id")
         return cls(
             worker_id,
             WorkerTransitionName.CLEANUP_UPDATED,
-            _CleanupUpdatedTransition(deepcopy(worker.get("cleanup"))),
+            _CleanupUpdatedTransition(deepcopy(worker_field(worker, "cleanup"))),
         )
 
     @classmethod
     def snapshot_applied(cls, worker):
-        worker_id = worker["id"]
+        worker_id = worker_field(worker, "id")
         return cls(
             worker_id,
             WorkerTransitionName.SNAPSHOT_APPLIED,
             _SnapshotAppliedTransition(
-                deepcopy(worker),
+                deepcopy(_worker_fields(worker)),
                 state_fields=tuple(WORKER_SNAPSHOT_STATE_FIELDS),
                 set_if_missing_fields=("session_id",),
                 removable_fields=tuple(REMOVABLE_WORKER_TRANSITION_FIELDS),
@@ -1513,9 +1525,9 @@ def next_eligible_action(worker):
 def ensure_worker(run, worker_id, *, role):
     workers = run.setdefault("workers", {})
     worker = normalize_worker(workers.get(worker_id), worker_id)
-    if not worker.get("role"):
-        worker["role"] = role
-    worker["id"] = worker_id
+    if not worker.field("role"):
+        worker.set_field("role", role)
+    worker.set_field("id", worker_id)
     workers[worker_id] = worker
     return worker
 
@@ -1523,7 +1535,7 @@ def ensure_worker(run, worker_id, *, role):
 def mark_worker_active(worker, *, now=None):
     timeout_started_at = UNSET_TRANSITION_FIELD
     if now is not None:
-        timeout_started_at = now() if worker.get("timeout_seconds") else None
+        timeout_started_at = now() if worker_field(worker, "timeout_seconds") else None
     transition = WorkerTransition.active(
         _worker_id(worker),
         timeout_started_at=timeout_started_at,
@@ -1562,7 +1574,7 @@ def schedule_worker_retry(worker, category, reason, *, prompt_ids=()):
         _worker_id(worker),
         category,
         reason,
-        retry_count=int(worker.get("retry_count") or 0) + 1,
+        retry_count=int(worker_field(worker, "retry_count") or 0) + 1,
         timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
         prompt_ids=prompt_ids,
     )
@@ -1570,11 +1582,11 @@ def schedule_worker_retry(worker, category, reason, *, prompt_ids=()):
 
 
 def worker_timeout_reason(worker):
-    return f"worker timed out after {format_timeout(worker.get('timeout_seconds'))}s"
+    return f"worker timed out after {format_timeout(worker_field(worker, 'timeout_seconds'))}s"
 
 
 def mark_worker_timeout(worker, reason, now, *, manual_retry_required=False):
-    status = worker.get("timeout_policy") or WORKER_STATUS_TIMEOUT
+    status = worker_field(worker, "timeout_policy") or WORKER_STATUS_TIMEOUT
     transition = WorkerTransition.timed_out(
         _worker_id(worker),
         reason,
@@ -1602,11 +1614,11 @@ def apply_worker_result(worker, result, *, prompt_ids=()):
 
 
 def _worker_id(worker):
-    return worker["id"]
+    return worker_field(worker, "id")
 
 
 def _existing_or_unset(worker, field_name):
-    return worker[field_name] if field_name in worker else UNSET_TRANSITION_FIELD
+    return worker_field(worker, field_name) if worker_has_field(worker, field_name) else UNSET_TRANSITION_FIELD
 
 
 def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):
@@ -1631,10 +1643,10 @@ def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False
 def worker_output_refs_in_dependency_order(workers):
     ordered = []
     for worker in workers_in_dependency_order(workers):
-        worker_id = worker.get("id")
+        worker_id = worker_field(worker, "id")
         if _worker_status(worker) != WORKER_STATUS_DONE:
             continue
-        for output_ref in worker.get("output_refs", []):
+        for output_ref in worker_field(worker, "output_refs", []):
             if isinstance(output_ref, str) and output_ref.startswith("assistant:"):
                 ordered.append(f"{worker_id}:{output_ref.split(':', 1)[1]}")
             else:
@@ -1661,7 +1673,7 @@ def has_partial_worker_success(run):
 
 
 def worker_prompt(worker):
-    prompt = worker.get("prompt")
+    prompt = worker_field(worker, "prompt")
     if prompt is None:
         return None
     return str(prompt)

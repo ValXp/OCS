@@ -65,15 +65,15 @@ def upsert_worker_record(run, worker_id, changes, *, now):
         "timeout_policy",
     ):
         if changes.get(key) is not None:
-            worker[key] = changes[key]
+            worker.set_field(key, changes[key])
     if changes.get("lifecycle_state") is not None:
         lifecycle_state = changes["lifecycle_state"]
         if lifecycle_state not in WORKER_LIFECYCLE_STATES:
             raise RunRecordError(f"worker '{worker_id}' has invalid lifecycle_state: {lifecycle_state}")
-        worker["lifecycle_state"] = lifecycle_state
+        worker.set_field("lifecycle_state", lifecycle_state)
     for key in ("dependencies", "prompt_ids", "retryable_failures", "blockers", "output_refs"):
         if changes.get(key) is not None:
-            worker[key] = changes[key]
+            worker.set_field(key, changes[key])
 
     workers[worker_id] = deserialize_worker_record(worker, worker_id)
     run["updated_at"] = now

@@ -8,6 +8,7 @@ from opencode_session.worker_attempt_policy import (
     classify_worker_attempt_exception,
     classify_worker_attempt_result,
 )
+from opencode_session.worker_state import worker_field
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ def coerce_worker_prompt_executor(executor=None):
 
 def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor):
     attempt_executor = coerce_worker_prompt_executor(executor)
-    attempt_session_id = worker["session_id"]
+    attempt_session_id = worker_field(worker, "session_id")
     try:
         result = _call_worker_with_deadline(
             worker,
@@ -72,7 +73,7 @@ def execute_single_worker_attempt(client, worker, prompt, capabilities, *, execu
 
 
 def _call_worker_with_deadline(worker, callback):
-    timeout = worker.get("timeout_seconds")
+    timeout = worker_field(worker, "timeout_seconds")
     deadline = TimeoutDeadline(timeout) if timeout is not None else None
     try:
         if deadline is not None:

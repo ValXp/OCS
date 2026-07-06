@@ -7,6 +7,7 @@ from opencode_session.multi_worker_orchestration import DependencyOrderedSerialR
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.worker_execution import WorkerExecutionTimeout
+from opencode_session.worker_state import worker_field
 
 try:
     from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
@@ -65,9 +66,9 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "timeout")
-        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
-        self.assertTrue(worker["manual_retry_required"])
+        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
+        self.assertTrue(worker_field(worker, "manual_retry_required"))
 
     def test_start_cleanup_deletes_created_session_after_execution_failure(self):
         cases = [
@@ -138,7 +139,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                         ("get", "ses_new"),
                     ],
                 )
-                self.assertEqual(run["workers"]["worker"]["cleanup"], {"requested": True, "deleted": True})
+                self.assertEqual(worker_field(run["workers"]["worker"], "cleanup"), {"requested": True, "deleted": True})
 
     def test_start_cleanup_deletes_created_session_after_success(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -193,7 +194,7 @@ class SingleWorkerRunStateCleanupTest(unittest.TestCase):
                 ("get", "ses_new"),
             ],
         )
-        self.assertEqual(run["workers"]["worker"]["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(worker_field(run["workers"]["worker"], "cleanup"), {"requested": True, "deleted": True})
 
 
 if __name__ == "__main__":

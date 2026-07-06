@@ -13,6 +13,7 @@ from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
+from opencode_session.worker_state import worker_field
 
 try:
     from tests.multi_worker_orchestration_helpers import (
@@ -132,9 +133,9 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                 persisted_worker = scenario.store.load_run(RUN_NAME)["workers"]["worker"]
                 observed_before_call["worker"] = deepcopy(persisted_worker)
 
-                self.assertEqual(persisted_worker["session_id"], "ses_initial")
-                self.assertEqual(persisted_worker["status"], "active")
-                self.assertEqual(persisted_worker["next_eligible_action"], "wait")
+                self.assertEqual(worker_field(persisted_worker, "session_id"), "ses_initial")
+                self.assertEqual(worker_field(persisted_worker, "status"), "active")
+                self.assertEqual(worker_field(persisted_worker, "next_eligible_action"), "wait")
                 attempt = assert_single_worker_attempt(
                     self,
                     persisted_worker,
@@ -158,8 +159,8 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             [("create", scenario.directory, None, None), ("execute", "ses_initial", "Finish the worker task")],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "done")
-        self.assertEqual(worker["next_eligible_action"], "collect")
+        self.assertEqual(worker_field(worker, "status"), "done")
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "collect")
         attempt = assert_single_worker_attempt(self, worker, status="completed", session_id="ses_initial")
         self.assertEqual(attempt.get("id"), "attempt-1")
         self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
@@ -254,8 +255,11 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(entry["created_session_ids"], ["ses_initial"])
         self.assertTrue(entry["cleanup_requested"])
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["session_id"], "ses_initial")
-        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_initial"]})
+        self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
+        self.assertEqual(
+            worker_field(worker, "cleanup"),
+            {"requested": True, "deleted": False, "sessions": ["ses_initial"]},
+        )
 
     def test_command_service_start_passes_injected_dependencies_to_orchestration(self):
         with DependencyOrderedSerialServiceScenario(self, client=FakeClient([])) as scenario:
@@ -295,10 +299,10 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertIn("unsupported route behavior", outcome.error)
         worker = run["workers"]["worker"]
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(worker["failure_category"], "api")
-        self.assertEqual(worker["retryable_failures"], ["api"])
-        self.assertEqual(worker["next_eligible_action"], "none")
+        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertEqual(worker_field(worker, "failure_category"), "api")
+        self.assertEqual(worker_field(worker, "retryable_failures"), ["api"])
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
 
     def test_start_api_setup_failure_is_not_retryable(self):
         def detect_capabilities(client):
@@ -318,10 +322,10 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(outcome.error, "api failure: capability probe failed")
         worker = run["workers"]["worker"]
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(worker["status"], "failed")
-        self.assertEqual(worker["failure_category"], "api")
-        self.assertEqual(worker["retryable_failures"], ["api"])
-        self.assertEqual(worker["next_eligible_action"], "none")
+        self.assertEqual(worker_field(worker, "status"), "failed")
+        self.assertEqual(worker_field(worker, "failure_category"), "api")
+        self.assertEqual(worker_field(worker, "retryable_failures"), ["api"])
+        self.assertEqual(worker_field(worker, "next_eligible_action"), "none")
 
 
 class FailAfterCreatedSessionJournalStore:

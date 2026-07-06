@@ -10,7 +10,7 @@ from opencode_session.run_start_core import RunStartCore
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
-from opencode_session.worker_state import apply_worker_transition
+from opencode_session.worker_state import apply_worker_transition, worker_field, worker_has_field
 
 try:
     from tests.multi_worker_orchestration_helpers import CAPABILITIES, FakeClient
@@ -56,11 +56,11 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(run["workers"]["alpha"]["status"], "failed")
-        self.assertEqual(run["workers"]["alpha"]["cleanup"], {"requested": True, "deleted": True})
-        self.assertEqual(run["workers"]["beta"]["status"], "queued")
-        self.assertIsNone(run["workers"]["beta"]["session_id"])
-        self.assertNotIn("cleanup", run["workers"]["beta"])
+        self.assertEqual(worker_field(run["workers"]["alpha"], "status"), "failed")
+        self.assertEqual(worker_field(run["workers"]["alpha"], "cleanup"), {"requested": True, "deleted": True})
+        self.assertEqual(worker_field(run["workers"]["beta"], "status"), "queued")
+        self.assertIsNone(worker_field(run["workers"]["beta"], "session_id"))
+        self.assertFalse(worker_has_field(run["workers"]["beta"], "cleanup"))
 
     def test_cleanup_attempts_later_worker_after_earlier_worker_delete_fails(self):
         first_error = "DELETE /api/session/ses_alpha failed: HTTP 500"
@@ -95,12 +95,12 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         self.assertEqual(outcome.error, f"api failure: disposable session cleanup failed: {first_error}")
         self.assertEqual(client.requests, [("delete", "ses_alpha"), ("delete", "ses_beta"), ("get", "ses_beta")])
         self.assertEqual(
-            run["workers"]["alpha"]["cleanup"],
+            worker_field(run["workers"]["alpha"], "cleanup"),
             {"requested": True, "deleted": False, "error": first_error},
         )
-        self.assertEqual(run["workers"]["alpha"]["status"], "done")
-        self.assertIsNone(run["workers"]["alpha"].get("failure_reason"))
-        self.assertEqual(run["workers"]["beta"]["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(worker_field(run["workers"]["alpha"], "status"), "done")
+        self.assertIsNone(worker_field(run["workers"]["alpha"], "failure_reason"))
+        self.assertEqual(worker_field(run["workers"]["beta"], "cleanup"), {"requested": True, "deleted": True})
         self.assertEqual(persisted_worker_ids, ["alpha", "beta"])
 
     def test_timeout_retry_is_manual_and_keeps_original_session(self):
@@ -146,11 +146,11 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         retry_worker = run["workers"]["worker"]
-        self.assertEqual(retry_worker["session_id"], "ses_initial")
-        self.assertEqual(retry_worker["status"], "timeout")
-        self.assertEqual(retry_worker["next_eligible_action"], "retry")
-        self.assertTrue(retry_worker["manual_retry_required"])
-        self.assertNotIn("result", retry_worker)
+        self.assertEqual(worker_field(retry_worker, "session_id"), "ses_initial")
+        self.assertEqual(worker_field(retry_worker, "status"), "timeout")
+        self.assertEqual(worker_field(retry_worker, "next_eligible_action"), "retry")
+        self.assertTrue(worker_field(retry_worker, "manual_retry_required"))
+        self.assertFalse(worker_has_field(retry_worker, "result"))
 
     def test_cleanup_deletes_initial_session_after_timeout_without_retry(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -197,9 +197,9 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "timeout")
-        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
-        self.assertTrue(worker["manual_retry_required"])
+        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
+        self.assertTrue(worker_field(worker, "manual_retry_required"))
 
     def test_cleanup_reports_initial_session_delete_failure_after_timeout_without_retry(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -246,9 +246,9 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             ],
         )
         worker = run["workers"]["worker"]
-        self.assertEqual(worker["status"], "timeout")
-        self.assertEqual(worker["failure_reason"], "worker timed out after 0.01s")
-        self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "error": first_error})
+        self.assertEqual(worker_field(worker, "status"), "timeout")
+        self.assertEqual(worker_field(worker, "failure_reason"), "worker timed out after 0.01s")
+        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": False, "error": first_error})
 
 
 if __name__ == "__main__":

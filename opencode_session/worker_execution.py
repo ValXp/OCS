@@ -19,6 +19,7 @@ from opencode_session.worker_state import (
     WorkerTransition,
     apply_worker_transition_to_worker,
     mark_worker_active,
+    worker_field,
 )
 
 
@@ -93,7 +94,7 @@ class WorkerExecutionExecutor:
             run, worker = self._apply_transition(
                 run,
                 worker,
-                WorkerTransition.attempt_started(worker["id"], attempt_record),
+                WorkerTransition.attempt_started(worker_field(worker, "id"), attempt_record),
             )
             attempt = execute_single_worker_attempt(
                 client,

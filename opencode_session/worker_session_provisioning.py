@@ -8,6 +8,7 @@ from opencode_session.session_ids import require_session_id
 from opencode_session.worker_state import (
     WorkerRecord,
     is_worker_mapping,
+    worker_field,
     worker_record_for_mutation,
 )
 
@@ -102,7 +103,7 @@ class WorkerSessionCreationJournal:
     def record_intent(self, run, worker, *, agent=None, model=None, cleanup_requested=False):
         intent = WorkerSessionCreationIntent(
             id=self.id_factory(),
-            worker_id=worker["id"],
+            worker_id=worker_field(worker, "id"),
             directory=run.get("directory"),
             agent=agent,
             model=model,
@@ -224,7 +225,7 @@ def ensure_worker_session(
     treat_falsey_session_as_missing=False,
 ):
     record = _coerce_worker_record(run, worker)
-    worker_session_id = session_id or record.get("session_id")
+    worker_session_id = session_id or record.field("session_id")
     created_session_id = None
     missing_session = not worker_session_id if treat_falsey_session_as_missing else worker_session_id is None
     if missing_session:
@@ -256,18 +257,18 @@ def provision_worker_session(
             treat_falsey_session_as_missing=True,
         )
     record = _coerce_worker_record(run, worker)
-    record.set_session(session_id or record.get("session_id"), agent=agent, model=model)
-    return WorkerSessionOutcome(record.get("session_id"))
+    record.set_session(session_id or record.field("session_id"), agent=agent, model=model)
+    return WorkerSessionOutcome(record.field("session_id"))
 
 
 def will_create_worker_session(worker, *, session_id=None, create_session=True):
     if not create_session:
         return False
-    return not (session_id or worker.get("session_id"))
+    return not (session_id or worker_field(worker, "session_id"))
 
 
 def _latest_worker(run, fallback_worker):
-    worker_id = fallback_worker.get("id") if is_worker_mapping(fallback_worker) else None
+    worker_id = worker_field(fallback_worker, "id") if is_worker_mapping(fallback_worker) else None
     if isinstance(run, dict) and worker_id:
         return _ensure_latest_worker(run, worker_id)
     if isinstance(fallback_worker, WorkerRecord):
@@ -291,7 +292,7 @@ def _ensure_latest_worker(run, worker_id):
 def _coerce_worker_record(run, worker):
     if isinstance(worker, WorkerRecord):
         return worker
-    worker_id = worker.get("id") if is_worker_mapping(worker) else None
+    worker_id = worker_field(worker, "id") if is_worker_mapping(worker) else None
     if isinstance(run, dict) and worker_id:
         return _ensure_latest_worker(run, worker_id)
     return worker_record_for_mutation(worker, worker_id).to_worker()

@@ -17,11 +17,12 @@ def new_worker_attempt_record(worker, *, started_at, created_session_ids=()):
 def _append_attempt(worker, attempt):
     if not attempt:
         return
-    attempts = worker.get("attempts") if isinstance(worker.get("attempts"), list) else []
+    attempts = _worker_get(worker, "attempts")
+    attempts = attempts if isinstance(attempts, list) else []
     attempt = deepcopy(attempt)
     if any(isinstance(existing, dict) and existing.get("id") == attempt.get("id") for existing in attempts):
         return
-    worker["attempts"] = [*deepcopy(attempts), attempt]
+    _worker_set(worker, "attempts", [*deepcopy(attempts), attempt])
 
 
 def _finalize_attempt(worker, finalization):
@@ -29,7 +30,8 @@ def _finalize_attempt(worker, finalization):
         return
     attempt_id = finalization.get("id")
     fields = finalization.get("fields") if isinstance(finalization.get("fields"), dict) else {}
-    attempts = worker.get("attempts") if isinstance(worker.get("attempts"), list) else []
+    attempts = _worker_get(worker, "attempts")
+    attempts = attempts if isinstance(attempts, list) else []
     finalized = []
     found = False
     for attempt in attempts:
@@ -41,11 +43,22 @@ def _finalize_attempt(worker, finalization):
         else:
             finalized.append(deepcopy(attempt))
     if found:
-        worker["attempts"] = finalized
+        _worker_set(worker, "attempts", finalized)
 
 
 def _worker_get(worker, field_name, default=None):
+    field = getattr(worker, "field", None)
+    if callable(field):
+        return field(field_name, default)
     getter = getattr(worker, "get", None)
     if not callable(getter):
         return default
     return getter(field_name, default)
+
+
+def _worker_set(worker, field_name, value):
+    setter = getattr(worker, "set_field", None)
+    if callable(setter):
+        setter(field_name, value)
+        return
+    worker[field_name] = value
