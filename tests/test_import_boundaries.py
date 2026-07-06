@@ -2,6 +2,7 @@ import importlib
 import sys
 import unittest
 from contextlib import contextmanager
+from pathlib import Path
 
 
 class BlockedModuleFinder:
@@ -49,6 +50,44 @@ class ImportBoundaryTest(unittest.TestCase):
                 sys.meta_path.remove(blocked)
 
         self.assertTrue(hasattr(run_record, "normalize_run"))
+
+    def test_worker_state_is_canonical_worker_state_surface(self):
+        with temporarily_unimported(
+            "opencode_session.worker_lifecycle",
+            "opencode_session.worker_lifecycle_reducer",
+            "opencode_session.worker_snapshot_codec",
+            "opencode_session.worker_state",
+        ):
+            import opencode_session.worker_lifecycle as worker_lifecycle
+            import opencode_session.worker_lifecycle_reducer as worker_lifecycle_reducer
+            import opencode_session.worker_snapshot_codec as worker_snapshot_codec
+            import opencode_session.worker_state as worker_state
+
+            self.assertIs(worker_lifecycle.WorkerSchedulingState, worker_state.WorkerSchedulingState)
+            self.assertIs(worker_snapshot_codec.WorkerRecord, worker_state.WorkerRecord)
+            self.assertIs(worker_lifecycle_reducer.WorkerTransition, worker_state.WorkerTransition)
+
+    def test_worker_state_imports_use_canonical_surface(self):
+        package_dir = Path(__file__).resolve().parents[1] / "opencode_session"
+        allowed_compatibility_modules = {"worker_lifecycle.py", "worker_snapshot_codec.py"}
+        forbidden_imports = (
+            "from opencode_session.worker_lifecycle import",
+            "from opencode_session.worker_snapshot_codec import",
+            "from opencode_session.worker_lifecycle_reducer import WorkerTransition",
+        )
+        offenders = []
+        for path in sorted(package_dir.glob("*.py")):
+            if path.name in allowed_compatibility_modules:
+                continue
+            source = path.read_text()
+            for forbidden_import in forbidden_imports:
+                if forbidden_import in source:
+                    offenders.append(f"{path.name}: {forbidden_import}")
+
+        reducer_source = (package_dir / "worker_lifecycle_reducer.py").read_text()
+
+        self.assertEqual([], offenders)
+        self.assertIn("from opencode_session.worker_state import", reducer_source)
 
 
 if __name__ == "__main__":

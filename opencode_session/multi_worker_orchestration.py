@@ -21,13 +21,13 @@ from opencode_session.worker_execution import (
     WorkerExecutionOutcome,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_lifecycle import is_executable_worker
-from opencode_session.worker_lifecycle_reducer import WorkerTransition
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,
+    WorkerTransition,
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
+    is_executable_worker,
     refresh_run_summary as _refresh_worker_run_summary,
     worker_prompt as _worker_prompt,
     workers_in_dependency_order as _workers_in_dependency_order,

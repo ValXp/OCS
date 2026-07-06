@@ -1,9 +1,10 @@
 from copy import deepcopy
-from dataclasses import dataclass
 
 from opencode_session.status import short_status
 from opencode_session.worker_attempt_log import _append_attempt, _finalize_attempt
-from opencode_session.worker_lifecycle import (
+from opencode_session.worker_state import (
+    REMOVABLE_WORKER_TRANSITION_FIELDS,
+    UNSET_TRANSITION_FIELD,
     WORKER_LIFECYCLE_ABORTED,
     WORKER_LIFECYCLE_ACTIVE_RETRY,
     WORKER_LIFECYCLE_ACTIVE_WAIT,
@@ -22,257 +23,13 @@ from opencode_session.worker_lifecycle import (
     WORKER_STATUS_DONE,
     WORKER_STATUS_FAILED,
     WORKER_STATUS_TIMEOUT,
+    WorkerRecord,
+    WorkerTransition,
     latest_prompt_ids_are_retry_marker,
     public_worker_state,
     worker_lifecycle_set_fields,
     worker_lifecycle_state,
 )
-from opencode_session.worker_snapshot_codec import WORKER_SNAPSHOT_STATE_FIELDS, WorkerRecord
-
-
-REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
-UNSET_TRANSITION_FIELD = object()
-
-
-@dataclass(frozen=True)
-class _ProvisionedTransition:
-    session_id: object = None
-    agent: object = None
-    model: object = None
-
-
-@dataclass(frozen=True)
-class _ActiveTransition:
-    timeout_started_at: object = UNSET_TRANSITION_FIELD
-    clear_prompt_ids: bool = False
-
-
-@dataclass(frozen=True)
-class _AttemptStartedTransition:
-    attempt: dict
-
-
-@dataclass(frozen=True)
-class _FailedTransition:
-    category: str
-    reason: str
-    retryable: bool = True
-    retry_available: bool = False
-    timeout_started_at: object = UNSET_TRANSITION_FIELD
-    prompt_ids: tuple = ()
-
-
-@dataclass(frozen=True)
-class _DependencyBlockedTransition:
-    blockers: tuple
-
-
-@dataclass(frozen=True)
-class _AbortedTransition:
-    abort: object
-
-
-@dataclass(frozen=True)
-class _RetryScheduledTransition:
-    category: str
-    reason: str
-    retry_count: int
-    timeout_started_at: object = UNSET_TRANSITION_FIELD
-    prompt_ids: tuple = ()
-
-
-@dataclass(frozen=True)
-class _TimedOutTransition:
-    reason: str
-    status: str
-    timed_out_at: object
-    retry_available: bool = False
-    manual_retry_required: bool = False
-    timeout_started_at: object = UNSET_TRANSITION_FIELD
-
-
-@dataclass(frozen=True)
-class _ResultAppliedTransition:
-    result: dict
-    prompt_ids: tuple = ()
-    timeout_started_at: object = UNSET_TRANSITION_FIELD
-
-
-@dataclass(frozen=True)
-class _CleanupUpdatedTransition:
-    cleanup: object = None
-
-
-@dataclass(frozen=True)
-class _SnapshotAppliedTransition:
-    worker: dict
-    state_fields: tuple = WORKER_SNAPSHOT_STATE_FIELDS
-    set_if_missing_fields: tuple = ("session_id",)
-    removable_fields: tuple = REMOVABLE_WORKER_TRANSITION_FIELDS
-
-
-@dataclass(frozen=True)
-class _AttemptFinalization:
-    attempt_id: str
-    fields: dict
-
-
-@dataclass(frozen=True)
-class WorkerTransition:
-    """Named lifecycle transition applied by WorkerLifecycleReducer."""
-
-    worker_id: str
-    name: str
-    payload: object = None
-    attempt_finalization: _AttemptFinalization | None = None
-
-    def with_finalized_attempt(self, attempt_id, fields):
-        return WorkerTransition(
-            self.worker_id,
-            self.name,
-            self.payload,
-            _AttemptFinalization(attempt_id, deepcopy(fields or {})),
-        )
-
-    @classmethod
-    def provisioned(cls, worker):
-        worker_id = worker["id"]
-        return cls(
-            worker_id,
-            "provisioned",
-            _ProvisionedTransition(
-                session_id=deepcopy(worker.get("session_id")),
-                agent=_copy_present(worker.get("agent")),
-                model=_copy_present(worker.get("model")),
-            ),
-        )
-
-    @classmethod
-    def active(cls, worker_id, *, timeout_started_at=UNSET_TRANSITION_FIELD, clear_prompt_ids=False):
-        return cls(
-            worker_id,
-            "active",
-            _ActiveTransition(
-                timeout_started_at=_copy_transition_value(timeout_started_at),
-                clear_prompt_ids=clear_prompt_ids,
-            ),
-        )
-
-    @classmethod
-    def attempt_started(cls, worker_id, attempt):
-        return cls(worker_id, "attempt_started", _AttemptStartedTransition(deepcopy(attempt or {})))
-
-    @classmethod
-    def failed(
-        cls,
-        worker_id,
-        category,
-        reason,
-        *,
-        retryable=True,
-        retry_available=False,
-        timeout_started_at=UNSET_TRANSITION_FIELD,
-        prompt_ids=(),
-    ):
-        return cls(
-            worker_id,
-            "failed",
-            _FailedTransition(
-                category,
-                reason,
-                retryable=retryable,
-                retry_available=retry_available,
-                timeout_started_at=_copy_transition_value(timeout_started_at),
-                prompt_ids=_filtered_prompt_ids(prompt_ids),
-            ),
-        )
-
-    @classmethod
-    def dependency_blocked(cls, worker_id, blockers):
-        return cls(worker_id, "dependency_blocked", _DependencyBlockedTransition(tuple(blockers)))
-
-    @classmethod
-    def aborted(cls, worker_id, abort):
-        return cls(worker_id, "aborted", _AbortedTransition(deepcopy(abort)))
-
-    @classmethod
-    def retry_scheduled(
-        cls,
-        worker_id,
-        category,
-        reason,
-        *,
-        retry_count,
-        timeout_started_at=UNSET_TRANSITION_FIELD,
-        prompt_ids=(),
-    ):
-        return cls(
-            worker_id,
-            "retry_scheduled",
-            _RetryScheduledTransition(
-                category,
-                reason,
-                retry_count=retry_count,
-                timeout_started_at=_copy_transition_value(timeout_started_at),
-                prompt_ids=_filtered_prompt_ids(prompt_ids),
-            ),
-        )
-
-    @classmethod
-    def timed_out(
-        cls,
-        worker_id,
-        reason,
-        *,
-        status,
-        timed_out_at,
-        retry_available=False,
-        manual_retry_required=False,
-        timeout_started_at=UNSET_TRANSITION_FIELD,
-    ):
-        return cls(
-            worker_id,
-            "timed_out",
-            _TimedOutTransition(
-                reason,
-                status=status,
-                timed_out_at=deepcopy(timed_out_at),
-                retry_available=retry_available,
-                manual_retry_required=manual_retry_required,
-                timeout_started_at=_copy_transition_value(timeout_started_at),
-            ),
-        )
-
-    @classmethod
-    def result_applied(cls, worker_id, result, *, prompt_ids=(), timeout_started_at=UNSET_TRANSITION_FIELD):
-        return cls(
-            worker_id,
-            "result_applied",
-            _ResultAppliedTransition(
-                deepcopy(result or {}),
-                prompt_ids=_filtered_prompt_ids(prompt_ids),
-                timeout_started_at=_copy_transition_value(timeout_started_at),
-            ),
-        )
-
-    @classmethod
-    def cleanup_updated(cls, worker):
-        worker_id = worker["id"]
-        return cls(worker_id, "cleanup_updated", _CleanupUpdatedTransition(deepcopy(worker.get("cleanup"))))
-
-    @classmethod
-    def snapshot_applied(cls, worker):
-        worker_id = worker["id"]
-        return cls(
-            worker_id,
-            "snapshot_applied",
-            _SnapshotAppliedTransition(
-                deepcopy(worker),
-                state_fields=tuple(WORKER_SNAPSHOT_STATE_FIELDS),
-                set_if_missing_fields=("session_id",),
-                removable_fields=tuple(REMOVABLE_WORKER_TRANSITION_FIELDS),
-            ),
-        )
 
 
 class WorkerLifecycleReducer:
@@ -571,20 +328,6 @@ def _clear_current_status_fields(worker):
 def _set_if_not_unset(fields, name, value):
     if value is not UNSET_TRANSITION_FIELD:
         fields[name] = deepcopy(value)
-
-
-def _copy_present(value):
-    return None if value is None else deepcopy(value)
-
-
-def _copy_transition_value(value):
-    if value is UNSET_TRANSITION_FIELD:
-        return value
-    return deepcopy(value)
-
-
-def _filtered_prompt_ids(prompt_ids):
-    return tuple(prompt_id for prompt_id in prompt_ids if prompt_id is not None)
 
 
 def _finalize_worker_attempt(worker, finalization):

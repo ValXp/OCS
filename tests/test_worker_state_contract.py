@@ -2,26 +2,24 @@ import unittest
 
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
+    WorkerRecord,
+    WorkerSchedulingState,
+    WorkerTransition,
     apply_worker_transition,
     apply_worker_transition_to_worker,
     apply_worker_result,
+    deserialize_worker_record,
     exit_code_for_run,
     mark_dependency_blocked,
     mark_worker_aborted,
     mark_worker_active,
     normalize_worker,
     refresh_run_summary,
-    schedule_worker_retry,
-)
-from opencode_session.schema_common import Worker, WorkerSnapshotRecord
-from opencode_session.worker_lifecycle import WorkerSchedulingState
-from opencode_session.worker_lifecycle_reducer import WorkerTransition
-from opencode_session.worker_snapshot_codec import (
-    WorkerRecord,
     require_internal_worker,
-    deserialize_worker_record,
+    schedule_worker_retry,
     serialize_worker_snapshot,
 )
+from opencode_session.schema_common import Worker, WorkerSnapshotRecord
 
 try:
     from tests.worker_state_scenarios import WorkerScenario, assert_worker_outcome

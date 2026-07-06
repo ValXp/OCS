@@ -9,8 +9,8 @@ from opencode_session.schema_common import ExecutionResultRecord, RunRecord, Wor
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_attempt_log import new_worker_attempt_record
-from opencode_session.worker_lifecycle_reducer import WorkerTransition
 from opencode_session.worker_state import (
+    WorkerTransition,
     apply_worker_transition_to_worker,
     apply_worker_result,
     mark_worker_active,

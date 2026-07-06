@@ -11,8 +11,7 @@ from opencode_session.worker_execution import (
     cleanup_created_worker_sessions,
     execute_worker_attempt_events,
 )
-from opencode_session.worker_lifecycle_reducer import WorkerTransition
-from opencode_session.worker_state import EX_UNAVAILABLE
+from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition
 
 
 @dataclass
