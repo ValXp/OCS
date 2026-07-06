@@ -8,6 +8,21 @@ class RemoteMutationOperation:
     finalize_cleanup_operation: str
 
 
+@dataclass(frozen=True)
+class RemoteMutationApplication:
+    mutate_run: object = None
+    journal_update: object = None
+    append_if_missing: bool = False
+    finalize: bool = True
+
+
+@dataclass(frozen=True)
+class RemoteMutationExecution:
+    run: object
+    remote_result: object
+    intent: object
+
+
 class RemoteMutationTransaction:
     def __init__(
         self,
@@ -28,6 +43,9 @@ class RemoteMutationTransaction:
             run,
             lambda latest_run: self._validated_record(record_factory(latest_run)),
         )
+
+    def runner(self):
+        return RemoteMutationRunner(self)
 
     def mark_applied(self, run, record, *, mutate_run=None, append_if_missing=False):
         self._validate_record_identity(record)
@@ -66,6 +84,54 @@ class RemoteMutationTransaction:
             raise ValueError(f"remote journal record id must be {self.entry_id!r}")
         if entry.get("kind") != self.operation.kind:
             raise ValueError(f"remote journal record kind must be {self.operation.kind!r}")
+
+
+class RemoteMutationRunner:
+    def __init__(self, transaction):
+        self.transaction = transaction
+
+    def execute(self, run, *, intent_factory, call_remote, apply_result=None):
+        holder = {}
+
+        def record_intent(latest_run):
+            intent = intent_factory(latest_run)
+            holder["intent"] = intent
+            return intent
+
+        run = self.transaction.record_intent_from(run, record_intent)
+        intent = holder["intent"]
+        try:
+            remote_result = call_remote(run, intent)
+        except Exception:
+            self.transaction.discard_intent_best_effort(run)
+            raise
+
+        application = RemoteMutationApplication()
+        if apply_result is not None:
+            application = apply_result(remote_result, intent)
+            if application is None:
+                application = RemoteMutationApplication()
+            if not isinstance(application, RemoteMutationApplication):
+                raise TypeError("remote mutation application must be a RemoteMutationApplication")
+        run = self._apply(run, application)
+        return RemoteMutationExecution(run=run, remote_result=remote_result, intent=intent)
+
+    def _apply(self, run, application):
+        if application.journal_update is not None:
+            run = self.transaction.mark_applied(
+                run,
+                application.journal_update,
+                mutate_run=application.mutate_run,
+                append_if_missing=application.append_if_missing,
+            )
+            if application.finalize:
+                return self.transaction.finalize(run)
+            return run
+        if application.finalize:
+            return self.transaction.finalize(run, mutate_run=application.mutate_run)
+        if application.mutate_run is not None:
+            raise ValueError("remote mutation application without a journal update must finalize")
+        return run
 
 
 class RemoteMutationRecovery:

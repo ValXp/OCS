@@ -2,7 +2,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationOperation
+from opencode_session.remote_journal import (
+    PersistedRemoteMutationJournal,
+    RemoteMutationApplication,
+    RemoteMutationOperation,
+)
 from opencode_session.schema_run import RunRecord
 from opencode_session.schema_worker import HydratedWorker
 from opencode_session.session_ids import require_session_id
@@ -100,6 +104,40 @@ class WorkerSessionCreationJournal:
             now=self.now,
         )
 
+    def run_creation(self, run, worker, *, call_remote, agent=None, model=None, cleanup_requested=False):
+        intent_id = self.id_factory()
+        transaction = self.transactions.transaction(intent_id, WORKER_SESSION_CREATE_OPERATION)
+
+        def creation_intent(latest_run):
+            latest_worker = _coerce_worker_record(latest_run, worker)
+            return WorkerSessionCreationIntent(
+                id=intent_id,
+                worker_id=latest_worker.worker_id,
+                directory=latest_run.get("directory"),
+                agent=agent,
+                model=model,
+                cleanup_requested=bool(cleanup_requested),
+                intent_recorded_at=self.now(),
+            )
+
+        def apply_created_session(session_outcome, intent):
+            if session_outcome.created_session_id is None:
+                return RemoteMutationApplication(finalize=False)
+            return self._created_session_application(
+                intent,
+                session_outcome.created_session_id,
+                agent=agent,
+                model=model,
+            )
+
+        execution = transaction.runner().execute(
+            run,
+            intent_factory=creation_intent,
+            call_remote=call_remote,
+            apply_result=apply_created_session,
+        )
+        return execution.run, _latest_worker(execution.run, worker), execution.remote_result, execution.intent
+
     def record_intent(self, run, worker, *, agent=None, model=None, cleanup_requested=False):
         intent = WorkerSessionCreationIntent(
             id=self.id_factory(),
@@ -115,26 +153,12 @@ class WorkerSessionCreationJournal:
         return updated_run, _latest_worker(updated_run, worker), intent
 
     def record_created(self, run, worker, intent, session_id, *, agent=None, model=None):
-        created_record = WorkerSessionCreatedRecord(
-            id=intent.id,
-            worker_id=intent.worker_id,
-            session_id=session_id,
-            cleanup_requested=intent.cleanup_requested,
-            created_at=self.now(),
-        )
-
-        def update_worker(latest_run):
-            latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
-            latest_record = worker_record_for_mutation(latest_worker, intent.worker_id)
-            latest_record.set_session(session_id, agent=agent, model=model)
-            if intent.cleanup_requested:
-                latest_record.remember_session_for_cleanup(session_id)
-
+        application = self._created_session_application(intent, session_id, agent=agent, model=model)
         updated_run = self._transaction(intent).mark_applied(
             run,
-            created_record,
-            mutate_run=update_worker,
-            append_if_missing=True,
+            application.journal_update,
+            mutate_run=application.mutate_run,
+            append_if_missing=application.append_if_missing,
         )
         return updated_run, _latest_worker(updated_run, worker)
 
@@ -150,6 +174,29 @@ class WorkerSessionCreationJournal:
         return self.transactions.transaction(
             intent.id,
             WORKER_SESSION_CREATE_OPERATION,
+        )
+
+    def _created_session_application(self, intent, session_id, *, agent=None, model=None):
+        created_record = WorkerSessionCreatedRecord(
+            id=intent.id,
+            worker_id=intent.worker_id,
+            session_id=session_id,
+            cleanup_requested=intent.cleanup_requested,
+            created_at=self.now(),
+        )
+
+        def update_worker(latest_run):
+            latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
+            latest_record = worker_record_for_mutation(latest_worker, intent.worker_id)
+            latest_record.set_session(session_id, agent=agent, model=model)
+            if intent.cleanup_requested:
+                latest_record.remember_session_for_cleanup(session_id)
+
+        return RemoteMutationApplication(
+            journal_update=created_record,
+            mutate_run=update_worker,
+            append_if_missing=True,
+            finalize=False,
         )
 
 
@@ -169,44 +216,44 @@ class WorkerSessionProvisioner:
         create_session=True,
         cleanup_requested=False,
     ):
-        session_intent = None
         if self.session_journal is not None and will_create_worker_session(
             worker,
             session_id=session_id,
             create_session=create_session,
         ):
-            run, worker, session_intent = self.session_journal.record_intent(
+            def create_worker_session(latest_run, intent):
+                latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
+                return provision_worker_session(
+                    client,
+                    latest_run,
+                    latest_worker,
+                    session_id=session_id,
+                    agent=agent,
+                    model=model,
+                    create_session=create_session,
+                )
+
+            run, worker, session_outcome, session_intent = self.session_journal.run_creation(
                 run,
                 worker,
+                call_remote=create_worker_session,
                 agent=agent,
                 model=model,
                 cleanup_requested=cleanup_requested,
             )
+            return WorkerSessionProvisioning(run, worker, session_outcome, session_intent)
+
         worker = _coerce_worker_record(run, worker)
-        try:
-            session_outcome = provision_worker_session(
-                client,
-                run,
-                worker,
-                session_id=session_id,
-                agent=agent,
-                model=model,
-                create_session=create_session,
-            )
-        except Exception:
-            if session_intent is not None:
-                run, worker = self.session_journal.discard_intent_best_effort(run, worker, session_intent)
-            raise
-        if session_outcome.created_session_id is not None and session_intent is not None:
-            run, worker = self.session_journal.record_created(
-                run,
-                worker,
-                session_intent,
-                session_outcome.created_session_id,
-                agent=agent,
-                model=model,
-            )
-        return WorkerSessionProvisioning(run, worker, session_outcome, session_intent)
+        session_outcome = provision_worker_session(
+            client,
+            run,
+            worker,
+            session_id=session_id,
+            agent=agent,
+            model=model,
+            create_session=create_session,
+        )
+        return WorkerSessionProvisioning(run, worker, session_outcome)
 
     def finalize_best_effort(self, run, worker, provisioning):
         if provisioning.intent is None:

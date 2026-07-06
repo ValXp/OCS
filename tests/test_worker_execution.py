@@ -277,6 +277,63 @@ class WorkerExecutionTest(unittest.TestCase):
             },
         )
 
+    def test_worker_session_provisioner_discards_creation_intent_when_remote_create_fails(self):
+        run = {
+            "name": "demo",
+            "directory": "/workspace",
+            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+        }
+        worker = run["workers"]["worker"]
+        calls = []
+
+        def persist_run_mutation(run, mutator):
+            calls.append("persist")
+            if len(calls) == 2:
+                raise RuntimeError("forced cleanup failure")
+            mutator(run)
+            return run
+
+        class RejectingCreateClient(FakeClient):
+            def create_session_response(self, directory, *, agent=None, model=None):
+                self.requests.append(("create", directory, agent, model))
+                raise RuntimeError("remote create rejected")
+
+        journal = WorkerSessionCreationJournal(
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+            id_factory=lambda: "worker-session-intent-1",
+        )
+        provisioner = WorkerSessionProvisioner(session_journal=journal)
+        client = RejectingCreateClient([])
+
+        with self.assertRaisesRegex(RuntimeError, "remote create rejected"):
+            provisioner.provision(
+                client,
+                run,
+                worker,
+                agent="build",
+                model="openai/gpt-5.5",
+                cleanup_requested=True,
+            )
+
+        self.assertEqual(calls, ["persist", "persist", "persist"])
+        self.assertEqual(client.requests, [("create", "/workspace", "build", "openai/gpt-5.5")])
+        self.assertIsNone(worker_field(run["workers"]["worker"], "session_id"))
+        entry = run[WORKER_SESSION_JOURNAL_FIELD][0]
+        self.assertEqual(entry["id"], "worker-session-intent-1")
+        self.assertEqual(entry["kind"], "worker_session_create")
+        self.assertEqual(entry["status"], "intent")
+        self.assertTrue(entry["cleanup_requested"])
+        self.assertEqual(
+            entry["cleanup_failure"],
+            {
+                "operation": "discard_worker_session_create",
+                "error_type": "RuntimeError",
+                "message": "forced cleanup failure",
+                "recorded_at": "2026-07-05T00:00:00Z",
+            },
+        )
+
     def test_worker_session_provisioner_records_created_session_before_finalize(self):
         run = {
             "name": "demo",

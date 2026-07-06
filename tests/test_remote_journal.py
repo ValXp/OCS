@@ -4,6 +4,7 @@ from typing import Optional
 
 from opencode_session.remote_journal import (
     PersistedRemoteMutationJournal,
+    RemoteMutationApplication,
     RemoteMutationJournal,
     RemoteMutationOperation,
     RemoteMutationRecovery,
@@ -192,6 +193,133 @@ class RemoteMutationJournalTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "id"):
             transaction.record_intent(run, TestIntentRecord("mutation-2", "prompt", "ses_1"))
+
+    def test_runner_records_intent_calls_remote_applies_and_finalizes(self):
+        run = {"name": "demo", "workers": {"worker": {"session_id": "ses_latest"}}}
+        calls = []
+
+        def persist_run_mutation(run, mutator):
+            calls.append("persist")
+            mutator(run)
+            return run
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+        transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
+
+        def intent_factory(latest_run):
+            session_id = latest_run["workers"]["worker"]["session_id"]
+            calls.append(("intent", session_id))
+            return TestIntentRecord("mutation-1", "prompt", session_id, message_id="msg_1")
+
+        def call_remote(latest_run, intent):
+            calls.append(("remote", intent.session_id, latest_run["journal"][0]["message_id"]))
+            return {"message_id": "msg_1"}
+
+        def apply_result(remote_result, intent):
+            def remember_message(latest_run):
+                latest_run["applied_message_id"] = remote_result["message_id"]
+
+            return RemoteMutationApplication(mutate_run=remember_message)
+
+        execution = transaction.runner().execute(
+            run,
+            intent_factory=intent_factory,
+            call_remote=call_remote,
+            apply_result=apply_result,
+        )
+
+        self.assertIs(execution.run, run)
+        self.assertEqual(execution.remote_result, {"message_id": "msg_1"})
+        self.assertEqual(execution.intent.session_id, "ses_latest")
+        self.assertEqual(run["applied_message_id"], "msg_1")
+        self.assertNotIn("journal", run)
+        self.assertEqual(calls, ["persist", ("intent", "ses_latest"), ("remote", "ses_latest", "msg_1"), "persist"])
+
+    def test_runner_discards_intent_best_effort_after_remote_failure(self):
+        run = {"name": "demo"}
+        calls = []
+
+        def persist_run_mutation(run, mutator):
+            calls.append("persist")
+            if len(calls) == 2:
+                raise RuntimeError("forced cleanup failure")
+            mutator(run)
+            return run
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+        transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
+
+        def reject_remote(latest_run, intent):
+            raise RuntimeError("remote rejected")
+
+        with self.assertRaisesRegex(RuntimeError, "remote rejected"):
+            transaction.runner().execute(
+                run,
+                intent_factory=lambda latest_run: TestIntentRecord("mutation-1", "prompt", "ses_1"),
+                call_remote=reject_remote,
+            )
+
+        self.assertEqual(calls, ["persist", "persist", "persist"])
+        self.assertEqual(
+            run["journal"],
+            [
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "session_id": "ses_1",
+                    "cleanup_failure": {
+                        "operation": "discard_prompt",
+                        "error_type": "RuntimeError",
+                        "message": "forced cleanup failure",
+                        "recorded_at": "2026-07-05T00:00:00Z",
+                    },
+                }
+            ],
+        )
+
+    def test_runner_keeps_journal_recoverable_after_local_apply_or_finalize_failure(self):
+        run = {"name": "demo"}
+        calls = []
+
+        def persist_run_mutation(run, mutator):
+            calls.append("persist")
+            if len(calls) == 2:
+                raise RuntimeError("forced finalize failure")
+            mutator(run)
+            return run
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+        transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
+
+        def apply_result(remote_result, intent):
+            def remember_message(latest_run):
+                latest_run["applied_message_id"] = remote_result["message_id"]
+
+            return RemoteMutationApplication(mutate_run=remember_message)
+
+        with self.assertRaisesRegex(RuntimeError, "forced finalize failure"):
+            transaction.runner().execute(
+                run,
+                intent_factory=lambda latest_run: TestIntentRecord("mutation-1", "prompt", "ses_1"),
+                call_remote=lambda latest_run, intent: {"message_id": "msg_1"},
+                apply_result=apply_result,
+            )
+
+        self.assertEqual(calls, ["persist", "persist"])
+        self.assertNotIn("applied_message_id", run)
+        self.assertEqual(run["journal"], [{"id": "mutation-1", "kind": "prompt", "session_id": "ses_1"}])
 
     def test_recovery_collects_unique_values_by_owner_from_pending_transactions(self):
         run = {

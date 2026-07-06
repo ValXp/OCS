@@ -15,6 +15,7 @@ from opencode_session.multi_worker_orchestration import (
 from opencode_session.prompt_admission import admit_prompt
 from opencode_session.remote_journal import (
     PersistedRemoteMutationJournal,
+    RemoteMutationApplication,
     RemoteMutationOperation,
     RemoteMutationRecovery,
 )
@@ -245,9 +246,8 @@ class RunCommandService:
                 text=text,
             )
 
-        run = transaction.record_intent_from(run, prompt_intent)
-        try:
-            result = admit_prompt(
+        def admit_remote_prompt(latest_run, intent):
+            return admit_prompt(
                 client,
                 capabilities,
                 worker.session_id,
@@ -255,18 +255,26 @@ class RunCommandService:
                 delivery,
                 message_id=prompt_message_id,
             )
-        except Exception:
-            transaction.discard_intent_best_effort(run)
-            raise
-        admission = result.record
-        admitted_message_id = admission["message_id"]
 
-        def record_prompt_admission(latest_run):
-            latest_worker = _run_worker_with_session(latest_run, worker_id)
-            latest_record = worker_record_for_mutation(latest_worker, worker_id)
-            latest_record.remember_prompt_id(admitted_message_id)
+        def apply_prompt_admission(result, intent):
+            admission = result.record
+            admitted_message_id = admission["message_id"]
 
-        run = transaction.finalize(run, mutate_run=record_prompt_admission)
+            def record_prompt_admission(latest_run):
+                latest_worker = _run_worker_with_session(latest_run, worker_id)
+                latest_record = worker_record_for_mutation(latest_worker, worker_id)
+                latest_record.remember_prompt_id(admitted_message_id)
+
+            return RemoteMutationApplication(mutate_run=record_prompt_admission)
+
+        execution = transaction.runner().execute(
+            run,
+            intent_factory=prompt_intent,
+            call_remote=admit_remote_prompt,
+            apply_result=apply_prompt_admission,
+        )
+        run = execution.run
+        admission = execution.remote_result.record
         return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
 
     def abort_worker(self, name, worker_id):
@@ -284,23 +292,34 @@ class RunCommandService:
                 session_id=latest_worker.session_id,
             )
 
-        run = transaction.record_intent_from(run, abort_intent)
-        try:
-            response = client.abort_session_response(worker.session_id)
-        except Exception as error:
-            transaction.discard_intent_best_effort(run)
-            if isinstance(error, OpenCodeApiError) and is_session_not_found_error(error):
-                raise RunWorkerSessionNotFound(worker.session_id) from error
-            raise
+        def abort_remote_session(latest_run, intent):
+            try:
+                return client.abort_session_response(worker.session_id)
+            except OpenCodeApiError as error:
+                if is_session_not_found_error(error):
+                    raise RunWorkerSessionNotFound(worker.session_id) from error
+                raise
+
+        def apply_abort_response(response, intent):
+            abort = abort_record(worker.session_id, response.data)
+
+            def mark_aborted(latest_run):
+                latest_worker = _run_worker_with_session(latest_run, worker_id)
+                latest_record = worker_record_for_mutation(latest_worker, worker_id)
+                latest_record.apply_transition(mark_worker_aborted(latest_record, abort))
+                refresh_orchestration_run_summary(latest_run)
+
+            return RemoteMutationApplication(mutate_run=mark_aborted)
+
+        execution = transaction.runner().execute(
+            run,
+            intent_factory=abort_intent,
+            call_remote=abort_remote_session,
+            apply_result=apply_abort_response,
+        )
+        run = execution.run
+        response = execution.remote_result
         abort = abort_record(worker.session_id, response.data)
-
-        def mark_aborted(latest_run):
-            latest_worker = _run_worker_with_session(latest_run, worker_id)
-            latest_record = worker_record_for_mutation(latest_worker, worker_id)
-            latest_record.apply_transition(mark_worker_aborted(latest_record, abort))
-            refresh_orchestration_run_summary(latest_run)
-
-        run = transaction.finalize(run, mutate_run=mark_aborted)
         return RunAbortResult(run=run, worker=run["workers"][worker_id], abort=abort, raw_body=response.body)
 
     def _remote_transaction(self, mutation_id, operation):
