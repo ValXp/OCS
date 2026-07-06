@@ -10,6 +10,7 @@ from opencode_session.run_start_core import RunStartCore
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
+from opencode_session.worker_state import apply_worker_transition
 
 try:
     from tests.multi_worker_orchestration_helpers import CAPABILITIES, FakeClient
@@ -75,7 +76,7 @@ class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
 
         def persist_worker_transition(run, transition):
             persisted_worker_ids.append(transition.worker_id)
-            updated = transition.apply_to(run.setdefault("workers", {}))
+            updated = apply_worker_transition(run.setdefault("workers", {}), transition)
             return PersistedWorkerTransitions(run, [updated])
 
         core = RunStartCore(

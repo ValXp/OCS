@@ -260,24 +260,6 @@ class WorkerTransition:
             _snapshot_applied_transition_spec(worker_id, worker),
         )
 
-    def apply_to(self, latest_workers):
-        latest_worker = latest_workers.get(self.worker_id)
-        merged = self.apply_to_snapshot(latest_worker)
-        latest_workers[self.worker_id] = merged
-        return merged
-
-    def apply_to_worker(self, worker):
-        merged = self.apply_to_snapshot(worker)
-        worker.clear()
-        worker.update(merged)
-        return worker
-
-    def apply_to_snapshot(self, worker):
-        from opencode_session.worker_normalization import WorkerRecord
-
-        return WorkerRecord.from_worker(worker, self.worker_id).apply_transition_spec(self.spec)
-
-
 def public_worker_state(lifecycle_state):
     return PUBLIC_WORKER_STATE_BY_LIFECYCLE.get(lifecycle_state, (None, WORKER_ACTION_NONE))
 
@@ -524,22 +506,19 @@ def _snapshot_applied_transition_spec(
     set_if_missing_fields=("session_id",),
     removable_fields=REMOVABLE_WORKER_TRANSITION_FIELDS,
 ):
-    from opencode_session.worker_normalization import WorkerRecord, snapshot_state_source
-
-    normalized = WorkerRecord.from_worker(snapshot_state_source(worker), worker_id).to_snapshot()
     set_fields = {"id": worker_id}
     selected_state_fields = state_fields or WORKER_SNAPSHOT_STATE_FIELDS
     for field_name in selected_state_fields:
-        if field_name in normalized:
-            set_fields[field_name] = deepcopy(normalized[field_name])
-    prompt_ids = normalized.get("prompt_ids")
+        if field_name in worker:
+            set_fields[field_name] = deepcopy(worker[field_name])
+    prompt_ids = worker.get("prompt_ids")
     return _transition_spec(
         set_fields=set_fields,
-        delete_fields=tuple(field_name for field_name in removable_fields if field_name not in normalized),
+        delete_fields=tuple(field_name for field_name in removable_fields if field_name not in worker),
         set_if_missing_fields={
-            field_name: deepcopy(normalized[field_name])
+            field_name: deepcopy(worker[field_name])
             for field_name in set_if_missing_fields
-            if normalized.get(field_name)
+            if worker.get(field_name)
         },
         merge_unique_fields={"prompt_ids": tuple(prompt_ids)} if isinstance(prompt_ids, list) else {},
     )

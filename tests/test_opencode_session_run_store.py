@@ -6,7 +6,7 @@ from pathlib import Path
 
 from opencode_session.run_persistence import persist_worker_snapshot_update
 from opencode_session.run_store import RunStore, RunStoreError
-from opencode_session.worker_state import mark_worker_aborted, refresh_run_summary
+from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_aborted, refresh_run_summary
 
 
 class RunStoreConcurrencyTest(unittest.TestCase):
@@ -258,9 +258,13 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             run = run_store.load_run("demo")
 
             def abort_build(latest_run):
-                mark_worker_aborted(
-                    latest_run["workers"]["build"],
-                    {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}},
+                latest_worker = latest_run["workers"]["build"]
+                apply_worker_transition_to_worker(
+                    latest_worker,
+                    mark_worker_aborted(
+                        latest_worker,
+                        {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}},
+                    ),
                 )
 
             run_store.update_run("demo", abort_build)

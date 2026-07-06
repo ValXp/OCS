@@ -10,7 +10,7 @@ from opencode_session.worker_execution import (
     cleanup_created_worker_sessions,
     execute_worker_attempts,
 )
-from opencode_session.worker_state import ensure_worker
+from opencode_session.worker_state import apply_worker_transition, ensure_worker
 
 
 CAPABILITIES = {
@@ -171,7 +171,7 @@ class WorkerExecutionTest(unittest.TestCase):
             def persist_worker_transition(run, transition):
                 persisted_lifecycle_states.append(transition.set_fields.get("lifecycle_state"))
                 persisted_run = deepcopy(run)
-                updated = transition.apply_to(persisted_run.setdefault("workers", {}))
+                updated = apply_worker_transition(persisted_run.setdefault("workers", {}), transition)
                 return PersistedWorkerTransitions(persisted_run, [updated])
 
             def execute_prompt(client, session_id, prompt, capabilities):

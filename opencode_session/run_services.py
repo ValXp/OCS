@@ -15,7 +15,7 @@ from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import DomainRecord, NormalizedAbortRecord, NormalizedAdmissionRecord
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
-from opencode_session.worker_state import mark_worker_aborted
+from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_aborted
 
 
 @dataclass
@@ -150,7 +150,7 @@ class RunCommandService:
 
         def mark_aborted(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
-            mark_worker_aborted(latest_worker, abort)
+            apply_worker_transition_to_worker(latest_worker, mark_worker_aborted(latest_worker, abort))
             refresh_orchestration_run_summary(latest_run)
 
         run = self._update_run(name, mark_aborted)

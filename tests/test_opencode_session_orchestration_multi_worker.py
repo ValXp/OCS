@@ -11,6 +11,7 @@ from opencode_session.multi_worker_orchestration import (
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore
 from opencode_session.worker_dependencies import analyze_worker_dependencies
+from opencode_session.worker_state import apply_worker_transition
 
 try:
     from tests.multi_worker_orchestration_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES
@@ -134,7 +135,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(workers["review"]["status"], "queued")
 
         latest_workers = {"review": dict(workers["review"])}
-        tick.dependency_blocked_transitions[0].apply_to(latest_workers)
+        apply_worker_transition(latest_workers, tick.dependency_blocked_transitions[0])
 
         self.assertEqual(latest_workers["review"]["status"], "blocked")
         self.assertEqual(latest_workers["review"]["blockers"], ["dependency:build"])

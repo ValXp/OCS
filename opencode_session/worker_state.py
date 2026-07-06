@@ -35,6 +35,24 @@ def normalize_worker_snapshot(worker, worker_id):
     return WorkerRecord.from_worker(worker, worker_id).to_snapshot()
 
 
+def _apply_worker_transition_to_record(worker, transition):
+    return WorkerRecord.from_worker(worker, transition.worker_id).apply_transition_spec(transition.spec)
+
+
+def apply_worker_transition_to_worker(worker, transition):
+    merged = _apply_worker_transition_to_record(worker, transition)
+    worker.clear()
+    worker.update(merged)
+    return worker
+
+
+def apply_worker_transition(latest_workers, transition):
+    latest_worker = latest_workers.get(transition.worker_id)
+    merged = _apply_worker_transition_to_record(latest_worker, transition)
+    latest_workers[transition.worker_id] = merged
+    return merged
+
+
 def next_eligible_action(worker):
     if not isinstance(worker, dict):
         return WORKER_ACTION_NONE
@@ -60,7 +78,6 @@ def mark_worker_active(worker, *, now=None):
         timeout_started_at=timeout_started_at,
         clear_prompt_ids=latest_prompt_ids_are_retry_marker(worker),
     )
-    transition.apply_to_worker(worker)
     return transition
 
 
@@ -74,19 +91,16 @@ def mark_worker_failed(worker, category, reason, *, retryable=True, prompt_ids=(
         timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
         prompt_ids=prompt_ids,
     )
-    transition.apply_to_worker(worker)
     return transition
 
 
 def mark_dependency_blocked(worker, blockers):
     transition = WorkerTransition.dependency_blocked(_worker_id(worker), blockers)
-    transition.apply_to_worker(worker)
     return transition
 
 
 def mark_worker_aborted(worker, abort):
     transition = WorkerTransition.aborted(_worker_id(worker), abort)
-    transition.apply_to_worker(worker)
     return transition
 
 
@@ -101,7 +115,6 @@ def schedule_worker_retry(worker, category, reason, *, prompt_ids=()):
         timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
         prompt_ids=prompt_ids,
     )
-    transition.apply_to_worker(worker)
     return transition
 
 
@@ -120,7 +133,6 @@ def mark_worker_timeout(worker, reason, now, *, manual_retry_required=False):
         manual_retry_required=manual_retry_required,
         timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
     )
-    transition.apply_to_worker(worker)
     return transition
 
 
@@ -135,7 +147,6 @@ def apply_worker_result(worker, result, *, prompt_ids=()):
         prompt_ids=prompt_ids,
         timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
     )
-    transition.apply_to_worker(worker)
     return transition
 
 

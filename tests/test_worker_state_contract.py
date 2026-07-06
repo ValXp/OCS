@@ -2,6 +2,8 @@ import unittest
 
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
+    apply_worker_transition,
+    apply_worker_transition_to_worker,
     apply_worker_result,
     exit_code_for_run,
     mark_dependency_blocked,
@@ -78,6 +80,7 @@ class WorkerStateContractTest(unittest.TestCase):
         worker = normalize_worker({"timeout_seconds": 30}, "builder")
 
         transition = mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z")
+        apply_worker_transition_to_worker(worker, transition)
 
         self.assertEqual(worker["status"], "active")
         self.assertEqual(worker["lifecycle_state"], "active_wait")
@@ -101,7 +104,7 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
 
-        mark_worker_active(worker)
+        apply_worker_transition_to_worker(worker, mark_worker_active(worker))
 
         self.assertEqual(worker["status"], "active")
         self.assertEqual(worker["blockers"], [])
@@ -123,14 +126,17 @@ class WorkerStateContractTest(unittest.TestCase):
             }
         }
 
-        merged = WorkerTransition.failed(
-            "review",
-            "provider",
-            "provider failed",
-            retryable=True,
-            retry_available=False,
-            prompt_ids=("msg_failed",),
-        ).apply_to(latest_workers)
+        merged = apply_worker_transition(
+            latest_workers,
+            WorkerTransition.failed(
+                "review",
+                "provider",
+                "provider failed",
+                retryable=True,
+                retry_available=False,
+                prompt_ids=("msg_failed",),
+            ),
+        )
 
         self.assertEqual(merged["status"], "failed")
         self.assertEqual(merged["error"], "provider failed")
@@ -140,7 +146,7 @@ class WorkerStateContractTest(unittest.TestCase):
     def test_mark_dependency_blocked_records_blockers_and_resolution_action(self):
         worker = normalize_worker({}, "review")
 
-        mark_dependency_blocked(worker, ["dependency:build"])
+        apply_worker_transition_to_worker(worker, mark_dependency_blocked(worker, ["dependency:build"]))
 
         self.assertEqual(worker["status"], "blocked")
         self.assertEqual(worker["blockers"], ["dependency:build"])
@@ -161,12 +167,15 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
 
-        apply_worker_result(
+        apply_worker_transition_to_worker(
             worker,
-            {
-                "status": "done",
-                "message_ids": {"assistant": "msg_assistant"},
-            },
+            apply_worker_result(
+                worker,
+                {
+                    "status": "done",
+                    "message_ids": {"assistant": "msg_assistant"},
+                },
+            ),
         )
 
         self.assertEqual(worker["status"], "done")
@@ -196,6 +205,7 @@ class WorkerStateContractTest(unittest.TestCase):
         )
 
         scheduled = schedule_worker_retry(worker, "api", "previous failure")
+        apply_worker_transition_to_worker(worker, scheduled)
 
         self.assertTrue(scheduled)
         self.assertEqual(worker["status"], "active")
@@ -220,9 +230,12 @@ class WorkerStateContractTest(unittest.TestCase):
             },
             "review",
         )
-        schedule_worker_retry(worker, "provider", "provider failed", prompt_ids=("msg_failed",))
+        apply_worker_transition_to_worker(
+            worker,
+            schedule_worker_retry(worker, "provider", "provider failed", prompt_ids=("msg_failed",)),
+        )
 
-        mark_worker_active(worker)
+        apply_worker_transition_to_worker(worker, mark_worker_active(worker))
 
         self.assertEqual(worker["status"], "active")
         self.assertEqual(worker["lifecycle_state"], "active_wait")
@@ -231,12 +244,12 @@ class WorkerStateContractTest(unittest.TestCase):
     def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
         worker = normalize_worker({"status": "active", "next_eligible_action": "wait"}, "planner")
 
-        mark_worker_aborted(worker, {"accepted": False})
+        apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": False}))
 
         self.assertEqual(worker["status"], "active")
         self.assertEqual(worker["next_eligible_action"], "wait")
 
-        mark_worker_aborted(worker, {"accepted": True})
+        apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": True}))
 
         self.assertEqual(worker["status"], "aborted")
         self.assertEqual(worker["next_eligible_action"], "none")

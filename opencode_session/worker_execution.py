@@ -10,6 +10,7 @@ from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_lifecycle import WorkerTransition
 from opencode_session.worker_state import (
+    apply_worker_transition_to_worker,
     apply_worker_result,
     mark_worker_active,
     mark_worker_failed,
@@ -249,8 +250,10 @@ def execute_worker_attempts(
 
 
 def _record_worker_transition(transition_sink, run, worker, transition):
-    if transition_sink is None:
+    if transition is None:
         return WorkerTransitionSinkOutcome(run, worker)
+    if transition_sink is None:
+        return WorkerTransitionSinkOutcome(run, apply_worker_transition_to_worker(worker, transition))
     outcome = transition_sink(run, worker, transition)
     if outcome is None:
         return WorkerTransitionSinkOutcome(run, worker)

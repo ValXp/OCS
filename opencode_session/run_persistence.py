@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
 from opencode_session.worker_lifecycle import WorkerTransition
+from opencode_session.worker_normalization import snapshot_state_source
+from opencode_session.worker_state import apply_worker_transition, normalize_worker_snapshot
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,11 @@ def persist_worker_snapshot_update(store, run, worker, *, refresh_run_summary, n
 
 
 def persist_worker_snapshot_updates(store, run, workers, *, refresh_run_summary, now):
-    updates = [WorkerTransition.snapshot_applied(worker) for worker in workers if isinstance(worker, dict) and worker.get("id")]
+    updates = [
+        WorkerTransition.snapshot_applied(normalize_worker_snapshot(snapshot_state_source(worker), worker["id"]))
+        for worker in workers
+        if isinstance(worker, dict) and worker.get("id")
+    ]
     return persist_worker_transitions(store, run, updates, refresh_run_summary=refresh_run_summary, now=now)
 
 
@@ -35,7 +41,7 @@ def persist_worker_transitions(store, run, transitions, *, refresh_run_summary, 
     def update(latest_run):
         latest_workers = latest_run.setdefault("workers", {})
         for transition in transitions:
-            transition.apply_to(latest_workers)
+            apply_worker_transition(latest_workers, transition)
         refresh_run_summary(latest_run)
         latest_run["updated_at"] = now()
 
