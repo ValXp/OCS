@@ -163,43 +163,54 @@ class ImportBoundaryTest(unittest.TestCase):
             any(hasattr(metadata, "exit_code") for metadata in worker_state.WORKER_LIFECYCLE_METADATA.values())
         )
 
-    def test_removed_worker_state_compatibility_modules_are_not_importable(self):
-        with temporarily_unimported(
-            "opencode_session.status_policy",
-            "opencode_session.worker_lifecycle",
-            "opencode_session.worker_snapshot_codec",
-        ):
-            for module_name in (
-                "opencode_session.status_policy",
-                "opencode_session.worker_lifecycle",
-                "opencode_session.worker_snapshot_codec",
-            ):
-                with self.subTest(module=module_name):
-                    with self.assertRaises(ModuleNotFoundError):
-                        importlib.import_module(module_name)
-
-    def test_worker_state_imports_use_canonical_surface(self):
-        package_dir = Path(__file__).resolve().parents[1] / "opencode_session"
-        forbidden_imports = (
-            "from opencode_session.worker_lifecycle import",
-            "from opencode_session.worker_snapshot_codec import",
-            "from opencode_session.status_policy import",
-            "from opencode_session.worker_lifecycle_reducer import WorkerTransition",
+    def test_worker_state_internal_modules_do_not_depend_on_public_facade(self):
+        project_root = Path(__file__).resolve().parents[1]
+        package_dir = project_root / "opencode_session"
+        internal_module_paths = (
+            package_dir / "status_policy.py",
+            package_dir / "worker_lifecycle.py",
+            package_dir / "worker_snapshot_codec.py",
         )
         offenders = []
-        for path in sorted(package_dir.glob("*.py")):
-            source = path.read_text()
-            for forbidden_import in forbidden_imports:
-                if forbidden_import in source:
-                    offenders.append(f"{path.name}: {forbidden_import}")
 
-        reducer_source = (package_dir / "worker_lifecycle_reducer.py").read_text()
+        for path in internal_module_paths:
+            if not path.exists():
+                continue
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    if any(alias.name == "opencode_session.worker_state" for alias in node.names):
+                        offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+                elif isinstance(node, ast.ImportFrom):
+                    imports_facade_module = node.module == "opencode_session.worker_state"
+                    imports_facade_from_package = node.module == "opencode_session" and any(
+                        alias.name == "worker_state" for alias in node.names
+                    )
+                    if imports_facade_module or imports_facade_from_package:
+                        offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
 
         self.assertEqual([], offenders)
-        self.assertFalse((package_dir / "status_policy.py").exists())
-        self.assertFalse((package_dir / "worker_lifecycle.py").exists())
-        self.assertFalse((package_dir / "worker_snapshot_codec.py").exists())
-        self.assertIn("from opencode_session.worker_state import", reducer_source)
+
+    def test_worker_state_public_types_are_not_imported_from_reducer(self):
+        project_root = Path(__file__).resolve().parents[1]
+        package_dir = project_root / "opencode_session"
+        public_worker_state_names = {
+            "WorkerRecord",
+            "WorkerTransition",
+            "WorkerTransitionName",
+            "WorkerTransitionResult",
+        }
+        offenders = []
+        for path in sorted(package_dir.rglob("*.py")):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom) or node.module != "opencode_session.worker_lifecycle_reducer":
+                    continue
+                leaked_names = sorted(alias.name for alias in node.names if alias.name in public_worker_state_names)
+                if leaked_names:
+                    offenders.append(f"{path.relative_to(project_root)}:{node.lineno}: {', '.join(leaked_names)}")
+
+        self.assertEqual([], offenders)
 
     def test_python_39_claim_avoids_pep604_type_union_annotations(self):
         project_root = Path(__file__).resolve().parents[1]
