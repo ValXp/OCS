@@ -218,6 +218,24 @@ class RunCommandService:
     def _discard_remote_mutation_best_effort(self, name, mutation_id):
         try:
             self._update_run(name, lambda latest_run: _remove_remote_mutation(latest_run, mutation_id))
+        except Exception as cleanup_error:
+            self._record_remote_mutation_cleanup_failure_best_effort(name, mutation_id, cleanup_error)
+
+    def _record_remote_mutation_cleanup_failure_best_effort(self, name, mutation_id, cleanup_error):
+        def record_cleanup_failure(latest_run):
+            _mark_remote_mutation_cleanup_failure(
+                latest_run,
+                mutation_id,
+                {
+                    "operation": "discard_remote_mutation",
+                    "error_type": type(cleanup_error).__name__,
+                    "message": str(cleanup_error),
+                    "recorded_at": self.now(),
+                },
+            )
+
+        try:
+            self._update_run(name, record_cleanup_failure)
         except Exception:
             pass
 
@@ -265,6 +283,16 @@ def _remove_remote_mutation(run, mutation_id):
         run[REMOTE_MUTATION_JOURNAL_FIELD] = remaining
     else:
         run.pop(REMOTE_MUTATION_JOURNAL_FIELD, None)
+
+
+def _mark_remote_mutation_cleanup_failure(run, mutation_id, cleanup_failure):
+    journal = run.get(REMOTE_MUTATION_JOURNAL_FIELD)
+    if not isinstance(journal, list):
+        return
+    for mutation in journal:
+        if isinstance(mutation, dict) and mutation.get("id") == mutation_id:
+            mutation["cleanup_failure"] = cleanup_failure
+            return
 
 
 def _new_prompt_message_id():

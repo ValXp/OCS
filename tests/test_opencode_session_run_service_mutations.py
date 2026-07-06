@@ -147,6 +147,43 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(journal["message_id"], "msg_steer_1")
         self.assertEqual(journal["text"], "Continue with the plan")
 
+    def test_steer_marks_journal_when_discard_cleanup_fails_after_remote_error(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            inner_store = _active_worker_store(store_root, directory)
+            store = FailingUpdateStore(inner_store, fail_on_update=2)
+
+            def reject_prompt(session_id, payload, prompt_path):
+                raise RuntimeError("remote prompt rejected")
+
+            client = RecordingRunClient(on_prompt=reject_prompt)
+            service = RunCommandService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: PROMPT_CAPABILITIES,
+                now=lambda: "2026-07-05T00:00:00Z",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "remote prompt rejected"):
+                service.steer_worker(
+                    "demo",
+                    "planner",
+                    "Continue with the plan",
+                    delivery="queue",
+                    message_id="msg_steer_1",
+                )
+            run = inner_store.load_run("demo")
+
+        self.assertEqual(client.requests[0][0], "prompt")
+        self.assertEqual(run["workers"]["planner"]["prompt_ids"], [])
+        self.assertEqual(len(run[REMOTE_MUTATION_JOURNAL_FIELD]), 1)
+        journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
+        self.assertEqual(journal["kind"], "steer_prompt")
+        self.assertEqual(journal["message_id"], "msg_steer_1")
+        self.assertEqual(journal["cleanup_failure"]["operation"], "discard_remote_mutation")
+        self.assertEqual(journal["cleanup_failure"]["error_type"], "RunStoreError")
+        self.assertEqual(journal["cleanup_failure"]["message"], "forced update failure")
+        self.assertEqual(journal["cleanup_failure"]["recorded_at"], "2026-07-05T00:00:00Z")
+
     def test_abort_persists_recoverable_journal_before_remote_abort(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = _active_worker_store(store_root, directory)
@@ -201,6 +238,36 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "abort_worker")
         self.assertEqual(journal["session_id"], "ses_plan")
+
+    def test_abort_marks_journal_when_discard_cleanup_fails_after_remote_error(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            inner_store = _active_worker_store(store_root, directory)
+            store = FailingUpdateStore(inner_store, fail_on_update=2)
+
+            def reject_abort(session_id):
+                raise RuntimeError("remote abort rejected")
+
+            client = RecordingRunClient(on_abort=reject_abort)
+            service = RunCommandService(
+                store,
+                client_factory=lambda url: client,
+                now=lambda: "2026-07-05T00:00:00Z",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "remote abort rejected"):
+                service.abort_worker("demo", "planner")
+            run = inner_store.load_run("demo")
+
+        self.assertEqual(client.requests, [("abort", "ses_plan")])
+        self.assertEqual(run["workers"]["planner"]["status"], "active")
+        self.assertEqual(len(run[REMOTE_MUTATION_JOURNAL_FIELD]), 1)
+        journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
+        self.assertEqual(journal["kind"], "abort_worker")
+        self.assertEqual(journal["session_id"], "ses_plan")
+        self.assertEqual(journal["cleanup_failure"]["operation"], "discard_remote_mutation")
+        self.assertEqual(journal["cleanup_failure"]["error_type"], "RunStoreError")
+        self.assertEqual(journal["cleanup_failure"]["message"], "forced update failure")
+        self.assertEqual(journal["cleanup_failure"]["recorded_at"], "2026-07-05T00:00:00Z")
 
 
 def _active_worker_store(store_root, directory):
