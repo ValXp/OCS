@@ -70,6 +70,23 @@ class FailingUpdateStore:
         return self.store.update_run(name, mutator)
 
 
+class ChangeWorkerSessionBeforeFirstUpdateStore:
+    def __init__(self, store, *, worker_id, session_id):
+        self.store = store
+        self.worker_id = worker_id
+        self.session_id = session_id
+        self.update_count = 0
+
+    def __getattr__(self, name):
+        return getattr(self.store, name)
+
+    def update_run(self, name, mutator):
+        self.update_count += 1
+        if self.update_count == 1:
+            self.store.upsert_worker(name, self.worker_id, session_id=self.session_id)
+        return self.store.update_run(name, mutator)
+
+
 class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
     def test_steer_prompt_intent_record_serializes_journal_entry(self):
         record = SteerPromptIntentRecord(
@@ -157,6 +174,51 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertNotIn(REMOTE_MUTATION_JOURNAL_FIELD, run)
         self.assertEqual(worker_field(run["workers"]["planner"], "prompt_ids"), ["msg_steer_1"])
         self.assertEqual(len(client.requests), 1)
+
+    def test_steer_uses_latest_intent_session_when_worker_session_changes_before_journal(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            inner_store = _active_worker_store(store_root, directory)
+            store = ChangeWorkerSessionBeforeFirstUpdateStore(
+                inner_store,
+                worker_id="planner",
+                session_id="ses_latest",
+            )
+
+            def assert_journal_before_prompt(session_id, payload, prompt_path):
+                run = inner_store.load_run("demo")
+                journal = run[REMOTE_MUTATION_JOURNAL_FIELD]
+                self.assertEqual(journal[0]["kind"], "steer_prompt")
+                self.assertEqual(journal[0]["session_id"], "ses_latest")
+                self.assertEqual(session_id, journal[0]["session_id"])
+
+            client = RecordingRunClient(
+                on_prompt=assert_journal_before_prompt,
+                prompt_response={
+                    "messageID": "msg_steer_1",
+                    "delivery": "queue",
+                    "state": "admitted",
+                },
+            )
+            service = RunCommandService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: PROMPT_CAPABILITIES,
+                now=lambda: "2026-07-05T00:00:00Z",
+            )
+
+            result = service.steer_worker(
+                "demo",
+                "planner",
+                "Continue with the plan",
+                delivery="queue",
+                message_id="msg_steer_1",
+            )
+            run = inner_store.load_run("demo")
+
+        self.assertEqual(client.requests[0][1], "ses_latest")
+        self.assertEqual(result.admission["session_id"], "ses_latest")
+        self.assertNotIn(REMOTE_MUTATION_JOURNAL_FIELD, run)
+        self.assertEqual(worker_field(run["workers"]["planner"], "session_id"), "ses_latest")
 
     def test_steer_records_prompt_id_through_worker_record_boundary(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
@@ -300,6 +362,41 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(run["status"], "aborted")
         self.assertEqual(worker_output_field(run["workers"]["planner"], "status"), "aborted")
         self.assertEqual(len(client.requests), 1)
+
+    def test_abort_uses_latest_intent_session_when_worker_session_changes_before_journal(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            inner_store = _active_worker_store(store_root, directory)
+            store = ChangeWorkerSessionBeforeFirstUpdateStore(
+                inner_store,
+                worker_id="planner",
+                session_id="ses_latest",
+            )
+
+            def assert_journal_before_abort(session_id):
+                run = inner_store.load_run("demo")
+                journal = run[REMOTE_MUTATION_JOURNAL_FIELD]
+                self.assertEqual(journal[0]["kind"], "abort_worker")
+                self.assertEqual(journal[0]["session_id"], "ses_latest")
+                self.assertEqual(session_id, journal[0]["session_id"])
+
+            client = RecordingRunClient(
+                on_abort=assert_journal_before_abort,
+                abort_response={"accepted": True, "status": "aborted"},
+            )
+            service = RunCommandService(
+                store,
+                client_factory=lambda url: client,
+                now=lambda: "2026-07-05T00:00:00Z",
+            )
+
+            result = service.abort_worker("demo", "planner")
+            run = inner_store.load_run("demo")
+
+        self.assertEqual(client.requests, [("abort", "ses_latest")])
+        self.assertEqual(result.abort["session_id"], "ses_latest")
+        self.assertNotIn(REMOTE_MUTATION_JOURNAL_FIELD, run)
+        self.assertEqual(worker_field(run["workers"]["planner"], "session_id"), "ses_latest")
+        self.assertEqual(worker_output_field(run["workers"]["planner"], "status"), "aborted")
 
     def test_abort_applies_transition_through_worker_record_boundary(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:

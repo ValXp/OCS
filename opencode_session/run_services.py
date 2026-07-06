@@ -227,7 +227,7 @@ class RunCommandService:
 
     def steer_worker(self, name, worker_id, text, *, delivery, message_id=None):
         run = self.store.load_run(name)
-        worker = _run_worker_with_session(run, worker_id)
+        _run_worker_with_session(run, worker_id)
         client = self.client_factory(run["server_url"])
         capabilities = self.capability_detector(client)
         configure_client_route_plan(client, capabilities)
@@ -250,7 +250,7 @@ class RunCommandService:
             return admit_prompt(
                 client,
                 capabilities,
-                worker.session_id,
+                intent.session_id,
                 text,
                 delivery,
                 message_id=prompt_message_id,
@@ -279,7 +279,7 @@ class RunCommandService:
 
     def abort_worker(self, name, worker_id):
         run = self.store.load_run(name)
-        worker = _run_worker_with_session(run, worker_id)
+        _run_worker_with_session(run, worker_id)
         client = self.client_factory(run["server_url"])
         mutation_id = _new_remote_mutation_id()
         transaction = self._remote_transaction(mutation_id, ABORT_WORKER_REMOTE_MUTATION)
@@ -294,14 +294,14 @@ class RunCommandService:
 
         def abort_remote_session(latest_run, intent):
             try:
-                return client.abort_session_response(worker.session_id)
+                return client.abort_session_response(intent.session_id)
             except OpenCodeApiError as error:
                 if is_session_not_found_error(error):
-                    raise RunWorkerSessionNotFound(worker.session_id) from error
+                    raise RunWorkerSessionNotFound(intent.session_id) from error
                 raise
 
         def apply_abort_response(response, intent):
-            abort = abort_record(worker.session_id, response.data)
+            abort = abort_record(intent.session_id, response.data)
 
             def mark_aborted(latest_run):
                 latest_worker = _run_worker_with_session(latest_run, worker_id)
@@ -319,7 +319,7 @@ class RunCommandService:
         )
         run = execution.run
         response = execution.remote_result
-        abort = abort_record(worker.session_id, response.data)
+        abort = abort_record(execution.intent.session_id, response.data)
         return RunAbortResult(run=run, worker=run["workers"][worker_id], abort=abort, raw_body=response.body)
 
     def _remote_transaction(self, mutation_id, operation):
