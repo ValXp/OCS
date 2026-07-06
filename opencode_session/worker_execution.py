@@ -25,6 +25,9 @@ COMPLETED = "completed"
 RETRY_SCHEDULED = "retry_scheduled"
 TERMINAL_FAILURE = "terminal_failure"
 
+WORKER_EXECUTION_TRANSITION = "transition"
+WORKER_EXECUTION_OUTCOME = "outcome"
+
 _ATTEMPT_COMPLETED = "completed"
 _ATTEMPT_FAILED = "failed"
 
@@ -45,8 +48,15 @@ class WorkerExecutionOutcome:
 
 
 @dataclass
-class WorkerTransitionSinkOutcome:
-    run: RunRecord
+class WorkerExecutionEvent:
+    kind: str
+    transition: Optional[WorkerTransition] = None
+    outcome: Optional[WorkerExecutionOutcome] = None
+
+
+@dataclass
+class WorkerExecutionCheckpoint:
+    run: Optional[RunRecord] = None
     worker: Optional[Worker] = None
 
 
@@ -197,7 +207,43 @@ def execute_worker_attempts(
     model=None,
     create_session=True,
     stop_after_retry=False,
-    transition_sink=None,
+):
+    outcome = None
+    for event in execute_worker_attempt_events(
+        client,
+        run,
+        worker,
+        prompt,
+        capabilities,
+        executor=executor,
+        now=now,
+        session_id=session_id,
+        agent=agent,
+        model=model,
+        create_session=create_session,
+        stop_after_retry=stop_after_retry,
+    ):
+        if event.outcome is not None:
+            outcome = event.outcome
+    if outcome is None:
+        raise RuntimeError("worker execution completed without an outcome")
+    return outcome
+
+
+def execute_worker_attempt_events(
+    client,
+    run,
+    worker,
+    prompt,
+    capabilities,
+    *,
+    executor=execute_blocking_prompt,
+    now,
+    session_id=None,
+    agent=None,
+    model=None,
+    create_session=True,
+    stop_after_retry=False,
 ):
     created_session_ids = []
     created_session_ids_for_next_attempt = []
@@ -213,34 +259,22 @@ def execute_worker_attempts(
     if session_outcome.created_session_id is not None:
         created_session_ids.append(session_outcome.created_session_id)
         created_session_ids_for_next_attempt.append(session_outcome.created_session_id)
-    sink_outcome = _record_worker_transition(
-        transition_sink,
-        run,
-        worker,
-        WorkerTransition.provisioned(worker),
-    )
-    run = sink_outcome.run
-    worker = sink_outcome.worker
+    run, worker = yield from _emit_worker_transition(run, worker, WorkerTransition.provisioned(worker))
 
     while True:
         active_transition = mark_worker_active(worker, now=now)
-        sink_outcome = _record_worker_transition(transition_sink, run, worker, active_transition)
-        run = sink_outcome.run
-        worker = sink_outcome.worker
+        run, worker = yield from _emit_worker_transition(run, worker, active_transition)
         attempt_record = new_worker_attempt_record(
             worker,
             started_at=now(),
             created_session_ids=created_session_ids_for_next_attempt,
         )
         created_session_ids_for_next_attempt = []
-        sink_outcome = _record_worker_transition(
-            transition_sink,
+        run, worker = yield from _emit_worker_transition(
             run,
             worker,
             WorkerTransition.attempt_started(worker["id"], attempt_record),
         )
-        run = sink_outcome.run
-        worker = sink_outcome.worker
         attempt = execute_single_worker_attempt(
             client,
             worker,
@@ -259,35 +293,33 @@ def execute_worker_attempts(
             attempt,
             finished_at=now(),
         )
-        sink_outcome = _record_worker_transition(transition_sink, run, worker, transition.worker_transition)
-        run = sink_outcome.run
-        worker = sink_outcome.worker
+        run, worker = yield from _emit_worker_transition(run, worker, transition.worker_transition)
         if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
             continue
-        return WorkerExecutionOutcome(
-            transition.kind,
-            created_session_ids,
-            transition.error,
-            transition.failure_category,
-            run,
+        yield WorkerExecutionEvent(
+            WORKER_EXECUTION_OUTCOME,
+            outcome=WorkerExecutionOutcome(
+                transition.kind,
+                created_session_ids,
+                transition.error,
+                transition.failure_category,
+                run,
+            ),
         )
+        return
 
 
-def _record_worker_transition(transition_sink, run, worker, transition):
+def _emit_worker_transition(run, worker, transition):
     if transition is None:
-        return WorkerTransitionSinkOutcome(run, worker)
-    if transition_sink is None:
-        return WorkerTransitionSinkOutcome(run, apply_worker_transition_to_worker(worker, transition))
-    outcome = transition_sink(run, worker, transition)
-    if outcome is None:
-        return WorkerTransitionSinkOutcome(run, worker)
-    persisted_run = outcome.run
-    persisted_worker = outcome.worker
-    if persisted_worker is None:
-        persisted_worker = persisted_run.get("workers", {}).get(transition.worker_id)
-    if persisted_worker is None:
-        persisted_worker = worker
-    return WorkerTransitionSinkOutcome(persisted_run, persisted_worker)
+        return run, worker
+    checkpoint = yield WorkerExecutionEvent(WORKER_EXECUTION_TRANSITION, transition=transition)
+    if isinstance(checkpoint, WorkerExecutionCheckpoint):
+        checkpoint_run = checkpoint.run or run
+        checkpoint_worker = checkpoint.worker
+        if checkpoint_worker is None:
+            checkpoint_worker = checkpoint_run.get("workers", {}).get(transition.worker_id)
+        return checkpoint_run, checkpoint_worker or worker
+    return run, apply_worker_transition_to_worker(worker, transition)
 
 
 def _with_finalized_attempt(worker_transition, attempt_id, transition, attempt, *, finished_at):

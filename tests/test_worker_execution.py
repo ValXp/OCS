@@ -6,8 +6,11 @@ from opencode_session.api_client import OpenCodeApiError
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_start_core import RunStartCore
 from opencode_session.worker_execution import (
+    WORKER_EXECUTION_OUTCOME,
+    WORKER_EXECUTION_TRANSITION,
     WorkerExecutionTimeout,
     cleanup_created_worker_sessions,
+    execute_worker_attempt_events,
     execute_worker_attempts,
 )
 from opencode_session.worker_state import apply_worker_transition, ensure_worker
@@ -117,6 +120,65 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIsNone(worker["agent"])
         self.assertIsNone(worker["model"])
         self.assertNotIn("result", worker)
+
+    def test_execute_worker_attempt_events_emit_checkpoints_before_executor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            client = FakeClient(["ses_initial"])
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append((session_id, prompt))
+                return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
+
+            events = execute_worker_attempt_events(
+                client,
+                run,
+                worker,
+                "Finish the worker task",
+                CAPABILITIES,
+                executor=execute_prompt,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            transition_events = [next(events), next(events), next(events)]
+
+            self.assertEqual([event.kind for event in transition_events], [WORKER_EXECUTION_TRANSITION] * 3)
+            self.assertEqual(
+                [event.transition.name for event in transition_events],
+                ["provisioned", "active", "attempt_started"],
+            )
+            self.assertEqual(client.requests, [("create", directory, None, None)])
+            self.assertEqual(executions, [])
+
+            result_event = next(events)
+            outcome_event = next(events)
+
+        self.assertEqual(executions, [("ses_initial", "Finish the worker task")])
+        self.assertEqual(result_event.kind, WORKER_EXECUTION_TRANSITION)
+        self.assertEqual(result_event.transition.name, "result_applied")
+        self.assertEqual(outcome_event.kind, WORKER_EXECUTION_OUTCOME)
+        self.assertEqual(outcome_event.outcome.kind, "completed")
+        self.assertEqual(worker["status"], "done")
+        self.assertEqual(
+            worker["attempts"],
+            [
+                {
+                    "id": "attempt-1",
+                    "session_id": "ses_initial",
+                    "created_session_ids": ["ses_initial"],
+                    "status": "completed",
+                    "started_at": "2026-07-03T00:00:00Z",
+                    "finished_at": "2026-07-03T00:00:00Z",
+                    "result_status": "done",
+                    "user_message_id": "msg_user",
+                    "assistant_message_id": "msg_assistant",
+                }
+            ],
+        )
+        with self.assertRaises(StopIteration):
+            next(events)
 
     def test_execute_worker_attempts_skips_automatic_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:

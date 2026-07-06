@@ -15,7 +15,11 @@ from opencode_session.run_start_core import RunStartCore, remember_created_worke
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import RunRecord
-from opencode_session.worker_execution import RETRY_SCHEDULED, WorkerExecutionOutcome
+from opencode_session.worker_execution import (
+    RETRY_SCHEDULED,
+    WorkerExecutionCheckpoint,
+    WorkerExecutionOutcome,
+)
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_domain import WorkerTransition, is_executable_worker
 from opencode_session.worker_state import (
@@ -148,9 +152,9 @@ class DisposableSessionTracker:
 
 
 class NextEligibleWorkerExecutor:
-    def __init__(self, core, *, persist_summary):
+    def __init__(self, core, *, persist_worker_transition):
         self.core = core
-        self.persist_summary = persist_summary
+        self.persist_worker_transition = persist_worker_transition
 
     def execute_next(
         self,
@@ -170,7 +174,6 @@ class NextEligibleWorkerExecutor:
             current_worker = run.get("workers", {}).get(worker.get("id"), worker)
             session_tracker.remember_worker_outcome(run, current_worker, outcome)
             if outcome.kind == RETRY_SCHEDULED:
-                run = self.persist_summary(run)
                 worker = current_worker
                 continue
             if outcome.error is not None:
@@ -178,14 +181,14 @@ class NextEligibleWorkerExecutor:
                     first_error_outcome = outcome
                 if execution_policy == EXECUTION_POLICY_FAIL_FAST:
                     return NextWorkerExecutionOutcome(run, first_error_outcome, outcome)
-            run = self.persist_summary(run)
             worker = None
         return NextWorkerExecutionOutcome(run, first_error_outcome)
 
     def _execute_single_worker(self, client, run, worker, capabilities):
-        return self.core.execute_worker(
+        current_run = run
+        events = self.core.worker_execution_events(
             client,
-            run,
+            current_run,
             worker,
             _worker_prompt(worker),
             capabilities,
@@ -193,6 +196,27 @@ class NextEligibleWorkerExecutor:
             model=worker.get("model"),
             stop_after_retry=True,
         )
+        checkpoint = None
+        while True:
+            try:
+                event = events.send(checkpoint) if checkpoint is not None else next(events)
+            except StopIteration:
+                break
+            checkpoint = None
+            if event.transition is not None:
+                result = self.persist_worker_transition(current_run, event.transition)
+                current_run = result.run
+                persisted_worker = (
+                    result.workers[0]
+                    if result.workers
+                    else result.run.get("workers", {}).get(event.transition.worker_id)
+                )
+                checkpoint = WorkerExecutionCheckpoint(current_run, persisted_worker)
+                continue
+            if event.outcome is not None:
+                event.outcome.run = current_run
+                return event.outcome
+        raise RuntimeError("worker execution completed without an outcome")
 
 
 class DependencyOrderedSerialRunOrchestrationService:
@@ -221,7 +245,10 @@ class DependencyOrderedSerialRunOrchestrationService:
             executor=self.executor,
             now=self.now,
         )
-        self.worker_executor = NextEligibleWorkerExecutor(self.core, persist_summary=self._persist_summary)
+        self.worker_executor = NextEligibleWorkerExecutor(
+            self.core,
+            persist_worker_transition=self._persist_worker_transition,
+        )
 
     def start(self, request):
         run = self.store.load_run(request.name)
@@ -362,15 +389,6 @@ class DependencyOrderedSerialRunOrchestrationService:
             now=self.now,
         )
         return result.run
-
-    def _persist_summary(self, run):
-        return persist_run_summary(
-            self.store,
-            run,
-            refresh_run_summary=refresh_orchestration_run_summary,
-            now=self.now,
-        )
-
 
 def refresh_orchestration_run_summary(run):
     _refresh_worker_run_summary(run, include_unprompted_when_no_prompts=True)
