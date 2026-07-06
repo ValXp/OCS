@@ -205,7 +205,11 @@ class SelectedSerialWorkerExecutor:
 
 
 class DependencyOrderedSerialRunOrchestrationService:
-    """Run prompted workers one at a time after their dependencies are satisfied."""
+    """Run prompted workers one at a time after their dependencies are satisfied.
+
+    Serial execution is a product guarantee: each scheduler step persists blockers, selects at most one ready
+    worker, executes it, and replans from durable state before selecting the next worker.
+    """
 
     def __init__(
         self,
@@ -309,6 +313,7 @@ class DependencyOrderedSerialRunOrchestrationService:
     ):
         first_error_outcome = None
         while serial_step.worker_id is not None:
+            # Preserve the one-ready-worker-at-a-time guarantee even when multiple workers are independent.
             worker_outcome = self.worker_executor.execute_next(
                 run,
                 serial_step.worker_id,

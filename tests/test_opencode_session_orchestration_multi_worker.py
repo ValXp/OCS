@@ -28,7 +28,7 @@ SERVER_URL = "http://opencode.example"
 NOW = "2026-07-03T00:00:00Z"
 
 
-class MultiWorkerServiceScenario:
+class DependencyOrderedSerialServiceScenario:
     def __init__(
         self,
         test_case,
@@ -201,7 +201,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
         self.assertEqual(analysis.ready_worker_ids, ("retry", "start"))
 
-    def test_serial_step_selects_one_worker_and_block_transitions_without_mutation(self):
+    def test_dependency_ordered_serial_step_selects_one_ready_worker_and_blocks_without_mutation(self):
         workers = {
             "build": {"id": "build", "prompt": "Build", "lifecycle_state": "failed_terminal", "status": "failed"},
             "docs": {"id": "docs", "prompt": "Docs", "lifecycle_state": "queued", "status": "queued"},
@@ -215,8 +215,10 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
             },
         }
 
+        analysis = analyze_worker_dependencies(workers)
         step = plan_dependency_ordered_serial_step(workers)
 
+        self.assertEqual(analysis.ready_worker_ids, ("docs", "lint"))
         self.assertEqual(step.worker_id, "docs")
         self.assertFalse(hasattr(step, "ready_worker_ids"))
         self.assertFalse(hasattr(step, "eligible_worker_ids"))
@@ -229,7 +231,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(latest_workers["review"]["status"], "blocked")
         self.assertEqual(latest_workers["review"]["blockers"], ["dependency:build"])
 
-    def test_serial_step_advances_one_worker_at_a_time_as_dependencies_finish(self):
+    def test_dependency_ordered_serial_step_advances_one_worker_at_a_time_as_dependencies_finish(self):
         workers = {
             "build": {"id": "build", "prompt": "Build", "lifecycle_state": "queued", "status": "queued"},
             "review": {
@@ -262,7 +264,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertIsNone(final_step.worker_id)
 
 
-class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
+class DependencyOrderedSerialOrchestrationServiceTest(unittest.TestCase):
     def assert_single_worker_attempt(self, worker, *, status, session_id):
         attempts = worker.get("attempts")
         self.assertIsInstance(attempts, list)
@@ -362,7 +364,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(session_tracker.remembered[0][2], "completed")
 
     def test_start_persists_active_attempt_before_provider_call(self):
-        with MultiWorkerServiceScenario(self, session_ids=["ses_initial"]) as scenario:
+        with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_initial"]) as scenario:
             scenario.add_worker("worker", prompt="Finish the worker task")
             observed_before_call = {}
 
@@ -408,7 +410,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
 
     def test_start_persists_worker_session_creation_intent_before_remote_create(self):
-        with MultiWorkerServiceScenario(self) as scenario:
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
             scenario.add_worker(
                 "worker",
                 prompt="Finish the worker task",
@@ -493,7 +495,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_initial"]})
 
     def test_command_service_start_passes_injected_dependencies_to_orchestration(self):
-        with MultiWorkerServiceScenario(self, client=FakeClient([])) as scenario:
+        with DependencyOrderedSerialServiceScenario(self, client=FakeClient([])) as scenario:
             scenario.add_worker("worker", prompt="Finish the worker task")
             detected_clients = []
 
@@ -516,7 +518,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(run["updated_at"], NOW)
 
     def test_start_unsupported_blocking_execution_is_not_retryable(self):
-        with MultiWorkerServiceScenario(self, capabilities=UNSUPPORTED_CAPABILITIES) as scenario:
+        with DependencyOrderedSerialServiceScenario(self, capabilities=UNSUPPORTED_CAPABILITIES) as scenario:
             scenario.add_worker(
                 "worker",
                 prompt="Finish the worker task",
@@ -539,7 +541,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         def detect_capabilities(client):
             raise OpenCodeApiError("capability probe failed")
 
-        with MultiWorkerServiceScenario(self, capability_detector=detect_capabilities) as scenario:
+        with DependencyOrderedSerialServiceScenario(self, capability_detector=detect_capabilities) as scenario:
             scenario.add_worker(
                 "worker",
                 prompt="Finish the worker task",
@@ -587,7 +589,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                     detector_calls.append(client)
                     raise OpenCodeApiError("capability probe failed")
 
-                with MultiWorkerServiceScenario(self, capability_detector=detect_capabilities) as scenario:
+                with DependencyOrderedSerialServiceScenario(self, capability_detector=detect_capabilities) as scenario:
                     for worker_id, worker_changes in case["workers"]:
                         scenario.add_worker(worker_id, **worker_changes)
 
@@ -607,7 +609,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 self.assertIsNone(run["workers"]["review"].get("error"))
 
     def test_start_blocks_failed_and_missing_dependency_chains_before_probe(self):
-        with MultiWorkerServiceScenario(self) as scenario:
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
             scenario.add_worker("build", role="build", prompt="Run the implementation", status="failed")
             scenario.add_worker("review", role="review", prompt="Review the implementation", dependencies=["build"])
             scenario.add_worker("deploy", role="deploy", prompt="Deploy the reviewed implementation", dependencies=["review"])
@@ -634,7 +636,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assert_blocked_worker(run, "publish", ["dependency:docs"])
 
     def test_start_blocks_only_failed_dependency_when_another_dependency_is_done(self):
-        with MultiWorkerServiceScenario(self) as scenario:
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
             scenario.add_worker(
                 "docs",
                 role="write",
@@ -665,8 +667,8 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(run["workers"]["build"]["status"], "failed")
         self.assert_blocked_worker(run, "review", ["dependency:build"])
 
-    def test_continue_policy_runs_independent_ready_worker_after_failure(self):
-        with MultiWorkerServiceScenario(self, session_ids=["ses_alpha", "ses_beta"]) as scenario:
+    def test_continue_policy_runs_next_independent_ready_worker_serially_after_failure(self):
+        with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_alpha", "ses_beta"]) as scenario:
             scenario.add_worker("alpha", role="build", prompt="Run alpha")
             scenario.add_worker("beta", role="write", prompt="Run beta")
 
@@ -701,7 +703,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(run["workers"]["beta"]["output_refs"], ["assistant:msg_beta_assistant"])
 
     def test_start_does_not_probe_capabilities_when_partially_completed_cycle_blocks_worker(self):
-        with MultiWorkerServiceScenario(self) as scenario:
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
             scenario.add_worker(
                 "build",
                 role="build",
@@ -741,7 +743,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assert_blocked_worker(run, "review", ["dependency-cycle:build->review->build"])
 
     def test_start_does_not_execute_blocked_worker_after_dependency_succeeds(self):
-        with MultiWorkerServiceScenario(self, session_ids=["ses_build"]) as scenario:
+        with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_build"]) as scenario:
             scenario.add_worker("build", role="build", prompt="Run the implementation")
             executions = []
 
@@ -784,7 +786,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assert_blocked_worker(run, "review", ["manual:blocker"])
 
     def test_start_requeued_worker_finishes_without_stale_status_metadata(self):
-        with MultiWorkerServiceScenario(self) as scenario:
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
             scenario.add_worker(
                 "build",
                 role="build",

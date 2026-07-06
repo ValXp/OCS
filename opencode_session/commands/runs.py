@@ -51,9 +51,18 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     run_init_parser.add_argument("--directory", default=".", help="target directory for the run")
     add_server_argument(run_init_parser)
 
-    run_start_parser = run_subparsers.add_parser("start")
+    run_start_parser = run_subparsers.add_parser(
+        "start",
+        description=(
+            "Start stored worker prompts with dependency-ordered serial execution: "
+            "plan one ready worker, execute it, persist results, then replan."
+        ),
+    )
     run_start_parser.add_argument("name", help="local run name")
-    run_start_parser.add_argument("--prompt", help="prompt text for a single worker; omit to start stored worker prompts")
+    run_start_parser.add_argument(
+        "--prompt",
+        help="prompt text for one worker; omit to execute stored worker prompts serially in dependency order",
+    )
     run_start_parser.add_argument("--worker", default="worker", help="worker record ID")
     run_start_parser.add_argument("--role", default="worker", help="worker role")
     run_start_parser.add_argument("--directory", help="target directory when creating the run")
@@ -65,7 +74,7 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
         "--execution-policy",
         choices=("fail-fast", "continue"),
         default="fail-fast",
-        help="whether serial worker execution stops on the first failure or continues to the next dependency-eligible worker",
+        help="whether dependency-ordered serial execution stops on the first failure or continues to the next eligible worker",
     )
     run_start_parser.add_argument("--cleanup", action="store_true", help="delete a session created by this start after it reaches done")
 

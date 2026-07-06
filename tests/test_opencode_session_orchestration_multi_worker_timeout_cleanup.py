@@ -18,8 +18,8 @@ except ModuleNotFoundError:
     from multi_worker_orchestration_helpers import CAPABILITIES, FakeClient
 
 
-class MultiWorkerOrchestrationTimeoutCleanupTest(unittest.TestCase):
-    def test_start_with_cleanup_after_first_ready_worker_failure_does_not_precreate_later_worker_session(self):
+class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
+    def test_serial_start_with_cleanup_after_first_ready_worker_failure_does_not_precreate_later_session(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)
             store.create_run("demo", directory=directory, server_url="http://opencode.example")

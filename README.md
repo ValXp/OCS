@@ -3,7 +3,7 @@
 > [!WARNING]
 > This project is 100% vibe-coded. Review the code, tests, and behavior before relying on it.
 
-OCS is an agent-friendly OpenCode session orchestration CLI. It gives scripts, operators, and agents stable commands for probing an OpenCode server, managing sessions, admitting steering input, executing blocking prompts, watching progress, resolving blockers, validating server behavior, and tracking local multi-worker runs.
+OCS is an agent-friendly OpenCode session orchestration CLI. It gives scripts, operators, and agents stable commands for probing an OpenCode server, managing sessions, admitting steering input, executing blocking prompts, watching progress, resolving blockers, validating server behavior, and tracking local dependency-ordered serial worker runs.
 
 The CLI requires Python 3.9+ and uses only the Python standard library. Run it from this checkout with `bin/ocs`, or install the package entry point `ocs`.
 
@@ -32,7 +32,7 @@ health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/pro
 - Blocking prompt execution with `run_blocking`, using `/session/{sessionID}/message` or legacy run/reply fallback.
 - Event watching with normalized compact output or JSON lines.
 - Permission and question blocker listing and resolution.
-- Local `run` orchestration with persisted workers, dependencies, retries, timeouts, blockers, outputs, steering, and aborts.
+- Local `run` orchestration with dependency-ordered serial worker execution, persisted workers, dependencies, retries, timeouts, blockers, outputs, steering, and aborts.
 - Deterministic smoke validation, opt-in live-provider validation, and disposable session cleanup.
 
 ## Command Map
@@ -58,7 +58,7 @@ The finalized short status terms are `queued`, `active`, `blocked`, `done`, `fai
 - [Server Compatibility](docs/ocs/server-compatibility.md): route detection and fallback behavior.
 - [Sessions](docs/ocs/sessions.md): session inventory and lifecycle operations.
 - [Prompt Control](docs/ocs/prompt-control.md): `steer`, `run_blocking`, and `watch`.
-- [Orchestration](docs/ocs/orchestration.md): local run store, workers, dependencies, retries, and timeouts.
+- [Orchestration](docs/ocs/orchestration.md): local run store, dependency-ordered serial worker execution, retries, and timeouts.
 - [Blockers](docs/ocs/blockers.md): permission and question workflows.
 - [Validation](docs/ocs/validation.md): smoke, live validation, cleanup, and E2E guidance.
 - [Outputs And Exit Codes](docs/ocs/outputs-and-exit-codes.md): compact output, JSON contracts, statuses, and exit codes.

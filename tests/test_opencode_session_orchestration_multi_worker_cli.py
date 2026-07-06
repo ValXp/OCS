@@ -21,8 +21,8 @@ class CliScenarioResult:
     directory: str
 
 
-class MultiWorkerOrchestrationCliTest(unittest.TestCase):
-    def run_multi_worker_scenario(self, workers, *, server_config=None, start_args=()):
+class DependencyOrderedSerialOrchestrationCliTest(unittest.TestCase):
+    def run_dependency_ordered_serial_scenario(self, workers, *, server_config=None, start_args=()):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:
                 configure_multi_worker_server(server, **(server_config or {}))
@@ -79,8 +79,8 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
     def assert_cli_success(self, result, description):
         self.assertEqual(result.returncode, 0, f"{description} failed\n{format_completed_process(result)}")
 
-    def test_start_executes_each_ready_worker_through_blocking_executor(self):
-        scenario = self.run_multi_worker_scenario(
+    def test_start_executes_independent_ready_workers_as_serial_steps_through_blocking_executor(self):
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {
                     "id": "planner",
@@ -134,7 +134,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["docs"]["result"]["text"], "Docs ready.")
 
     def test_start_with_cleanup_deletes_created_worker_sessions_and_records_cleanup(self):
-        scenario = self.run_multi_worker_scenario(
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {"id": "planner", "role": "plan", "prompt": "Create the implementation plan"},
                 {"id": "docs", "role": "write", "prompt": "Draft the release notes"},
@@ -153,7 +153,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payloads_for(scenario.requests, "DELETE", "/api/session/ses_plan"), [None])
 
     def test_start_with_cleanup_does_not_delete_preexisting_worker_sessions(self):
-        scenario = self.run_multi_worker_scenario(
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {
                     "id": "metadata",
@@ -196,7 +196,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertFalse(any(method == "DELETE" for method, _path, _payload in scenario.requests))
 
     def test_start_blocks_dependent_worker_when_prerequisite_fails(self):
-        scenario = self.run_multi_worker_scenario(
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {"id": "build", "role": "build", "prompt": "Run the implementation"},
                 {
@@ -237,7 +237,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency:build"])
 
     def test_start_persists_dependency_blocking_when_prerequisite_is_already_failed(self):
-        scenario = self.run_multi_worker_scenario(
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {"id": "build", "role": "build", "prompt": "Run the implementation", "fail_before_start": True},
                 {
@@ -260,7 +260,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_blocks_workers_in_dependency_cycle(self):
-        scenario = self.run_multi_worker_scenario(
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {"id": "a", "role": "build", "prompt": "Run worker A", "depends_on": ["b"]},
                 {"id": "b", "role": "review", "prompt": "Run worker B", "depends_on": ["a"]},
@@ -280,7 +280,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["b"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_blocks_prompted_worker_waiting_on_unprompted_worker(self):
-        scenario = self.run_multi_worker_scenario(
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {"id": "setup", "role": "build"},
                 {
@@ -304,7 +304,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_returns_partial_failure_exit_code_when_some_workers_complete_before_failure(self):
-        scenario = self.run_multi_worker_scenario(
+        scenario = self.run_dependency_ordered_serial_scenario(
             [
                 {"id": "docs", "role": "write", "prompt": "Draft the release notes"},
                 {"id": "planner", "role": "plan", "prompt": "Create the implementation plan"},

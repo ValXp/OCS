@@ -2,6 +2,8 @@
 
 The `run` command manages local orchestration records. The OpenCode server still owns sessions and messages; OCS stores local worker metadata, dependency state, retry policy, timeout policy, blockers, outputs, and collected results.
 
+Prompted workers execute in dependency-ordered serial steps. A single `run start` selects at most one ready worker, executes it, persists the result, and replans; independent ready workers do not run in parallel.
+
 ## Store Location
 
 ```bash
@@ -34,7 +36,9 @@ bin/ocs run start demo
 bin/ocs run start demo --worker builder --prompt "Run tests" --session ses_existing
 ```
 
-Without `--prompt`, `run start` executes stored prompted workers in dependency order. With `--prompt`, it starts or updates one worker and executes that prompt.
+Without `--prompt`, `run start` executes stored prompted workers one at a time in dependency order. With `--prompt`, it starts or updates one worker and executes that prompt.
+
+Serial execution is intentional product behavior. `--execution-policy continue` keeps moving to the next dependency-eligible worker after a failure, but it still runs one selected worker at a time and does not enable parallel worker execution.
 
 Worker execution uses the same blocking execution strategy as `run_blocking`. Results store message IDs, status, terminal state, API path, fallback metadata, cost, tokens, and assistant text.
 

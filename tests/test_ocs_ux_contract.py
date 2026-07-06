@@ -42,6 +42,14 @@ class OcsUxContractTest(unittest.TestCase):
         self.assertNotIn("execute", result.stdout.lower())
         self.assertNotIn("complete", result.stdout.lower())
 
+    def test_run_start_help_documents_dependency_ordered_serial_execution(self):
+        result = self.run_cli("run", "start", "--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("dependency-ordered serial execution", result.stdout)
+        self.assertIn("plan one ready worker", " ".join(result.stdout.split()))
+
     def test_live_validate_help_explains_gate_tokens_and_cleanup(self):
         result = self.run_cli("live_validate", "--help")
 
@@ -60,6 +68,7 @@ class OcsUxContractTest(unittest.TestCase):
         self.assertIn("run_blocking", readme)
         self.assertIn("steer", readme)
         self.assertIn("Live-provider validation is separate and opt-in", readme)
+        self.assertIn("dependency-ordered serial worker execution", readme)
         self.assertIn("queued`, `active`, `blocked`, `done`, `failed`, `aborted`, and `timeout`", readme)
         self.assertIn("`124`: run timed out", readme)
         self.assertIn("`130`: run was aborted", readme)

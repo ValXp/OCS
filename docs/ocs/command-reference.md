@@ -49,13 +49,15 @@ All run commands accept `run --store PATH ...`. If omitted, the store is `OCS_RU
 
 - `run init NAME [--directory PATH] [--server URL]`: create a local run record.
 - `run worker NAME WORKER_ID --role ROLE [options]`: add or update worker metadata.
-- `run start NAME [--prompt TEXT] [--worker ID] [--role ROLE] [--directory PATH] [--server URL] [--session ID] [--agent NAME] [--model NAME] [--cleanup]`: start a single prompt or stored worker prompts.
+- `run start NAME [--prompt TEXT] [--worker ID] [--role ROLE] [--directory PATH] [--server URL] [--session ID] [--agent NAME] [--model NAME] [--execution-policy fail-fast|continue] [--cleanup]`: start one prompt or stored worker prompts with dependency-ordered serial execution.
 - `run status NAME [--json]`: show persisted run state.
 - `run collect NAME [--worker ID] [--json]`: print collected worker results.
 - `run steer NAME WORKER_ID TEXT [--delivery steer|queue] [--message-id ID] [--json]`: admit input to a worker session and record the prompt ID.
 - `run abort NAME WORKER_ID [--json]`: abort a worker session and mark the worker aborted when accepted.
 
 Worker metadata options include `--session`, `--agent`, `--model`, `--prompt`, `--depends-on`, `--prompt-id`, `--status active|blocked`, `--retry-count`, `--retry-limit`, `--retryable`, `--timeout-seconds`, `--timeout-policy`, `--blocker`, and `--output-ref`. `--status blocked` requires at least one `--blocker`; terminal states are owned by `run start`, `run abort`, and result/failure/timeout reducers.
+
+Stored prompted workers are intentionally serial: `run start` plans one ready worker, executes it, persists state, and then plans the next step. `--execution-policy continue` changes failure handling only; it does not run independent workers in parallel.
 
 ## Blocker Commands
 
