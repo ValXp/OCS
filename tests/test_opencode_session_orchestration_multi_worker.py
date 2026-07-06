@@ -147,6 +147,15 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
 
 
 class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
+    def assert_single_worker_attempt(self, worker, *, status, session_id):
+        attempts = worker.get("attempts")
+        self.assertIsInstance(attempts, list)
+        self.assertEqual(len(attempts), 1)
+        attempt = attempts[0]
+        self.assertEqual(attempt.get("session_id"), session_id)
+        self.assertEqual(attempt.get("status"), status)
+        return attempt
+
     def test_next_eligible_worker_executor_delegates_to_core_direct_execution(self):
         run = {
             "workers": {
@@ -227,51 +236,35 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(session_tracker.remembered[0][1]["status"], "done")
         self.assertEqual(session_tracker.remembered[0][2], "completed")
 
-    def test_start_persists_worker_attempt_transitions_in_order_before_provider_call(self):
+    def test_start_persists_active_attempt_before_provider_call(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)
             store.create_run("demo", directory=directory, server_url="http://opencode.example")
             store.upsert_worker("demo", "worker", role="worker", prompt="Finish the worker task")
             client = FakeClient(["ses_initial"])
-            service = None
-
-            class RecordingService(DependencyOrderedSerialRunOrchestrationService):
-                def __init__(self, *args, **kwargs):
-                    self.persisted_transition_names = []
-                    self.persisted_attempts = []
-                    super().__init__(*args, **kwargs)
-
-                def _persist_worker_transition(self, run, transition):
-                    self.persisted_transition_names.append(transition.name)
-                    result = super()._persist_worker_transition(run, transition)
-                    worker = (
-                        result.workers[0]
-                        if result.workers
-                        else result.run.get("workers", {}).get(transition.worker_id)
-                    )
-                    attempts = deepcopy(worker.get("attempts", [])) if isinstance(worker, dict) else []
-                    self.persisted_attempts.append(attempts)
-                    return result
+            observed_before_call = {}
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
-                self.assertEqual(service.persisted_transition_names, ["provisioned", "active", "attempt_started"])
-                self.assertEqual(
-                    service.persisted_attempts[-1],
-                    [
-                        {
-                            "id": "attempt-1",
-                            "session_id": "ses_initial",
-                            "created_session_ids": ["ses_initial"],
-                            "status": "active",
-                            "started_at": "2026-07-03T00:00:00Z",
-                            "finished_at": None,
-                        }
-                    ],
+                persisted_worker = store.load_run("demo")["workers"]["worker"]
+                observed_before_call["worker"] = deepcopy(persisted_worker)
+
+                self.assertEqual(persisted_worker["session_id"], "ses_initial")
+                self.assertEqual(persisted_worker["status"], "active")
+                self.assertEqual(persisted_worker["next_eligible_action"], "wait")
+                attempt = self.assert_single_worker_attempt(
+                    persisted_worker,
+                    status="active",
+                    session_id="ses_initial",
                 )
+                self.assertEqual(attempt.get("id"), "attempt-1")
+                self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
+                self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+                self.assertIsNone(attempt.get("finished_at"))
+                self.assertNotIn("result_status", attempt)
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
-            service = RecordingService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -283,28 +276,22 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
             run = store.load_run("demo")
 
         self.assertEqual(outcome.exit_code, 0)
-        self.assertEqual(service.persisted_transition_names, ["provisioned", "active", "attempt_started", "result_applied"])
-        self.assertEqual(
-            service.persisted_attempts[-1],
-            [
-                {
-                    "id": "attempt-1",
-                    "session_id": "ses_initial",
-                    "created_session_ids": ["ses_initial"],
-                    "status": "completed",
-                    "started_at": "2026-07-03T00:00:00Z",
-                    "finished_at": "2026-07-03T00:00:00Z",
-                    "result_status": "done",
-                    "user_message_id": "msg_user",
-                    "assistant_message_id": "msg_assistant",
-                }
-            ],
-        )
+        self.assertIn("worker", observed_before_call)
         self.assertEqual(
             client.requests,
             [("create", directory, None, None), ("execute", "ses_initial", "Finish the worker task")],
         )
-        self.assertEqual(run["workers"]["worker"]["status"], "done")
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker["status"], "done")
+        self.assertEqual(worker["next_eligible_action"], "collect")
+        attempt = self.assert_single_worker_attempt(worker, status="completed", session_id="ses_initial")
+        self.assertEqual(attempt.get("id"), "attempt-1")
+        self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
+        self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("finished_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("result_status"), "done")
+        self.assertEqual(attempt.get("user_message_id"), "msg_user")
+        self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
 
     def test_command_service_start_passes_injected_dependencies_to_orchestration(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:

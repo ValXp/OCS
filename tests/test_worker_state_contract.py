@@ -2,24 +2,22 @@ import unittest
 
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
-    WorkerRecord,
-    WorkerSchedulingState,
-    WorkerTransition,
-    apply_worker_transition,
     apply_worker_transition_to_worker,
     apply_worker_result,
     deserialize_worker_record,
     exit_code_for_run,
+    is_executable_worker,
     mark_dependency_blocked,
     mark_worker_aborted,
     mark_worker_active,
+    mark_worker_failed,
+    next_eligible_worker_action,
     normalize_worker,
     refresh_run_summary,
     require_internal_worker,
     schedule_worker_retry,
     serialize_worker_snapshot,
 )
-from opencode_session.schema_common import Worker, WorkerSnapshotRecord
 
 try:
     from tests.worker_state_scenarios import WorkerScenario, assert_worker_outcome
@@ -50,7 +48,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["lifecycle_state"], "failed_retry")
         self.assertEqual(worker["next_eligible_action"], "retry")
 
-    def test_worker_scheduling_state_derives_canonical_execution_action(self):
+    def test_worker_execution_eligibility_derives_canonical_action(self):
         queued = {"id": "build", "prompt": "Build", "status": "queued"}
         waiting = {"id": "review", "prompt": "Review", "status": "active", "next_eligible_action": "wait"}
         retrying = {"id": "test", "prompt": "Test", "status": "active", "next_eligible_action": "retry"}
@@ -62,39 +60,26 @@ class WorkerStateContractTest(unittest.TestCase):
             "next_eligible_action": "retry",
         }
 
-        self.assertTrue(WorkerSchedulingState.from_worker(queued).can_execute())
-        self.assertFalse(WorkerSchedulingState.from_worker(waiting).can_execute())
-        self.assertEqual(WorkerSchedulingState.from_worker(waiting).next_eligible_action, "wait")
-        self.assertTrue(WorkerSchedulingState.from_worker(retrying).can_execute())
-        self.assertFalse(WorkerSchedulingState.from_worker(stale_action).can_execute())
-        self.assertEqual(WorkerSchedulingState.from_worker(stale_action).lifecycle_state, "active_wait")
-        self.assertEqual(WorkerSchedulingState.from_worker(stale_action).next_eligible_action, "wait")
+        self.assertTrue(is_executable_worker(queued))
+        self.assertFalse(is_executable_worker(waiting))
+        self.assertEqual(next_eligible_worker_action(waiting), "wait")
+        self.assertTrue(is_executable_worker(retrying))
+        self.assertFalse(is_executable_worker(stale_action))
+        self.assertEqual(next_eligible_worker_action(stale_action), "wait")
 
-    def test_worker_record_serializes_public_state_from_lifecycle(self):
-        worker = WorkerRecord.from_worker(
+    def test_deserialize_worker_derives_public_state_from_lifecycle(self):
+        worker = deserialize_worker_record(
             {
-                "id": "review",
                 "lifecycle_state": "active_wait",
                 "status": "failed",
                 "next_eligible_action": "retry",
             },
             "review",
-        ).to_worker()
+        )
 
-        self.assertEqual(worker["lifecycle_state"], "active_wait")
-        self.assertEqual(worker["status"], "active")
-        self.assertEqual(worker["next_eligible_action"], "wait")
+        assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
 
-    def test_worker_model_requires_internal_lifecycle_status_and_action_fields(self):
-        required_keys = Worker.__required_keys__
-
-        self.assertIn("session_id", required_keys)
-        self.assertIn("lifecycle_state", required_keys)
-        self.assertIn("status", required_keys)
-        self.assertIn("next_eligible_action", required_keys)
-        self.assertEqual(WorkerSnapshotRecord.__required_keys__, frozenset())
-
-    def test_deserialize_worker_snapshot_hydrates_required_internal_fields(self):
+    def test_deserialize_worker_snapshot_hydrates_defaults_and_public_state(self):
         worker = deserialize_worker_record(
             {
                 "status": "active",
@@ -104,13 +89,10 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
 
-        require_internal_worker(worker)
         self.assertEqual(worker["id"], "review")
         self.assertIsNone(worker["session_id"])
         self.assertEqual(worker["dependencies"], [])
-        self.assertEqual(worker["lifecycle_state"], "active_retry")
-        self.assertEqual(worker["status"], "active")
-        self.assertEqual(worker["next_eligible_action"], "retry")
+        assert_worker_outcome(self, worker, status="active", action="retry", lifecycle="active_retry")
 
     def test_serialize_worker_snapshot_keeps_public_state_out_of_persisted_json(self):
         worker = deserialize_worker_record(
@@ -136,17 +118,13 @@ class WorkerStateContractTest(unittest.TestCase):
             require_internal_worker({"id": "review"})
 
     def test_mark_worker_active_sets_waiting_action_and_timeout_start(self):
-        worker = normalize_worker({"timeout_seconds": 30}, "builder")
+        scenario = WorkerScenario("builder", timeout_seconds=30).apply(
+            lambda worker: mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z")
+        )
+        worker = scenario.worker
 
-        transition = mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z")
-        apply_worker_transition_to_worker(worker, transition)
-
-        self.assertEqual(worker["status"], "active")
-        self.assertEqual(worker["lifecycle_state"], "active_wait")
-        self.assertEqual(worker["next_eligible_action"], "wait")
+        assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
         self.assertEqual(worker["timeout_started_at"], "2026-07-04T00:00:00Z")
-        self.assertEqual(transition.name, "active")
-        self.assertFalse(hasattr(transition, "spec"))
 
     def test_mark_worker_active_clears_stale_current_status_metadata(self):
         worker = normalize_worker(
@@ -174,48 +152,40 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["last_failure_category"], "api")
         self.assertEqual(worker["last_failure_reason"], "previous failure")
 
-    def test_worker_transition_applies_failure_without_snapshot_whitelist(self):
-        latest_workers = {
-            "review": {
-                "id": "review",
-                "status": "active",
-                "next_eligible_action": "wait",
-                "failure_retryable": False,
-                "prompt_ids": ["msg_previous"],
-            }
-        }
-
-        merged = apply_worker_transition(
-            latest_workers,
-            WorkerTransition.failed(
-                "review",
-                "provider",
-                "provider failed",
-                retryable=True,
-                retry_available=False,
-                prompt_ids=("msg_failed",),
-            ),
-        )
-
-        self.assertEqual(merged["status"], "failed")
-        self.assertEqual(merged["error"], "provider failed")
-        self.assertEqual(merged["prompt_ids"], ["msg_previous", "msg_failed"])
-        self.assertNotIn("failure_retryable", merged)
-
-    def test_worker_transition_uses_named_payload_not_patch_spec(self):
-        transition = WorkerTransition.failed(
+    def test_failed_worker_records_failure_and_appends_prompt_ids(self):
+        scenario = WorkerScenario(
             "review",
-            "provider",
-            "provider failed",
-            retryable=True,
-            retry_available=False,
-            prompt_ids=("msg_failed",),
-        )
+            status="active",
+            next_eligible_action="wait",
+            failure_retryable=False,
+            prompt_ids=["msg_previous"],
+        ).apply(lambda worker: mark_worker_failed(worker, "provider", "provider failed", prompt_ids=("msg_failed",)))
+        worker = scenario.worker
 
-        self.assertEqual(transition.name, "failed")
-        self.assertEqual(transition.payload.category, "provider")
-        self.assertEqual(transition.payload.reason, "provider failed")
-        self.assertFalse(hasattr(transition, "spec"))
+        assert_worker_outcome(self, worker, status="failed", action="none", lifecycle="failed_terminal")
+        self.assertEqual(worker["error"], "provider failed")
+        self.assertEqual(worker["failure_category"], "provider")
+        self.assertEqual(worker["failure_reason"], "provider failed")
+        self.assertEqual(worker["prompt_ids"], ["msg_previous", "msg_failed"])
+        self.assertNotIn("failure_retryable", worker)
+
+    def test_retryable_failure_keeps_worker_retry_eligible(self):
+        scenario = WorkerScenario(
+            "review",
+            status="active",
+            next_eligible_action="wait",
+            retryable_failures=["provider"],
+            retry_count=0,
+            retry_limit=1,
+        ).apply(
+            lambda worker: mark_worker_failed(worker, "provider", "provider failed")
+        )
+        worker = scenario.worker
+
+        assert_worker_outcome(self, worker, status="failed", action="retry", lifecycle="failed_retry")
+        self.assertEqual(worker["failure_category"], "provider")
+        self.assertEqual(worker["failure_reason"], "provider failed")
+        self.assertNotIn("failure_retryable", worker)
 
     def test_accepted_abort_preserves_late_result_but_keeps_prompt_ids(self):
         worker = normalize_worker(

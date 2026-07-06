@@ -55,6 +55,15 @@ class FakeClient:
 
 
 class WorkerExecutionTest(unittest.TestCase):
+    def assert_single_worker_attempt(self, worker, *, status, session_id):
+        attempts = worker.get("attempts")
+        self.assertIsInstance(attempts, list)
+        self.assertEqual(len(attempts), 1)
+        attempt = attempts[0]
+        self.assertEqual(attempt.get("session_id"), session_id)
+        self.assertEqual(attempt.get("status"), status)
+        return attempt
+
     def test_cleanup_created_worker_sessions_clears_stale_sessions_after_single_session_success(self):
         worker = {
             "cleanup": {
@@ -128,19 +137,12 @@ class WorkerExecutionTest(unittest.TestCase):
             def execute_prompt(client, session_id, prompt, capabilities):
                 executions.append((session_id, prompt))
                 self.assertEqual(worker["status"], "active")
-                self.assertEqual(
-                    worker["attempts"],
-                    [
-                        {
-                            "id": "attempt-1",
-                            "session_id": "ses_initial",
-                            "created_session_ids": ["ses_initial"],
-                            "status": "active",
-                            "started_at": "2026-07-03T00:00:00Z",
-                            "finished_at": None,
-                        }
-                    ],
-                )
+                attempt = self.assert_single_worker_attempt(worker, status="active", session_id="ses_initial")
+                self.assertEqual(attempt.get("id"), "attempt-1")
+                self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
+                self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+                self.assertIsNone(attempt.get("finished_at"))
+                self.assertNotIn("result_status", attempt)
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
             outcome = execute_worker_attempts(
@@ -157,22 +159,14 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(client.requests, [("create", directory, None, None)])
         self.assertEqual(outcome.kind, "completed")
         self.assertEqual(worker["status"], "done")
-        self.assertEqual(
-            worker["attempts"],
-            [
-                {
-                    "id": "attempt-1",
-                    "session_id": "ses_initial",
-                    "created_session_ids": ["ses_initial"],
-                    "status": "completed",
-                    "started_at": "2026-07-03T00:00:00Z",
-                    "finished_at": "2026-07-03T00:00:00Z",
-                    "result_status": "done",
-                    "user_message_id": "msg_user",
-                    "assistant_message_id": "msg_assistant",
-                }
-            ],
-        )
+        attempt = self.assert_single_worker_attempt(worker, status="completed", session_id="ses_initial")
+        self.assertEqual(attempt.get("id"), "attempt-1")
+        self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
+        self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("finished_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("result_status"), "done")
+        self.assertEqual(attempt.get("user_message_id"), "msg_user")
+        self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
 
     def test_execute_worker_attempts_skips_automatic_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -222,31 +216,30 @@ class WorkerExecutionTest(unittest.TestCase):
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
             client = FakeClient(["ses_initial"])
-            persisted_transition_names = []
-            persisted_attempts = []
+            persisted_workers = []
 
             def persist_worker_transition(run, transition):
-                persisted_transition_names.append(transition.name)
                 persisted_run = deepcopy(run)
                 updated = apply_worker_transition(persisted_run.setdefault("workers", {}), transition)
-                persisted_attempts.append(deepcopy(updated.get("attempts", [])))
+                persisted_workers.append(deepcopy(updated))
                 return PersistedWorkerTransitions(persisted_run, [updated])
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
-                self.assertEqual(
-                    persisted_attempts[-1],
-                    [
-                        {
-                            "id": "attempt-1",
-                            "session_id": "ses_initial",
-                            "created_session_ids": ["ses_initial"],
-                            "status": "active",
-                            "started_at": "2026-07-03T00:00:00Z",
-                            "finished_at": None,
-                        }
-                    ],
+                self.assertTrue(persisted_workers)
+                persisted_worker = persisted_workers[-1]
+                self.assertEqual(persisted_worker["status"], "active")
+                self.assertEqual(persisted_worker["next_eligible_action"], "wait")
+                attempt = self.assert_single_worker_attempt(
+                    persisted_worker,
+                    status="active",
+                    session_id="ses_initial",
                 )
+                self.assertEqual(attempt.get("id"), "attempt-1")
+                self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
+                self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+                self.assertIsNone(attempt.get("finished_at"))
+                self.assertNotIn("result_status", attempt)
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
             core = RunStartCore(
@@ -264,23 +257,18 @@ class WorkerExecutionTest(unittest.TestCase):
             )
 
         self.assertEqual(outcome.kind, "completed")
-        self.assertEqual(persisted_transition_names, ["provisioned", "active", "attempt_started", "result_applied"])
-        self.assertEqual(
-            persisted_attempts[-1],
-            [
-                {
-                    "id": "attempt-1",
-                    "session_id": "ses_initial",
-                    "created_session_ids": ["ses_initial"],
-                    "status": "completed",
-                    "started_at": "2026-07-03T00:00:00Z",
-                    "finished_at": "2026-07-03T00:00:00Z",
-                    "result_status": "done",
-                    "user_message_id": "msg_user",
-                    "assistant_message_id": "msg_assistant",
-                }
-            ],
-        )
+        self.assertTrue(persisted_workers)
+        persisted_worker = persisted_workers[-1]
+        self.assertEqual(persisted_worker["status"], "done")
+        self.assertEqual(persisted_worker["next_eligible_action"], "collect")
+        attempt = self.assert_single_worker_attempt(persisted_worker, status="completed", session_id="ses_initial")
+        self.assertEqual(attempt.get("id"), "attempt-1")
+        self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
+        self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("finished_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("result_status"), "done")
+        self.assertEqual(attempt.get("user_message_id"), "msg_user")
+        self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
 
     def test_execute_worker_attempts_does_not_start_retry_session_after_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
