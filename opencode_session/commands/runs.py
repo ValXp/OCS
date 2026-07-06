@@ -14,14 +14,8 @@ from opencode_session.run_store import RunStore, RunStoreError, default_store_ro
 from opencode_session.session_lifecycle import format_abort_compact
 from opencode_session.status import short_status
 from opencode_session.worker_state import (
-    WORKER_LIFECYCLE_ABORTED,
-    WORKER_LIFECYCLE_ACTIVE_WAIT,
-    WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
-    WORKER_LIFECYCLE_DONE_COLLECT,
-    WORKER_LIFECYCLE_FAILED_TERMINAL,
-    WORKER_LIFECYCLE_QUEUED,
     WORKER_LIFECYCLE_STATES,
-    WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+    worker_lifecycle_state_for_status_alias,
 )
 
 def add_run_parser(subparsers, *, add_server_argument, positive_float, handler):
@@ -277,7 +271,7 @@ def _lifecycle_state_from_status_alias(status):
     if status is None:
         return None
     public_status = short_status(status)
-    lifecycle_state = _LIFECYCLE_STATE_BY_STATUS_ALIAS.get(public_status)
+    lifecycle_state = worker_lifecycle_state_for_status_alias(public_status)
     if lifecycle_state is None:
         raise RunStoreError(f"unsupported worker status: {status}")
     return lifecycle_state
@@ -295,15 +289,4 @@ _RUN_HANDLERS = {
     "worker": _upsert_run_worker,
     "steer": _steer_run_worker,
     "abort": _abort_run_worker,
-}
-
-
-_LIFECYCLE_STATE_BY_STATUS_ALIAS = {
-    "queued": WORKER_LIFECYCLE_QUEUED,
-    "active": WORKER_LIFECYCLE_ACTIVE_WAIT,
-    "blocked": WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
-    "done": WORKER_LIFECYCLE_DONE_COLLECT,
-    "failed": WORKER_LIFECYCLE_FAILED_TERMINAL,
-    "aborted": WORKER_LIFECYCLE_ABORTED,
-    "timeout": WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
 }

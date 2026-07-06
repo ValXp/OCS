@@ -3,8 +3,17 @@ import unittest
 from types import SimpleNamespace
 
 from opencode_session.worker_state import (
+    EXECUTABLE_WORKER_ACTIONS,
     EX_UNAVAILABLE,
+    FAILED_DEPENDENCY_STATUSES,
+    PUBLIC_WORKER_STATE_BY_LIFECYCLE,
+    TERMINAL_WORKER_STATUSES,
     UNSET_TRANSITION_FIELD,
+    WORKER_EXIT_CODE_BY_STATUS,
+    WORKER_LIFECYCLE_METADATA,
+    WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS,
+    WORKER_LIFECYCLE_STATES,
+    WORKER_STATUS_PRIORITY_BY_STATUS,
     WorkerTransition,
     WorkerTransitionName,
     apply_worker_transition_to_worker,
@@ -23,7 +32,10 @@ from opencode_session.worker_state import (
     require_internal_worker,
     schedule_worker_retry,
     serialize_worker_snapshot,
+    worker_lifecycle_source_states,
     worker_lifecycle_state,
+    worker_lifecycle_state_for_status_alias,
+    worker_lifecycle_target_states,
 )
 
 try:
@@ -33,6 +45,67 @@ except ModuleNotFoundError:
 
 
 class WorkerStateContractTest(unittest.TestCase):
+    def test_lifecycle_metadata_derives_public_status_policy_and_flags(self):
+        self.assertEqual(WORKER_LIFECYCLE_STATES, frozenset(WORKER_LIFECYCLE_METADATA))
+        self.assertEqual(
+            PUBLIC_WORKER_STATE_BY_LIFECYCLE,
+            {
+                lifecycle_state: (metadata.status, metadata.next_eligible_action)
+                for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
+            },
+        )
+        self.assertEqual(
+            TERMINAL_WORKER_STATUSES,
+            frozenset(metadata.status for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.terminal_status),
+        )
+        self.assertEqual(
+            FAILED_DEPENDENCY_STATUSES,
+            frozenset(
+                metadata.status for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.failed_dependency_status
+            ),
+        )
+        self.assertEqual(
+            EXECUTABLE_WORKER_ACTIONS,
+            frozenset(
+                metadata.next_eligible_action for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.executable
+            ),
+        )
+        self.assertEqual(
+            WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS,
+            {
+                metadata.status: lifecycle_state
+                for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
+                if metadata.status_alias
+            },
+        )
+        self.assertEqual(WORKER_STATUS_PRIORITY_BY_STATUS, _metadata_by_status("status_priority"))
+        self.assertEqual(WORKER_EXIT_CODE_BY_STATUS, _metadata_by_status("exit_code", skip_none=True))
+
+    def test_lifecycle_metadata_feeds_cli_status_policy_and_reducer_legality(self):
+        from opencode_session.commands.runs import _lifecycle_state_from_status_alias
+        from opencode_session.status_policy import (
+            _EXIT_CODE_BY_STATUS,
+            _STATUS_PRIORITY,
+            exit_code_for_status,
+            status_priority,
+        )
+        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS
+
+        self.assertIs(_STATUS_PRIORITY, WORKER_STATUS_PRIORITY_BY_STATUS)
+        self.assertIs(_EXIT_CODE_BY_STATUS, WORKER_EXIT_CODE_BY_STATUS)
+        for status, lifecycle_state in WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS.items():
+            with self.subTest(status=status):
+                self.assertEqual(worker_lifecycle_state_for_status_alias(status), lifecycle_state)
+                self.assertEqual(_lifecycle_state_from_status_alias(status), lifecycle_state)
+                self.assertEqual(status_priority(status), WORKER_STATUS_PRIORITY_BY_STATUS[status])
+                if status in WORKER_EXIT_CODE_BY_STATUS:
+                    self.assertEqual(exit_code_for_status(status), WORKER_EXIT_CODE_BY_STATUS[status])
+
+        for transition_name, definition in _WORKER_TRANSITION_DEFINITIONS.items():
+            with self.subTest(transition=transition_name):
+                self.assertEqual(definition.source_states, worker_lifecycle_source_states(transition_name))
+                self.assertEqual(definition.target_states, worker_lifecycle_target_states(transition_name))
+
     def test_normalize_worker_applies_defaults_and_derives_next_action(self):
         worker = normalize_worker(
             {
@@ -624,6 +697,18 @@ class WorkerStateContractTest(unittest.TestCase):
 
         self.assertEqual(run["status"], "failed")
         self.assertEqual(exit_code_for_run(run), EX_UNAVAILABLE)
+
+
+def _metadata_by_status(field_name, *, skip_none=False):
+    values = {}
+    for metadata in WORKER_LIFECYCLE_METADATA.values():
+        value = getattr(metadata, field_name)
+        if skip_none and value is None:
+            continue
+        if metadata.status in values and values[metadata.status] != value:
+            raise AssertionError(f"conflicting metadata for {metadata.status}")
+        values[metadata.status] = value
+    return values
 
 
 if __name__ == "__main__":

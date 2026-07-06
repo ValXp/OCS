@@ -5,16 +5,6 @@ from typing import Optional
 
 from opencode_session.schema_common import WORKER_REQUIRED_FIELD_NAMES
 from opencode_session.status import short_status
-from opencode_session.status_policy import (
-    EX_ABORTED,
-    EX_BLOCKED,
-    EX_PARTIAL,
-    EX_TIMEOUT,
-    EX_UNAVAILABLE,
-    EX_UNSUPPORTED,
-    aggregate_run_status,
-    exit_code_for_status,
-)
 
 
 WORKER_STATUS_QUEUED = "queued"
@@ -32,6 +22,13 @@ WORKER_ACTION_RESOLVE_BLOCKER = "resolve_blocker"
 WORKER_ACTION_COLLECT = "collect"
 WORKER_ACTION_NONE = "none"
 
+EX_UNAVAILABLE = 69
+EX_UNSUPPORTED = 70
+EX_TIMEOUT = 124
+EX_PARTIAL = 1
+EX_BLOCKED = 75
+EX_ABORTED = 130
+
 WORKER_LIFECYCLE_QUEUED = "queued"
 WORKER_LIFECYCLE_ACTIVE_WAIT = "active_wait"
 WORKER_LIFECYCLE_ACTIVE_RETRY = "active_retry"
@@ -47,32 +44,293 @@ WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL = "timeout_failed_terminal"
 WORKER_LIFECYCLE_TIMEOUT_ABORTED = "timeout_aborted"
 WORKER_LIFECYCLE_ABORTED = "aborted"
 
+
+class WorkerTransitionName(str, Enum):
+    PROVISIONED = "provisioned"
+    ACTIVE = "active"
+    ATTEMPT_STARTED = "attempt_started"
+    FAILED = "failed"
+    DEPENDENCY_BLOCKED = "dependency_blocked"
+    ABORTED = "aborted"
+    RETRY_SCHEDULED = "retry_scheduled"
+    TIMED_OUT = "timed_out"
+    RESULT_APPLIED = "result_applied"
+    CLEANUP_UPDATED = "cleanup_updated"
+    SNAPSHOT_APPLIED = "snapshot_applied"
+
+    def __str__(self):
+        return self.value
+
+
+@dataclass(frozen=True)
+class WorkerLifecycleMetadata:
+    status: str
+    next_eligible_action: str
+    status_alias: bool = False
+    terminal_status: bool = False
+    failed_dependency_status: bool = False
+    executable: bool = False
+    timeout_origin: bool = False
+    status_priority: int = 0
+    exit_code: Optional[int] = None
+    source_transitions: frozenset = frozenset()
+    target_transitions: frozenset = frozenset()
+
+
+def _lifecycle_metadata(
+    status,
+    next_eligible_action,
+    *,
+    status_alias=False,
+    terminal_status=False,
+    failed_dependency_status=False,
+    executable=False,
+    timeout_origin=False,
+    status_priority=0,
+    exit_code=None,
+    source_transitions=(),
+    target_transitions=(),
+):
+    return WorkerLifecycleMetadata(
+        status,
+        next_eligible_action,
+        status_alias=status_alias,
+        terminal_status=terminal_status,
+        failed_dependency_status=failed_dependency_status,
+        executable=executable,
+        timeout_origin=timeout_origin,
+        status_priority=status_priority,
+        exit_code=exit_code,
+        source_transitions=frozenset(source_transitions),
+        target_transitions=frozenset(target_transitions),
+    )
+
+
+WORKER_LIFECYCLE_METADATA = {
+    WORKER_LIFECYCLE_QUEUED: _lifecycle_metadata(
+        WORKER_STATUS_QUEUED,
+        WORKER_ACTION_START,
+        status_alias=True,
+        executable=True,
+        status_priority=0,
+        source_transitions=(
+            WorkerTransitionName.PROVISIONED,
+            WorkerTransitionName.ACTIVE,
+            WorkerTransitionName.FAILED,
+            WorkerTransitionName.DEPENDENCY_BLOCKED,
+            WorkerTransitionName.ABORTED,
+        ),
+    ),
+    WORKER_LIFECYCLE_ACTIVE_WAIT: _lifecycle_metadata(
+        WORKER_STATUS_ACTIVE,
+        WORKER_ACTION_WAIT,
+        status_alias=True,
+        status_priority=1,
+        source_transitions=(
+            WorkerTransitionName.PROVISIONED,
+            WorkerTransitionName.ACTIVE,
+            WorkerTransitionName.ATTEMPT_STARTED,
+            WorkerTransitionName.FAILED,
+            WorkerTransitionName.DEPENDENCY_BLOCKED,
+            WorkerTransitionName.ABORTED,
+            WorkerTransitionName.RETRY_SCHEDULED,
+            WorkerTransitionName.TIMED_OUT,
+            WorkerTransitionName.RESULT_APPLIED,
+        ),
+        target_transitions=(WorkerTransitionName.ACTIVE,),
+    ),
+    WORKER_LIFECYCLE_ACTIVE_RETRY: _lifecycle_metadata(
+        WORKER_STATUS_ACTIVE,
+        WORKER_ACTION_RETRY,
+        executable=True,
+        status_priority=1,
+        source_transitions=(
+            WorkerTransitionName.PROVISIONED,
+            WorkerTransitionName.ACTIVE,
+            WorkerTransitionName.FAILED,
+            WorkerTransitionName.DEPENDENCY_BLOCKED,
+            WorkerTransitionName.ABORTED,
+        ),
+        target_transitions=(WorkerTransitionName.RETRY_SCHEDULED,),
+    ),
+    WORKER_LIFECYCLE_BLOCKED_DEPENDENCY: _lifecycle_metadata(
+        WORKER_STATUS_BLOCKED,
+        WORKER_ACTION_RESOLVE_BLOCKER,
+        status_alias=True,
+        failed_dependency_status=True,
+        status_priority=2,
+        exit_code=EX_BLOCKED,
+        source_transitions=(WorkerTransitionName.ACTIVE, WorkerTransitionName.ABORTED),
+        target_transitions=(WorkerTransitionName.DEPENDENCY_BLOCKED, WorkerTransitionName.RESULT_APPLIED),
+    ),
+    WORKER_LIFECYCLE_BLOCKED_TIMEOUT: _lifecycle_metadata(
+        WORKER_STATUS_BLOCKED,
+        WORKER_ACTION_RESOLVE_BLOCKER,
+        failed_dependency_status=True,
+        timeout_origin=True,
+        status_priority=2,
+        exit_code=EX_BLOCKED,
+        source_transitions=(WorkerTransitionName.ACTIVE, WorkerTransitionName.ABORTED),
+        target_transitions=(WorkerTransitionName.TIMED_OUT,),
+    ),
+    WORKER_LIFECYCLE_DONE_COLLECT: _lifecycle_metadata(
+        WORKER_STATUS_DONE,
+        WORKER_ACTION_COLLECT,
+        status_alias=True,
+        terminal_status=True,
+        status_priority=3,
+        exit_code=0,
+        target_transitions=(WorkerTransitionName.RESULT_APPLIED,),
+    ),
+    WORKER_LIFECYCLE_FAILED_RETRY: _lifecycle_metadata(
+        WORKER_STATUS_FAILED,
+        WORKER_ACTION_RETRY,
+        terminal_status=True,
+        failed_dependency_status=True,
+        executable=True,
+        status_priority=6,
+        exit_code=EX_UNAVAILABLE,
+        source_transitions=(
+            WorkerTransitionName.PROVISIONED,
+            WorkerTransitionName.ACTIVE,
+            WorkerTransitionName.FAILED,
+            WorkerTransitionName.ABORTED,
+            WorkerTransitionName.RETRY_SCHEDULED,
+        ),
+        target_transitions=(WorkerTransitionName.FAILED,),
+    ),
+    WORKER_LIFECYCLE_FAILED_TERMINAL: _lifecycle_metadata(
+        WORKER_STATUS_FAILED,
+        WORKER_ACTION_NONE,
+        status_alias=True,
+        terminal_status=True,
+        failed_dependency_status=True,
+        status_priority=6,
+        exit_code=EX_UNAVAILABLE,
+        target_transitions=(WorkerTransitionName.FAILED, WorkerTransitionName.RESULT_APPLIED),
+    ),
+    WORKER_LIFECYCLE_TIMEOUT_RETRY: _lifecycle_metadata(
+        WORKER_STATUS_TIMEOUT,
+        WORKER_ACTION_RETRY,
+        terminal_status=True,
+        failed_dependency_status=True,
+        executable=True,
+        timeout_origin=True,
+        status_priority=4,
+        exit_code=EX_TIMEOUT,
+        source_transitions=(
+            WorkerTransitionName.PROVISIONED,
+            WorkerTransitionName.ACTIVE,
+            WorkerTransitionName.FAILED,
+            WorkerTransitionName.ABORTED,
+            WorkerTransitionName.RETRY_SCHEDULED,
+        ),
+        target_transitions=(WorkerTransitionName.TIMED_OUT,),
+    ),
+    WORKER_LIFECYCLE_TIMEOUT_TERMINAL: _lifecycle_metadata(
+        WORKER_STATUS_TIMEOUT,
+        WORKER_ACTION_NONE,
+        status_alias=True,
+        terminal_status=True,
+        failed_dependency_status=True,
+        timeout_origin=True,
+        status_priority=4,
+        exit_code=EX_TIMEOUT,
+        target_transitions=(WorkerTransitionName.TIMED_OUT, WorkerTransitionName.RESULT_APPLIED),
+    ),
+    WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY: _lifecycle_metadata(
+        WORKER_STATUS_FAILED,
+        WORKER_ACTION_RETRY,
+        terminal_status=True,
+        failed_dependency_status=True,
+        executable=True,
+        timeout_origin=True,
+        status_priority=6,
+        exit_code=EX_UNAVAILABLE,
+        source_transitions=(
+            WorkerTransitionName.PROVISIONED,
+            WorkerTransitionName.ACTIVE,
+            WorkerTransitionName.FAILED,
+            WorkerTransitionName.ABORTED,
+            WorkerTransitionName.RETRY_SCHEDULED,
+        ),
+        target_transitions=(WorkerTransitionName.TIMED_OUT,),
+    ),
+    WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL: _lifecycle_metadata(
+        WORKER_STATUS_FAILED,
+        WORKER_ACTION_NONE,
+        terminal_status=True,
+        failed_dependency_status=True,
+        timeout_origin=True,
+        status_priority=6,
+        exit_code=EX_UNAVAILABLE,
+        target_transitions=(WorkerTransitionName.TIMED_OUT,),
+    ),
+    WORKER_LIFECYCLE_TIMEOUT_ABORTED: _lifecycle_metadata(
+        WORKER_STATUS_ABORTED,
+        WORKER_ACTION_NONE,
+        terminal_status=True,
+        failed_dependency_status=True,
+        timeout_origin=True,
+        status_priority=5,
+        exit_code=EX_ABORTED,
+        source_transitions=(WorkerTransitionName.ABORTED,),
+        target_transitions=(WorkerTransitionName.TIMED_OUT,),
+    ),
+    WORKER_LIFECYCLE_ABORTED: _lifecycle_metadata(
+        WORKER_STATUS_ABORTED,
+        WORKER_ACTION_NONE,
+        status_alias=True,
+        terminal_status=True,
+        failed_dependency_status=True,
+        status_priority=5,
+        exit_code=EX_ABORTED,
+        source_transitions=(WorkerTransitionName.ABORTED,),
+        target_transitions=(WorkerTransitionName.ABORTED, WorkerTransitionName.RESULT_APPLIED),
+    ),
+}
+
+
+def _status_aliases_by_lifecycle_metadata():
+    aliases = {}
+    for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items():
+        if not metadata.status_alias:
+            continue
+        if metadata.status in aliases:
+            raise ValueError(f"duplicate worker status alias: {metadata.status}")
+        aliases[metadata.status] = lifecycle_state
+    return aliases
+
+
+def _status_values_by_lifecycle_metadata(field_name, *, skip_none=False):
+    values = {}
+    for metadata in WORKER_LIFECYCLE_METADATA.values():
+        value = getattr(metadata, field_name)
+        if skip_none and value is None:
+            continue
+        if metadata.status in values and values[metadata.status] != value:
+            raise ValueError(f"conflicting worker status {field_name}: {metadata.status}")
+        values[metadata.status] = value
+    return values
+
 BLOCKED_WORKER_STATUS = WORKER_STATUS_BLOCKED
 TERMINAL_WORKER_STATUSES = frozenset(
-    {WORKER_STATUS_DONE, WORKER_STATUS_FAILED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT}
+    metadata.status for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.terminal_status
 )
 FAILED_DEPENDENCY_STATUSES = frozenset(
-    {WORKER_STATUS_FAILED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT, WORKER_STATUS_BLOCKED}
+    metadata.status for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.failed_dependency_status
 )
-EXECUTABLE_WORKER_ACTIONS = frozenset({WORKER_ACTION_START, WORKER_ACTION_RETRY})
-
+EXECUTABLE_WORKER_ACTIONS = frozenset(
+    metadata.next_eligible_action for metadata in WORKER_LIFECYCLE_METADATA.values() if metadata.executable
+)
 PUBLIC_WORKER_STATE_BY_LIFECYCLE = {
-    WORKER_LIFECYCLE_QUEUED: (WORKER_STATUS_QUEUED, WORKER_ACTION_START),
-    WORKER_LIFECYCLE_ACTIVE_WAIT: (WORKER_STATUS_ACTIVE, WORKER_ACTION_WAIT),
-    WORKER_LIFECYCLE_ACTIVE_RETRY: (WORKER_STATUS_ACTIVE, WORKER_ACTION_RETRY),
-    WORKER_LIFECYCLE_BLOCKED_DEPENDENCY: (WORKER_STATUS_BLOCKED, WORKER_ACTION_RESOLVE_BLOCKER),
-    WORKER_LIFECYCLE_BLOCKED_TIMEOUT: (WORKER_STATUS_BLOCKED, WORKER_ACTION_RESOLVE_BLOCKER),
-    WORKER_LIFECYCLE_DONE_COLLECT: (WORKER_STATUS_DONE, WORKER_ACTION_COLLECT),
-    WORKER_LIFECYCLE_FAILED_RETRY: (WORKER_STATUS_FAILED, WORKER_ACTION_RETRY),
-    WORKER_LIFECYCLE_FAILED_TERMINAL: (WORKER_STATUS_FAILED, WORKER_ACTION_NONE),
-    WORKER_LIFECYCLE_TIMEOUT_RETRY: (WORKER_STATUS_TIMEOUT, WORKER_ACTION_RETRY),
-    WORKER_LIFECYCLE_TIMEOUT_TERMINAL: (WORKER_STATUS_TIMEOUT, WORKER_ACTION_NONE),
-    WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY: (WORKER_STATUS_FAILED, WORKER_ACTION_RETRY),
-    WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL: (WORKER_STATUS_FAILED, WORKER_ACTION_NONE),
-    WORKER_LIFECYCLE_TIMEOUT_ABORTED: (WORKER_STATUS_ABORTED, WORKER_ACTION_NONE),
-    WORKER_LIFECYCLE_ABORTED: (WORKER_STATUS_ABORTED, WORKER_ACTION_NONE),
+    lifecycle_state: (metadata.status, metadata.next_eligible_action)
+    for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
 }
-WORKER_LIFECYCLE_STATES = frozenset(PUBLIC_WORKER_STATE_BY_LIFECYCLE)
+WORKER_LIFECYCLE_STATES = frozenset(WORKER_LIFECYCLE_METADATA)
+WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS = _status_aliases_by_lifecycle_metadata()
+WORKER_STATUS_PRIORITY_BY_STATUS = _status_values_by_lifecycle_metadata("status_priority")
+WORKER_EXIT_CODE_BY_STATUS = _status_values_by_lifecycle_metadata("exit_code", skip_none=True)
 
 WORKER_LIST_FIELDS = (
     "dependencies",
@@ -105,6 +363,42 @@ REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retr
 UNSET_TRANSITION_FIELD = object()
 
 
+def status_priority(status):
+    return WORKER_STATUS_PRIORITY_BY_STATUS.get(short_status(status), WORKER_STATUS_PRIORITY_BY_STATUS[WORKER_STATUS_QUEUED])
+
+
+def merge_status(incoming, current):
+    if not isinstance(incoming, str) or not isinstance(current, str):
+        return incoming
+    return current if status_priority(current) > status_priority(incoming) else incoming
+
+
+def status_owner(incoming_status, current_status):
+    if not isinstance(incoming_status, str) or not isinstance(current_status, str):
+        return "incoming"
+    return "current" if status_priority(current_status) > status_priority(incoming_status) else "incoming"
+
+
+def aggregate_run_status(statuses):
+    statuses = [short_status(status) for status in statuses]
+    if not statuses:
+        return None
+    if statuses == [WORKER_STATUS_DONE] or all(status == WORKER_STATUS_DONE for status in statuses):
+        return WORKER_STATUS_DONE
+    candidates = [status for status in statuses if status != WORKER_STATUS_DONE]
+    status = max(candidates, key=status_priority)
+    if status not in WORKER_STATUS_PRIORITY_BY_STATUS:
+        return WORKER_STATUS_QUEUED
+    return status
+
+
+def exit_code_for_status(status, *, partial_success=False):
+    status = short_status(status)
+    if status == WORKER_STATUS_FAILED and partial_success:
+        return EX_PARTIAL
+    return WORKER_EXIT_CODE_BY_STATUS.get(status, EX_UNAVAILABLE)
+
+
 def public_worker_state(lifecycle_state):
     return PUBLIC_WORKER_STATE_BY_LIFECYCLE.get(lifecycle_state, (None, WORKER_ACTION_NONE))
 
@@ -116,6 +410,91 @@ def public_worker_state_fields(lifecycle_state):
         "status": status,
         "next_eligible_action": action,
     }
+
+
+def worker_lifecycle_source_states(transition_name):
+    if transition_name in {WorkerTransitionName.CLEANUP_UPDATED, WorkerTransitionName.SNAPSHOT_APPLIED}:
+        return WORKER_LIFECYCLE_STATES
+    return frozenset(
+        lifecycle_state
+        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
+        if transition_name in metadata.source_transitions
+    )
+
+
+def worker_lifecycle_target_states(transition_name):
+    return frozenset(
+        lifecycle_state
+        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
+        if transition_name in metadata.target_transitions
+    )
+
+
+def worker_lifecycle_state_for_status_alias(status):
+    return WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS.get(short_status(status))
+
+
+def worker_lifecycle_state_for_public_state(status, action, *, timeout_origin=False, default=None):
+    status = short_status(status)
+    for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items():
+        if (
+            metadata.status == status
+            and metadata.next_eligible_action == action
+            and metadata.timeout_origin == timeout_origin
+        ):
+            return lifecycle_state
+    return default
+
+
+def worker_failed_lifecycle_state(*, retryable, retry_available):
+    return worker_lifecycle_state_for_public_state(
+        WORKER_STATUS_FAILED,
+        WORKER_ACTION_RETRY if retryable and retry_available else WORKER_ACTION_NONE,
+        default=WORKER_LIFECYCLE_FAILED_TERMINAL,
+    )
+
+
+def worker_timeout_lifecycle_state(status, retry_available):
+    if status == WORKER_STATUS_BLOCKED:
+        return worker_lifecycle_state_for_public_state(
+            WORKER_STATUS_BLOCKED,
+            WORKER_ACTION_RESOLVE_BLOCKER,
+            timeout_origin=True,
+            default=WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+        )
+    if status == WORKER_STATUS_FAILED:
+        return worker_lifecycle_state_for_public_state(
+            WORKER_STATUS_FAILED,
+            WORKER_ACTION_RETRY if retry_available else WORKER_ACTION_NONE,
+            timeout_origin=True,
+            default=WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL,
+        )
+    if status == WORKER_STATUS_ABORTED:
+        return worker_lifecycle_state_for_public_state(
+            WORKER_STATUS_ABORTED,
+            WORKER_ACTION_NONE,
+            timeout_origin=True,
+            default=WORKER_LIFECYCLE_TIMEOUT_ABORTED,
+        )
+    return worker_lifecycle_state_for_public_state(
+        WORKER_STATUS_TIMEOUT,
+        WORKER_ACTION_RETRY if retry_available else WORKER_ACTION_NONE,
+        timeout_origin=True,
+        default=WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+    )
+
+
+def worker_result_lifecycle_state(status):
+    status = short_status(status)
+    if status not in {
+        WORKER_STATUS_ABORTED,
+        WORKER_STATUS_BLOCKED,
+        WORKER_STATUS_DONE,
+        WORKER_STATUS_FAILED,
+        WORKER_STATUS_TIMEOUT,
+    }:
+        status = WORKER_STATUS_FAILED
+    return worker_lifecycle_state_for_status_alias(status) or WORKER_LIFECYCLE_FAILED_TERMINAL
 
 
 def worker_lifecycle_set_fields(worker_id, lifecycle_state):
@@ -202,35 +581,47 @@ def _lifecycle_state_from_legacy_public_worker_state(worker):
     worker = worker if isinstance(worker, dict) else {}
     status = short_status(worker.get("status"))
     if status == WORKER_STATUS_QUEUED:
-        return WORKER_LIFECYCLE_QUEUED
+        return worker_lifecycle_state_for_status_alias(status)
     if status == WORKER_STATUS_ACTIVE:
         if worker.get("next_eligible_action") == WORKER_ACTION_RETRY:
-            return WORKER_LIFECYCLE_ACTIVE_RETRY
-        return WORKER_LIFECYCLE_ACTIVE_WAIT
+            return worker_lifecycle_state_for_public_state(status, WORKER_ACTION_RETRY)
+        return worker_lifecycle_state_for_status_alias(status)
     if is_blocked_status(status):
-        if worker.get("failure_category") == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(
+        timeout_origin = worker.get("failure_category") == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(
             worker.get("blockers") or []
-        ):
-            return WORKER_LIFECYCLE_BLOCKED_TIMEOUT
-        return WORKER_LIFECYCLE_BLOCKED_DEPENDENCY
+        )
+        return worker_lifecycle_state_for_public_state(
+            status,
+            WORKER_ACTION_RESOLVE_BLOCKER,
+            timeout_origin=timeout_origin,
+        )
     if status == WORKER_STATUS_DONE:
-        return WORKER_LIFECYCLE_DONE_COLLECT
+        return worker_lifecycle_state_for_status_alias(status)
     if status == WORKER_STATUS_FAILED:
         if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
-            if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
-                return WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY
-            return WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL
-        if worker_retry_available(worker):
-            return WORKER_LIFECYCLE_FAILED_RETRY
-        return WORKER_LIFECYCLE_FAILED_TERMINAL
+            return worker_lifecycle_state_for_public_state(
+                status,
+                WORKER_ACTION_RETRY if worker_retry_available(worker, WORKER_STATUS_TIMEOUT) else WORKER_ACTION_NONE,
+                timeout_origin=True,
+            )
+        return worker_lifecycle_state_for_public_state(
+            status,
+            WORKER_ACTION_RETRY if worker_retry_available(worker) else WORKER_ACTION_NONE,
+        )
     if status == WORKER_STATUS_TIMEOUT:
-        if worker_retry_available(worker, WORKER_STATUS_TIMEOUT):
-            return WORKER_LIFECYCLE_TIMEOUT_RETRY
-        return WORKER_LIFECYCLE_TIMEOUT_TERMINAL
+        return worker_lifecycle_state_for_public_state(
+            status,
+            WORKER_ACTION_RETRY if worker_retry_available(worker, WORKER_STATUS_TIMEOUT) else WORKER_ACTION_NONE,
+            timeout_origin=True,
+        )
     if status == WORKER_STATUS_ABORTED:
         if worker.get("failure_category") == WORKER_STATUS_TIMEOUT:
-            return WORKER_LIFECYCLE_TIMEOUT_ABORTED
-        return WORKER_LIFECYCLE_ABORTED
+            return worker_lifecycle_state_for_public_state(
+                status,
+                WORKER_ACTION_NONE,
+                timeout_origin=True,
+            )
+        return worker_lifecycle_state_for_status_alias(status)
     return WORKER_LIFECYCLE_QUEUED
 
 
@@ -482,23 +873,6 @@ class _SnapshotAppliedTransition:
 class _AttemptFinalization:
     attempt_id: str
     fields: dict
-
-
-class WorkerTransitionName(str, Enum):
-    PROVISIONED = "provisioned"
-    ACTIVE = "active"
-    ATTEMPT_STARTED = "attempt_started"
-    FAILED = "failed"
-    DEPENDENCY_BLOCKED = "dependency_blocked"
-    ABORTED = "aborted"
-    RETRY_SCHEDULED = "retry_scheduled"
-    TIMED_OUT = "timed_out"
-    RESULT_APPLIED = "result_applied"
-    CLEANUP_UPDATED = "cleanup_updated"
-    SNAPSHOT_APPLIED = "snapshot_applied"
-
-    def __str__(self):
-        return self.value
 
 
 @dataclass(frozen=True)
