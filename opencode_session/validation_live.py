@@ -138,7 +138,7 @@ class LiveValidation:
                 "role": role,
             },
         )
-        session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
+        session_id = session_value(create_response.data, "id")
         if not session_id:
             raise LiveValidationFailure("session creation response did not include a session id")
         harness.track_session(session_id)

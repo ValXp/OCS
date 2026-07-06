@@ -1,7 +1,9 @@
 import unittest
 
+from opencode_session.blocker_formatting import format_permission_compact
+from opencode_session.blocker_inventory import blocker_session_id, collection_blockers
 from opencode_session.events import normalize_event
-from opencode_session.schema_admission_adapter import normalize_admission_record
+from opencode_session.schema_admission_adapter import admission_response_fields, normalize_admission_record
 from opencode_session.schema_common import NormalizedEventRecord, PersistedRunRecord, WorkerSnapshotRecord
 from opencode_session.schema_event_adapter import normalize_event_record
 from opencode_session.schema_message_adapter import (
@@ -166,8 +168,8 @@ class SchemaNormalizationTest(unittest.TestCase):
     def test_session_value_preserves_wrapped_record_compatibility(self):
         session = {"data": {"sessionID": "ses_wrapped", "name": "Wrapped"}}
 
-        self.assertEqual(session_value(session, "id", "sessionID", "sessionId"), "ses_wrapped")
-        self.assertEqual(session_value(session, "title", "name"), "Wrapped")
+        self.assertEqual(session_value(session, "id"), "ses_wrapped")
+        self.assertEqual(session_value(session, "title"), "Wrapped")
 
     def test_normalizes_message_evidence_aliases(self):
         payload = {
@@ -239,6 +241,65 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(event["blocker_id"], "perm_1")
         self.assertEqual(event["status"], "queued")
 
+    def test_admission_response_fields_are_canonical_at_boundary(self):
+        payload = {
+            "data": {
+                "info": {"sessionID": "ses_1", "promptID": "msg_1"},
+                "deliveryMode": "queue",
+                "status": "promoted",
+                "idempotencyStatus": "replayed",
+                "admittedSeq": 5,
+            }
+        }
+
+        self.assertEqual(
+            admission_response_fields(payload),
+            {
+                "session_id": "ses_1",
+                "message_id": "msg_1",
+                "delivery": "queue",
+                "state": "promoted",
+                "idempotency": "replayed",
+                "admitted_sequence": 5,
+                "promoted_sequence": None,
+            },
+        )
+
+    def test_blocker_collection_canonicalizes_aliases_before_callers(self):
+        raw_permission = {
+            "requestID": "per_1",
+            "sessionID": "ses_1",
+            "permission": "bash",
+            "patterns": ["git status --short"],
+            "always": ["git status *"],
+            "tool": {"messageID": "msg_1", "callID": "tool_1"},
+        }
+
+        permission = collection_blockers({"permissions": [raw_permission]}, "permissions")[0]
+
+        self.assertEqual(permission["schema_status"], "known")
+        self.assertEqual(permission["id"], "per_1")
+        self.assertEqual(permission["session_id"], "ses_1")
+        self.assertEqual(permission["tool_message_id"], "msg_1")
+        self.assertEqual(permission["tool_call_id"], "tool_1")
+        self.assertEqual(permission["tool_ref"], "msg_1/tool_1")
+
+        canonical_only_permission = {
+            "id": "per_1",
+            "session_id": "ses_1",
+            "permission": "bash",
+            "patterns": ["git status --short"],
+            "always": ["git status *"],
+            "tool_ref": "msg_1/tool_1",
+        }
+        self.assertEqual(blocker_session_id(canonical_only_permission), "ses_1")
+        self.assertEqual(
+            format_permission_compact(canonical_only_permission),
+            'id=per_1 session=ses_1 permission=bash patterns="git status --short" '
+            'always="git status *" tool=msg_1/tool_1',
+        )
+        self.assertIsNone(blocker_session_id({"sessionID": "ses_1"}))
+
     def test_known_event_route_fixtures_decode_explicit_shapes(self):
         for route_path, raw_event, expected in KNOWN_EVENT_ROUTE_FIXTURES:
             with self.subTest(route_path=route_path):
@@ -306,9 +367,10 @@ class SchemaNormalizationTest(unittest.TestCase):
                 "cost": None,
                 "tokens": None,
                 "text": "",
+                "error": "quota exceeded",
             },
         )
-        self.assertEqual(message_value(message, "error", "reason", "message"), "quota exceeded")
+        self.assertEqual(message_value(message, "error"), "quota exceeded")
 
     def test_message_route_adapters_accept_route_specific_shapes(self):
         session_message = {
@@ -347,8 +409,8 @@ class SchemaNormalizationTest(unittest.TestCase):
 
         self.assertEqual(normalized["schema_status"], "unknown")
         self.assertEqual(normalized["raw"], message)
-        self.assertIsNone(message_value(message, "id", "messageID", "messageId", route=SESSION_MESSAGE_ROUTE))
-        self.assertEqual(message_value(message, "id", "message_id"), "msg_legacy")
+        self.assertIsNone(message_value(message, "id", route=SESSION_MESSAGE_ROUTE))
+        self.assertEqual(message_value(message, "id"), "msg_legacy")
 
     def test_message_token_only_shape_is_unknown(self):
         message = {"tokenUsage": {"input": 1, "output": 2}}

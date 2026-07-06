@@ -26,13 +26,13 @@ def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
         "prefix": args.prefix,
         "directory": directory,
         "stale": len(sessions),
-        "sessions": [session_value(session, "id", "sessionID", "sessionId") for session in sessions],
+        "sessions": [session_value(session, "id") for session in sessions],
         "deleted": [],
         "verified": [],
         "errors": [],
     }
     for session in sessions:
-        session_id = session_value(session, "id", "sessionID", "sessionId")
+        session_id = session_value(session, "id")
         if not session_id:
             result["status"] = "failed"
             result["errors"].append({"session_id": None, "error": "session has no id"})
@@ -55,12 +55,12 @@ def _error_result(args, message, exit_code, print_error):
 
 
 def is_disposable_session(session, *, prefix, directory):
-    if directory is not None and session_value(session, "directory", "cwd") != directory:
+    if directory is not None and session_value(session, "directory") != directory:
         return False
     metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
     values = [
-        session_value(session, "id", "sessionID", "sessionId"),
-        session_value(session, "title", "name"),
+        session_value(session, "id"),
+        session_value(session, "title"),
         metadata.get("smoke_id"),
         metadata.get("prefix"),
         metadata.get("disposable_prefix"),

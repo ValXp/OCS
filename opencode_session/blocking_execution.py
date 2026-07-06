@@ -12,9 +12,7 @@ from opencode_session.schema_common import tokens_total
 from opencode_session.schema_message_adapter import (
     LEGACY_MESSAGE_ROUTE,
     SESSION_MESSAGE_ROUTE,
-    message_text,
-    message_tokens,
-    message_value,
+    normalize_message_record,
 )
 from opencode_session.status import short_status
 
@@ -63,13 +61,15 @@ def execute_blocking_prompt(
 
 
 def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=None):
-    raw_status = message_value(reply_message, "status", route=LEGACY_MESSAGE_ROUTE) or "completed"
+    run_record = normalize_message_record(run_message, route=LEGACY_MESSAGE_ROUTE)
+    reply_record = normalize_message_record(reply_message, route=LEGACY_MESSAGE_ROUTE)
+    raw_status = _message_raw_status(reply_record, default="completed")
     status = short_status(raw_status)
     return {
         "session_id": session_id,
         "message_ids": {
-            "user": message_value(run_message, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
-            "assistant": message_value(reply_message, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
+            "user": run_record.get("id"),
+            "assistant": reply_record.get("id"),
         },
         "status": status,
         "raw_status": raw_status,
@@ -77,9 +77,9 @@ def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=
         "api_path": api_path or {"run": LEGACY_RUN_PATH, "reply": LEGACY_REPLY_PATH},
         "execution_strategy": "legacy_run_reply",
         "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
-        "cost": message_value(reply_message, "cost", route=LEGACY_MESSAGE_ROUTE),
-        "tokens": message_tokens(reply_message, route=LEGACY_MESSAGE_ROUTE),
-        "text": message_text(reply_message, route=LEGACY_MESSAGE_ROUTE),
+        "cost": reply_record.get("cost"),
+        "tokens": reply_record.get("tokens"),
+        "text": reply_record.get("text"),
     }
 
 
@@ -113,8 +113,9 @@ def format_blocking_execution_compact(result):
 
 
 def provider_failure(message, *, route=None):
-    status = str(message_value(message, "status", route=route) or "").lower()
-    error = message_value(message, "error", "reason", "message", route=route)
+    record = normalize_message_record(message, route=route)
+    status = str(_message_raw_status(record, default="") or "").lower()
+    error = record.get("error")
     if status not in {"failed", "error", "errored"}:
         if not status and error:
             if isinstance(error, dict):
@@ -147,7 +148,7 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, t
     if error:
         raise BlockingProviderFailure(
             error,
-            prompt_id=message_value(run_response.data, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
+            prompt_id=normalize_message_record(run_response.data, route=LEGACY_MESSAGE_ROUTE).get("id"),
         )
     reply_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
@@ -157,7 +158,7 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, t
     if error:
         raise BlockingProviderFailure(
             error,
-            prompt_id=message_value(run_response.data, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
+            prompt_id=normalize_message_record(run_response.data, route=LEGACY_MESSAGE_ROUTE).get("id"),
         )
     return legacy_run_reply_result(
         session_id,
@@ -177,13 +178,14 @@ def _request_timeout(client, timeout, deadline=None):
 
 
 def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities):
-    raw_status = message_value(assistant_message, "status", route=SESSION_MESSAGE_ROUTE) or "completed"
+    assistant_record = normalize_message_record(assistant_message, route=SESSION_MESSAGE_ROUTE)
+    raw_status = _message_raw_status(assistant_record, default="completed")
     status = short_status(raw_status)
     return {
         "session_id": session_id,
         "message_ids": {
             "user": prompt_message_id,
-            "assistant": message_value(assistant_message, "id", "messageID", "messageId", route=SESSION_MESSAGE_ROUTE),
+            "assistant": assistant_record.get("id"),
         },
         "status": status,
         "raw_status": raw_status,
@@ -195,10 +197,14 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
             "strategy": "legacy_run_reply",
             "used": False,
         },
-        "cost": message_value(assistant_message, "cost", route=SESSION_MESSAGE_ROUTE),
-        "tokens": message_tokens(assistant_message, route=SESSION_MESSAGE_ROUTE),
-        "text": message_text(assistant_message, route=SESSION_MESSAGE_ROUTE),
+        "cost": assistant_record.get("cost"),
+        "tokens": assistant_record.get("tokens"),
+        "text": assistant_record.get("text"),
     }
+
+
+def _message_raw_status(message, *, default=None):
+    return message.get("raw_status") or message.get("status") or default
 
 
 def _legacy_api_path(capabilities):

@@ -3,7 +3,23 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional
 
-from opencode_session.schema_common import NormalizedEventRecord, first_present, set_if_present, string_value
+from opencode_session.schema_common import (
+    DELIVERY_ALIASES,
+    BLOCKER_ID_ALIASES,
+    EVENT_STATUS_ALIASES,
+    EVENT_CALL_ID_ALIASES,
+    MESSAGE_ID_ALIASES,
+    PERMISSION_ID_ALIASES,
+    PROMPT_ID_ALIASES,
+    QUESTION_ID_ALIASES,
+    SESSION_ID_ALIASES,
+    STEP_ID_ALIASES,
+    TOOL_NAME_ALIASES,
+    NormalizedEventRecord,
+    first_present,
+    set_if_present,
+    string_value,
+)
 from opencode_session.status import short_status
 
 
@@ -92,41 +108,27 @@ class KnownEventRouteDecoder:
 
 
 def _decoded_from_api_properties(event_type, fields):
-    tool = _tool_name(fields)
-    error = _error_text(fields.get("error")) or string_value(first_present(fields, "reason"))
-    blocker = _blocker_type(event_type, fields)
-    return DecodedEvent(
-        event_type=event_type,
-        session_id=_string_field(fields, "sessionID", "sessionId", "session_id"),
-        message_id=_string_field(fields, "messageID", "messageId", "message_id", "promptID", "promptId"),
-        status=_status_value(fields),
-        delivery=_string_field(fields, "delivery", "deliveryMode", "mode"),
-        text=_text_value(fields),
-        tool=tool,
-        call_id=_string_field(fields, "callID", "callId", "toolCallID", "toolCallId", "tool_call_id"),
-        step=_string_field(fields, "step", "stepID", "stepId", "step_id"),
-        title=_string_field(fields, "title", "description"),
-        blocker=blocker,
-        blocker_id=_blocker_id(fields) if blocker is not None else None,
-        question=_string_field(fields, "question", "prompt", "title") if blocker is not None else None,
-        error=error,
-    )
+    return _decoded_from_event_fields(event_type, fields)
 
 
 def _decoded_from_legacy_payload(event_type, fields):
+    return _decoded_from_event_fields(event_type, fields)
+
+
+def _decoded_from_event_fields(event_type, fields):
     tool = _tool_name(fields)
     error = _error_text(fields.get("error")) or string_value(first_present(fields, "reason"))
     blocker = _blocker_type(event_type, fields)
     return DecodedEvent(
         event_type=event_type,
-        session_id=_string_field(fields, "sessionID", "sessionId", "session_id"),
-        message_id=_string_field(fields, "messageID", "messageId", "message_id", "promptID", "promptId"),
+        session_id=_string_field(fields, *SESSION_ID_ALIASES),
+        message_id=_string_field(fields, *MESSAGE_ID_ALIASES, *PROMPT_ID_ALIASES),
         status=_status_value(fields),
-        delivery=_string_field(fields, "delivery", "deliveryMode", "mode"),
+        delivery=_string_field(fields, *DELIVERY_ALIASES),
         text=_text_value(fields),
         tool=tool,
-        call_id=_string_field(fields, "callID", "callId", "toolCallID", "toolCallId", "tool_call_id"),
-        step=_string_field(fields, "step", "stepID", "stepId", "step_id"),
+        call_id=_string_field(fields, *EVENT_CALL_ID_ALIASES),
+        step=_string_field(fields, "step", *STEP_ID_ALIASES),
         title=_string_field(fields, "title", "description"),
         blocker=blocker,
         blocker_id=_blocker_id(fields) if blocker is not None else None,
@@ -249,23 +251,23 @@ def _text_value(fields):
 
 
 def _status_value(fields):
-    value = _string_field(fields, "status", "state")
+    value = _string_field(fields, *EVENT_STATUS_ALIASES)
     if value is not None:
         return value
     message = fields.get("message")
     if isinstance(message, dict):
-        return _string_field(message, "status", "state")
+        return _string_field(message, *EVENT_STATUS_ALIASES)
     return None
 
 
 def _tool_name(fields):
     tool = fields.get("tool")
     if isinstance(tool, dict):
-        value = first_present(tool, "name", "tool", "toolName", "tool_name")
+        value = first_present(tool, "name", "tool", *TOOL_NAME_ALIASES)
         if value is not None:
             return str(value)
         return json.dumps(tool, sort_keys=True)
-    value = first_present(fields, "tool", "toolName", "tool_name")
+    value = first_present(fields, "tool", *TOOL_NAME_ALIASES)
     return string_value(value)
 
 
@@ -277,11 +279,11 @@ def _blocker_type(event_type, fields):
         return "question"
     if normalized_type in BLOCKER_EVENT_TYPES:
         return "blocker"
-    if first_present(fields, "permission", "permissionID", "permissionId", "permission_id") is not None:
+    if first_present(fields, "permission", *PERMISSION_ID_ALIASES) is not None:
         return "permission"
-    if first_present(fields, "questionID", "questionId", "question_id") is not None:
+    if first_present(fields, *QUESTION_ID_ALIASES) is not None:
         return "question"
-    if first_present(fields, "blocker", "blockerID", "blockerId", "blocker_id") is not None:
+    if first_present(fields, "blocker", *BLOCKER_ID_ALIASES) is not None:
         return "blocker"
     return None
 
@@ -289,15 +291,9 @@ def _blocker_type(event_type, fields):
 def _blocker_id(fields):
     return _string_field(
         fields,
-        "permissionID",
-        "permissionId",
-        "permission_id",
-        "questionID",
-        "questionId",
-        "question_id",
-        "blockerID",
-        "blockerId",
-        "blocker_id",
+        *PERMISSION_ID_ALIASES,
+        *QUESTION_ID_ALIASES,
+        *BLOCKER_ID_ALIASES,
     )
 
 

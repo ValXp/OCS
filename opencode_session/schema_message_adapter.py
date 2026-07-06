@@ -1,16 +1,27 @@
 from copy import deepcopy
 
-from opencode_session.schema_common import NormalizedMessageRecord, first_present, normalized_tokens, set_missing
+from opencode_session.schema_common import (
+    API_TOKEN_ALIASES,
+    CAMEL_MESSAGE_ID_ALIASES,
+    EVENT_STATUS_ALIASES,
+    MESSAGE_ID_ALIASES,
+    STATUS_ALIASES,
+    TOKEN_ALIASES,
+    NormalizedMessageRecord,
+    normalized_tokens,
+    root_or_info_value,
+    set_missing,
+)
 from opencode_session.status import short_status
 
 
 MESSAGE_CANONICAL_FIELDS = ("id", "role", "status", "raw_status", "cost", "tokens", "text")
 MESSAGE_VALUE_ALIASES = (
-    ("id", ("id", "messageID", "messageId", "message_id")),
+    ("id", ("id", *MESSAGE_ID_ALIASES)),
     ("role", ("role", "author", "speaker", "type", "kind")),
-    ("status", ("status", "state", "phase")),
+    ("status", STATUS_ALIASES),
     ("cost", ("cost",)),
-    ("tokens", ("tokens", "token", "tokenUsage", "token_usage", "usage")),
+    ("tokens", TOKEN_ALIASES),
     ("text", ("text", "content")),
     ("error", ("error", "reason", "message")),
 )
@@ -42,6 +53,7 @@ def _normalize_message_record(message, read_fields) -> NormalizedMessageRecord:
     set_missing(normalized, "cost", fields["cost"])
     set_missing(normalized, "tokens", normalized_tokens(fields["tokens"]))
     set_missing(normalized, "text", message_text(message))
+    set_missing(normalized, "error", fields["error"])
     require_message_canonical_fields(normalized)
     return normalized
 
@@ -74,16 +86,13 @@ def message_record(message):
 
 
 def message_value(message, *names, route=None):
-    message = message_record(message)
-    fields = _message_fields_for_route(route)(message)
-    if not _has_known_message_shape(fields):
+    normalized = normalize_message_record(message, route=route)
+    if normalized.get("schema_status") == "unknown":
         return None
     for field_name, aliases in MESSAGE_VALUE_ALIASES:
         if not _requested(names, *aliases):
             continue
-        if field_name == "text":
-            return message_text(message, route=route)
-        return fields[field_name]
+        return normalized.get(field_name)
     return None
 
 
@@ -123,62 +132,26 @@ def _message_fields_for_route(route=None):
 
 def _session_message_fields(message):
     return {
-        "id": _root_or_info_value(message, "id", "messageID", "messageId"),
-        "role": _root_or_info_value(message, "role"),
-        "status": _root_or_info_value(message, "status", "state"),
-        "cost": _root_or_info_value(message, "cost"),
-        "tokens": _root_or_info_value(message, "tokens", "tokenUsage", "usage"),
-        "text": _root_or_info_value(message, "text", "content"),
-        "error": _root_or_info_value(message, "error", "reason", "message"),
+        "id": root_or_info_value(message, "id", *CAMEL_MESSAGE_ID_ALIASES),
+        "role": root_or_info_value(message, "role"),
+        "status": root_or_info_value(message, *EVENT_STATUS_ALIASES),
+        "cost": root_or_info_value(message, "cost"),
+        "tokens": root_or_info_value(message, *API_TOKEN_ALIASES),
+        "text": root_or_info_value(message, "text", "content"),
+        "error": root_or_info_value(message, "error", "reason", "message"),
     }
 
 
 def _legacy_message_fields(message):
     return {
-        "id": _legacy_message_id(message),
-        "role": _legacy_message_role(message),
-        "status": _legacy_message_status(message),
-        "cost": _legacy_message_cost(message),
-        "tokens": _legacy_message_tokens(message),
-        "text": _legacy_message_text(message),
-        "error": _legacy_message_error(message),
+        "id": root_or_info_value(message, "id", *MESSAGE_ID_ALIASES),
+        "role": root_or_info_value(message, "role", "author", "speaker", "type", "kind"),
+        "status": root_or_info_value(message, *STATUS_ALIASES),
+        "cost": root_or_info_value(message, "cost"),
+        "tokens": root_or_info_value(message, *TOKEN_ALIASES),
+        "text": root_or_info_value(message, "text", "content"),
+        "error": root_or_info_value(message, "error", "reason", "message"),
     }
-
-
-def _legacy_message_id(message):
-    return _root_or_info_value(message, "id", "messageID", "messageId", "message_id")
-
-
-def _legacy_message_role(message):
-    return _root_or_info_value(message, "role", "author", "speaker", "type", "kind")
-
-
-def _legacy_message_status(message):
-    return _root_or_info_value(message, "status", "state", "phase")
-
-
-def _legacy_message_cost(message):
-    return _root_or_info_value(message, "cost")
-
-
-def _legacy_message_tokens(message):
-    return _root_or_info_value(message, "tokens", "token", "tokenUsage", "token_usage", "usage")
-
-
-def _legacy_message_text(message):
-    return _root_or_info_value(message, "text", "content")
-
-
-def _legacy_message_error(message):
-    return _root_or_info_value(message, "error", "reason", "message")
-
-
-def _root_or_info_value(record, *names):
-    value = first_present(record, *names)
-    if value is not None:
-        return value
-    info = record.get("info") if isinstance(record, dict) else None
-    return first_present(info, *names)
 
 
 def _has_known_message_shape(fields):

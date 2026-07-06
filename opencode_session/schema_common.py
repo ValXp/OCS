@@ -223,6 +223,31 @@ class ExecutionResultRecord(TypedDict, total=False):
     text: str
 
 
+SESSION_ID_ALIASES = ("sessionID", "sessionId", "session_id")
+MESSAGE_ID_ALIASES = ("messageID", "messageId", "message_id")
+CAMEL_MESSAGE_ID_ALIASES = ("messageID", "messageId")
+PROMPT_ID_ALIASES = ("promptID", "promptId")
+CALL_ID_ALIASES = ("callID", "callId", "call_id")
+EVENT_CALL_ID_ALIASES = ("callID", "callId", "toolCallID", "toolCallId", "tool_call_id")
+REQUEST_ID_ALIASES = ("requestID", "requestId")
+PERMISSION_ID_ALIASES = ("permissionID", "permissionId", "permission_id")
+QUESTION_ID_ALIASES = ("questionID", "questionId", "question_id")
+BLOCKER_ID_ALIASES = ("blockerID", "blockerId", "blocker_id")
+AGENT_ID_ALIASES = ("agentID", "agentId", "agent_id")
+MODEL_ID_ALIASES = ("modelID", "modelId", "model_id")
+TOKEN_ALIASES = ("tokens", "token", "tokenUsage", "token_usage", "usage")
+API_TOKEN_ALIASES = ("tokens", "tokenUsage", "usage")
+CREATED_AT_ALIASES = ("createdAt", "created_at", "created")
+API_CREATED_AT_ALIASES = ("createdAt", "created")
+UPDATED_AT_ALIASES = ("updatedAt", "updated_at", "updated")
+API_UPDATED_AT_ALIASES = ("updatedAt", "updated")
+DELIVERY_ALIASES = ("delivery", "deliveryMode", "mode")
+STATUS_ALIASES = ("status", "state", "phase")
+EVENT_STATUS_ALIASES = ("status", "state")
+STEP_ID_ALIASES = ("stepID", "stepId", "step_id")
+TOOL_NAME_ALIASES = ("toolName", "tool_name")
+
+
 def collection_records(collection, *names):
     if isinstance(collection, list):
         return collection
@@ -242,6 +267,26 @@ def first_present(mapping, *names):
         if value is not None:
             return value
     return None
+
+
+def first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def root_or_info_value(record, *names):
+    value = first_present(record, *names)
+    if value is not None:
+        return value
+    info = record.get("info") if isinstance(record, dict) else None
+    return first_present(info, *names)
+
+
+def child_value(record, child_name, *names):
+    child = record.get(child_name) if isinstance(record, dict) else None
+    return first_present(child, *names)
 
 
 def normalized_tokens(tokens):

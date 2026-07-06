@@ -2,7 +2,7 @@ import uuid
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.formatting import compact_value
-from opencode_session.schema_admission_adapter import normalize_admission_record
+from opencode_session.schema_admission_adapter import admission_response_fields, normalize_admission_record
 from opencode_session.schema_common import first_present as _first_present
 
 
@@ -91,16 +91,12 @@ def format_admission_compact(admission):
 def is_idempotent_admission_replay(error, message_id):
     if error.status != 409 or not isinstance(error.data, dict):
         return False
-    data = error.data
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
-    response_message_id = (
-        _first_present(data, "messageID", "messageId", "promptID", "promptId", "id")
-        or _first_present(info, "messageID", "messageId", "promptID", "promptId", "id")
-    )
-    if response_message_id != message_id:
+    fields = admission_response_fields(error.data)
+    if fields["message_id"] != message_id:
         return False
-    state = _first_present(data, "state", "status", "phase")
-    idempotency = _first_present(data, "idempotency", "idempotencyStatus")
+    data = error.data
+    state = fields["state"]
+    idempotency = fields["idempotency"]
     return (
         data.get("duplicate") is True
         or data.get("idempotent") is True

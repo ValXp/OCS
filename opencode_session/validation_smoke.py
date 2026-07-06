@@ -107,7 +107,7 @@ class SmokeValidation:
                 "no_live_model": bool(self.args.no_live_model),
             },
         )
-        self.session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
+        self.session_id = session_value(create_response.data, "id")
         if not self.session_id:
             raise SmokeFailure("session creation response did not include a session id")
         harness.track_session(self.session_id)

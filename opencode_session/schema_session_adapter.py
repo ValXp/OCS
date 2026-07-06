@@ -1,24 +1,35 @@
 from copy import deepcopy
 
 from opencode_session.schema_common import (
+    AGENT_ID_ALIASES,
+    API_CREATED_AT_ALIASES,
+    API_TOKEN_ALIASES,
+    API_UPDATED_AT_ALIASES,
+    CREATED_AT_ALIASES,
+    MODEL_ID_ALIASES,
     NormalizedSessionRecord,
+    SESSION_ID_ALIASES,
+    TOKEN_ALIASES,
+    UPDATED_AT_ALIASES,
+    child_value,
     collection_records,
-    first_present,
+    first_not_none,
     normalized_tokens,
+    root_or_info_value,
     set_missing,
 )
 
 
 SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "tokens", "createdAt", "updatedAt")
 SESSION_VALUE_ALIASES = (
-    ("id", ("id", "sessionID", "sessionId", "session_id")),
+    ("id", ("id", *SESSION_ID_ALIASES)),
     ("directory", ("directory", "cwd")),
     ("title", ("title", "name")),
-    ("agent", ("agent", "agentID", "agentId", "agent_id")),
-    ("model", ("model", "modelID", "modelId", "model_id")),
-    ("tokens", ("tokens", "token", "tokenUsage", "token_usage", "usage")),
-    ("createdAt", ("createdAt", "created_at", "created")),
-    ("updatedAt", ("updatedAt", "updated_at", "updated")),
+    ("agent", ("agent", *AGENT_ID_ALIASES)),
+    ("model", ("model", *MODEL_ID_ALIASES)),
+    ("tokens", TOKEN_ALIASES),
+    ("createdAt", CREATED_AT_ALIASES),
+    ("updatedAt", UPDATED_AT_ALIASES),
 )
 
 
@@ -131,130 +142,46 @@ def _apply_session_fields(normalized, fields):
 
 def _legacy_session_fields(record):
     return {
-        "id": _legacy_session_id(record),
-        "directory": _legacy_session_directory(record),
-        "title": _legacy_session_title(record),
-        "agent": _legacy_session_agent(record),
-        "model": _legacy_session_model(record),
-        "tokens": _legacy_session_tokens(record),
-        "createdAt": _legacy_session_created_at(record),
-        "updatedAt": _legacy_session_updated_at(record),
+        "id": root_or_info_value(record, "id", *SESSION_ID_ALIASES),
+        "directory": first_not_none(
+            root_or_info_value(record, "directory", "cwd"),
+            child_value(record, "location", "directory"),
+        ),
+        "title": root_or_info_value(record, "title", "name"),
+        "agent": root_or_info_value(record, "agent", *AGENT_ID_ALIASES),
+        "model": root_or_info_value(record, "model", *MODEL_ID_ALIASES),
+        "tokens": root_or_info_value(record, *TOKEN_ALIASES),
+        "createdAt": first_not_none(
+            root_or_info_value(record, *CREATED_AT_ALIASES),
+            child_value(record, "time", "created"),
+        ),
+        "updatedAt": first_not_none(
+            root_or_info_value(record, *UPDATED_AT_ALIASES),
+            child_value(record, "time", "updated"),
+        ),
     }
 
 
 def _api_session_fields(record):
     return {
-        "id": _api_session_id(record),
-        "directory": _api_session_directory(record),
-        "title": _api_session_title(record),
-        "agent": _api_session_agent(record),
-        "model": _api_session_model(record),
-        "tokens": _api_session_tokens(record),
-        "createdAt": _api_session_created_at(record),
-        "updatedAt": _api_session_updated_at(record),
+        "id": root_or_info_value(record, "id"),
+        "directory": first_not_none(
+            root_or_info_value(record, "directory", "cwd"),
+            child_value(record, "location", "directory"),
+        ),
+        "title": root_or_info_value(record, "title"),
+        "agent": root_or_info_value(record, "agent"),
+        "model": root_or_info_value(record, "model"),
+        "tokens": root_or_info_value(record, *API_TOKEN_ALIASES),
+        "createdAt": first_not_none(
+            root_or_info_value(record, *API_CREATED_AT_ALIASES),
+            child_value(record, "time", "created"),
+        ),
+        "updatedAt": first_not_none(
+            root_or_info_value(record, *API_UPDATED_AT_ALIASES),
+            child_value(record, "time", "updated"),
+        ),
     }
-
-
-def _legacy_session_id(record):
-    return _root_or_info_value(record, "id", "sessionID", "sessionId", "session_id")
-
-
-def _legacy_session_directory(record):
-    return _first_not_none(
-        _root_or_info_value(record, "directory", "cwd"),
-        _child_value(record, "location", "directory"),
-    )
-
-
-def _legacy_session_title(record):
-    return _root_or_info_value(record, "title", "name")
-
-
-def _legacy_session_agent(record):
-    return _root_or_info_value(record, "agent", "agentID", "agentId", "agent_id")
-
-
-def _legacy_session_model(record):
-    return _root_or_info_value(record, "model", "modelID", "modelId", "model_id")
-
-
-def _legacy_session_tokens(record):
-    return _root_or_info_value(record, "tokens", "token", "tokenUsage", "token_usage", "usage")
-
-
-def _legacy_session_created_at(record):
-    return _first_not_none(
-        _root_or_info_value(record, "createdAt", "created_at", "created"),
-        _child_value(record, "time", "created"),
-    )
-
-
-def _legacy_session_updated_at(record):
-    return _first_not_none(
-        _root_or_info_value(record, "updatedAt", "updated_at", "updated"),
-        _child_value(record, "time", "updated"),
-    )
-
-
-def _api_session_id(record):
-    return _root_or_info_value(record, "id")
-
-
-def _api_session_directory(record):
-    return _first_not_none(
-        _root_or_info_value(record, "directory", "cwd"),
-        _child_value(record, "location", "directory"),
-    )
-
-
-def _api_session_title(record):
-    return _root_or_info_value(record, "title")
-
-
-def _api_session_agent(record):
-    return _root_or_info_value(record, "agent")
-
-
-def _api_session_model(record):
-    return _root_or_info_value(record, "model")
-
-
-def _api_session_tokens(record):
-    return _root_or_info_value(record, "tokens", "tokenUsage", "usage")
-
-
-def _api_session_created_at(record):
-    return _first_not_none(
-        _root_or_info_value(record, "createdAt", "created"),
-        _child_value(record, "time", "created"),
-    )
-
-
-def _api_session_updated_at(record):
-    return _first_not_none(
-        _root_or_info_value(record, "updatedAt", "updated"),
-        _child_value(record, "time", "updated"),
-    )
-
-
-def _root_or_info_value(record, *names):
-    value = first_present(record, *names)
-    if value is not None:
-        return value
-    info = record.get("info") if isinstance(record, dict) else None
-    return first_present(info, *names)
-
-
-def _child_value(record, child_name, *names):
-    child = record.get(child_name) if isinstance(record, dict) else None
-    return first_present(child, *names)
-
-
-def _first_not_none(*values):
-    for value in values:
-        if value is not None:
-            return value
-    return None
 
 
 def _has_session_identity(fields):

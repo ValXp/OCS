@@ -1,4 +1,17 @@
-from opencode_session.schema_common import collection_records, first_present
+from copy import deepcopy
+
+from opencode_session.schema_common import (
+    CALL_ID_ALIASES,
+    MESSAGE_ID_ALIASES,
+    REQUEST_ID_ALIASES,
+    SESSION_ID_ALIASES,
+    collection_records,
+    first_present,
+    set_missing,
+)
+
+
+BLOCKER_CANONICAL_FIELDS = ("id", "session_id", "tool_message_id", "tool_call_id", "tool_ref")
 
 
 def load_blocker_counts(client):
@@ -20,11 +33,48 @@ def blocker_counts_for_session(counts, session_id):
 
 
 def collection_blockers(collection, plural_name):
-    return collection_records(collection, plural_name, "requests", "data")
+    return [normalize_blocker_record(blocker) for blocker in collection_records(collection, plural_name, "requests", "data")]
+
+
+def normalize_blocker_record(blocker):
+    if not isinstance(blocker, dict):
+        return unknown_blocker_record(blocker)
+    normalized = dict(blocker)
+    normalized["schema_status"] = "known"
+    set_missing(normalized, "id", first_present(blocker, "id", *REQUEST_ID_ALIASES))
+    set_missing(normalized, "session_id", first_present(blocker, *SESSION_ID_ALIASES))
+    _apply_tool_fields(normalized, blocker.get("tool"))
+    return normalized
 
 
 def blocker_session_id(blocker):
-    return first_present(blocker, "sessionID", "sessionId", "session_id")
+    if not isinstance(blocker, dict):
+        return None
+    return blocker.get("session_id")
+
+
+def unknown_blocker_record(raw):
+    normalized = {field_name: None for field_name in BLOCKER_CANONICAL_FIELDS}
+    normalized["schema_status"] = "unknown"
+    normalized["raw"] = deepcopy(raw)
+    return normalized
+
+
+def _apply_tool_fields(normalized, tool):
+    tool_message_id = first_present(normalized, "tool_message_id")
+    tool_call_id = first_present(normalized, "tool_call_id")
+    if isinstance(tool, dict):
+        tool_message_id = tool_message_id or first_present(tool, *MESSAGE_ID_ALIASES)
+        tool_call_id = tool_call_id or first_present(tool, *CALL_ID_ALIASES)
+    set_missing(normalized, "tool_message_id", tool_message_id)
+    set_missing(normalized, "tool_call_id", tool_call_id)
+    set_missing(normalized, "tool_ref", _tool_ref(tool_message_id, tool_call_id))
+
+
+def _tool_ref(message_id, call_id):
+    if message_id and call_id:
+        return f"{message_id}/{call_id}"
+    return call_id or message_id
 
 
 def _increment_blocker_count(counts, session_id, name):

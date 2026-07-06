@@ -1,7 +1,21 @@
 from dataclasses import dataclass
 
-from opencode_session.schema_common import NormalizedAdmissionRecord, first_present
+from opencode_session.schema_common import (
+    CAMEL_MESSAGE_ID_ALIASES,
+    DELIVERY_ALIASES,
+    PROMPT_ID_ALIASES,
+    SESSION_ID_ALIASES,
+    STATUS_ALIASES,
+    NormalizedAdmissionRecord,
+    first_present,
+    root_or_info_value,
+)
 from opencode_session.status import short_status
+
+
+ADMISSION_MESSAGE_ID_ALIASES = (*CAMEL_MESSAGE_ID_ALIASES, *PROMPT_ID_ALIASES, "id")
+ADMITTED_SEQUENCE_ALIASES = ("admittedSeq", "admittedSequence", "admitted_sequence", "sequence")
+PROMOTED_SEQUENCE_ALIASES = ("promotedSeq", "promotedSequence", "promoted_sequence")
 
 
 @dataclass(frozen=True)
@@ -10,20 +24,12 @@ class AdmissionRouteAdapter:
     version: str = "opencode-compatible"
 
     def normalize_record(self, session_id, delivery, message_id, data, *, capabilities) -> NormalizedAdmissionRecord:
-        if isinstance(data, dict) and isinstance(data.get("data"), dict):
-            data = data["data"]
-        if not isinstance(data, dict):
-            data = {}
-        info = data.get("info") if isinstance(data.get("info"), dict) else {}
-        state = first_present(data, "state", "status", "phase") or "admitted"
+        fields = admission_response_fields(data)
+        state = fields["state"] or "admitted"
         return {
-            "session_id": first_present(data, "sessionID", "sessionId", "session_id")
-            or first_present(info, "sessionID", "sessionId", "session_id")
-            or session_id,
-            "message_id": first_present(data, "messageID", "messageId", "promptID", "promptId", "id")
-            or first_present(info, "messageID", "messageId", "promptID", "promptId", "id")
-            or message_id,
-            "delivery": first_present(data, "delivery", "deliveryMode", "mode") or delivery,
+            "session_id": fields["session_id"] or session_id,
+            "message_id": fields["message_id"] or message_id,
+            "delivery": fields["delivery"] or delivery,
             "state": state,
             "raw_state": state,
             "status": short_status(state),
@@ -34,9 +40,30 @@ class AdmissionRouteAdapter:
                 "strategy": "legacy_run_reply",
                 "used": False,
             },
-            "admitted_sequence": first_present(data, "admittedSeq", "admittedSequence", "admitted_sequence", "sequence"),
-            "promoted_sequence": first_present(data, "promotedSeq", "promotedSequence", "promoted_sequence"),
+            "admitted_sequence": fields["admitted_sequence"],
+            "promoted_sequence": fields["promoted_sequence"],
         }
+
+
+def admission_response_fields(data):
+    data = _admission_data(data)
+    return {
+        "session_id": root_or_info_value(data, *SESSION_ID_ALIASES),
+        "message_id": root_or_info_value(data, *ADMISSION_MESSAGE_ID_ALIASES),
+        "delivery": first_present(data, *DELIVERY_ALIASES),
+        "state": first_present(data, *STATUS_ALIASES),
+        "idempotency": first_present(data, "idempotency", "idempotencyStatus"),
+        "admitted_sequence": first_present(data, *ADMITTED_SEQUENCE_ALIASES),
+        "promoted_sequence": first_present(data, *PROMOTED_SEQUENCE_ALIASES),
+    }
+
+
+def _admission_data(data):
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        return data["data"]
+    if isinstance(data, dict):
+        return data
+    return {}
 
 
 ADMISSION_ADAPTER = AdmissionRouteAdapter()
