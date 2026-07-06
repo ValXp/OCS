@@ -82,6 +82,36 @@ class ImportBoundaryTest(unittest.TestCase):
 
             self.assertIs(worker_lifecycle_reducer.WorkerTransition, worker_state.WorkerTransition)
 
+    def test_worker_state_does_not_own_cli_exit_policy(self):
+        blocked = BlockedModuleFinder({"opencode_session.cli_policy"})
+        with temporarily_unimported(
+            "opencode_session.cli_policy",
+            "opencode_session.worker_state",
+        ):
+            sys.meta_path.insert(0, blocked)
+            try:
+                worker_state = importlib.import_module("opencode_session.worker_state")
+            finally:
+                sys.meta_path.remove(blocked)
+
+        for name in (
+            "EX_ABORTED",
+            "EX_BLOCKED",
+            "EX_PARTIAL",
+            "EX_TIMEOUT",
+            "EX_UNAVAILABLE",
+            "EX_UNSUPPORTED",
+            "WORKER_EXIT_CODE_BY_STATUS",
+            "exit_code_for_run",
+            "exit_code_for_status",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(worker_state, name))
+
+        self.assertFalse(
+            any(hasattr(metadata, "exit_code") for metadata in worker_state.WORKER_LIFECYCLE_METADATA.values())
+        )
+
     def test_removed_worker_state_compatibility_modules_are_not_importable(self):
         with temporarily_unimported(
             "opencode_session.status_policy",

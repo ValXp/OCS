@@ -3,11 +3,9 @@ import unittest
 
 from opencode_session.worker_state import (
     EXECUTABLE_WORKER_ACTIONS,
-    EX_UNAVAILABLE,
     FAILED_DEPENDENCY_STATUSES,
     PUBLIC_WORKER_STATE_BY_LIFECYCLE,
     TERMINAL_WORKER_STATUSES,
-    WORKER_EXIT_CODE_BY_STATUS,
     WORKER_LIFECYCLE_DIMENSIONS_BY_STATE,
     WORKER_LIFECYCLE_METADATA,
     WORKER_LIFECYCLE_STATE_BY_DIMENSIONS,
@@ -22,8 +20,6 @@ from opencode_session.worker_state import (
     WorkerRecord,
     apply_worker_transition,
     deserialize_worker_record,
-    exit_code_for_run,
-    exit_code_for_status,
     is_executable_worker,
     mark_worker_active,
     next_eligible_worker_action,
@@ -94,7 +90,6 @@ class WorkerStateContractTest(unittest.TestCase):
             },
         )
         self.assertEqual(WORKER_STATUS_PRIORITY_BY_STATUS, _metadata_by_status("status_priority"))
-        self.assertEqual(WORKER_EXIT_CODE_BY_STATUS, _metadata_by_status("exit_code", skip_none=True))
 
     def test_timeout_failed_retry_and_terminal_lifecycles_derive_from_dimensions(self):
         retry_dimensions = WorkerLifecycleDimensions(
@@ -134,8 +129,6 @@ class WorkerStateContractTest(unittest.TestCase):
                 self.assertEqual(worker_lifecycle_state_for_status_alias(status), lifecycle_state)
                 self.assertEqual(_lifecycle_state_from_status_alias(status), lifecycle_state)
                 self.assertEqual(status_priority(status), WORKER_STATUS_PRIORITY_BY_STATUS[status])
-                if status in WORKER_EXIT_CODE_BY_STATUS:
-                    self.assertEqual(exit_code_for_status(status), WORKER_EXIT_CODE_BY_STATUS[status])
 
         for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
             with self.subTest(transition=transition_name):
@@ -336,7 +329,7 @@ class WorkerStateContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "session_id"):
             require_internal_worker({"id": "review"})
 
-    def test_refresh_run_summary_and_exit_code_use_failed_precedence_for_mixed_terminal_workers(self):
+    def test_refresh_run_summary_uses_failed_precedence_for_mixed_terminal_workers(self):
         run = {
             "workers": {
                 "build": {"id": "build", "prompt": "Build", "lifecycle_state": "timeout_terminal"},
@@ -348,7 +341,6 @@ class WorkerStateContractTest(unittest.TestCase):
         refresh_run_summary(run)
 
         self.assertEqual(run["status"], "failed")
-        self.assertEqual(exit_code_for_run(run), EX_UNAVAILABLE)
 
 
 def _metadata_by_status(field_name, *, skip_none=False):

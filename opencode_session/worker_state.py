@@ -23,13 +23,6 @@ WORKER_ACTION_RESOLVE_BLOCKER = "resolve_blocker"
 WORKER_ACTION_COLLECT = "collect"
 WORKER_ACTION_NONE = "none"
 
-EX_UNAVAILABLE = 69
-EX_UNSUPPORTED = 70
-EX_TIMEOUT = 124
-EX_PARTIAL = 1
-EX_BLOCKED = 75
-EX_ABORTED = 130
-
 WORKER_LIFECYCLE_QUEUED = "queued"
 WORKER_LIFECYCLE_ACTIVE_WAIT = "active_wait"
 WORKER_LIFECYCLE_ACTIVE_RETRY = "active_retry"
@@ -153,7 +146,6 @@ class WorkerLifecycleMetadata:
     failed_dependency_status: bool = False
     executable: bool = False
     status_priority: int = 0
-    exit_code: Optional[int] = None
     source_transitions: frozenset = frozenset()
     target_transitions: frozenset = frozenset()
 
@@ -214,7 +206,6 @@ def _lifecycle_metadata(
     executable=False,
     timeout_origin=False,
     status_priority=0,
-    exit_code=None,
     source_transitions=(),
     target_transitions=(),
 ):
@@ -225,7 +216,6 @@ def _lifecycle_metadata(
         failed_dependency_status=failed_dependency_status,
         executable=executable,
         status_priority=status_priority,
-        exit_code=exit_code,
         source_transitions=frozenset(source_transitions),
         target_transitions=frozenset(target_transitions),
     )
@@ -279,7 +269,6 @@ WORKER_LIFECYCLE_METADATA = {
         status_alias=True,
         failed_dependency_status=True,
         status_priority=2,
-        exit_code=EX_BLOCKED,
     ),
     WORKER_LIFECYCLE_BLOCKED_TIMEOUT: _lifecycle_metadata(
         WORKER_STATUS_BLOCKED,
@@ -287,7 +276,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         timeout_origin=True,
         status_priority=2,
-        exit_code=EX_BLOCKED,
     ),
     WORKER_LIFECYCLE_DONE_COLLECT: _lifecycle_metadata(
         WORKER_STATUS_DONE,
@@ -295,7 +283,6 @@ WORKER_LIFECYCLE_METADATA = {
         status_alias=True,
         terminal_status=True,
         status_priority=3,
-        exit_code=0,
     ),
     WORKER_LIFECYCLE_FAILED_RETRY: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -305,7 +292,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         executable=True,
         status_priority=6,
-        exit_code=EX_UNAVAILABLE,
     ),
     WORKER_LIFECYCLE_FAILED_TERMINAL: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -314,7 +300,6 @@ WORKER_LIFECYCLE_METADATA = {
         terminal_status=True,
         failed_dependency_status=True,
         status_priority=6,
-        exit_code=EX_UNAVAILABLE,
     ),
     WORKER_LIFECYCLE_TIMEOUT_RETRY: _lifecycle_metadata(
         WORKER_STATUS_TIMEOUT,
@@ -325,7 +310,6 @@ WORKER_LIFECYCLE_METADATA = {
         executable=True,
         timeout_origin=True,
         status_priority=4,
-        exit_code=EX_TIMEOUT,
     ),
     WORKER_LIFECYCLE_TIMEOUT_TERMINAL: _lifecycle_metadata(
         WORKER_STATUS_TIMEOUT,
@@ -335,7 +319,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         timeout_origin=True,
         status_priority=4,
-        exit_code=EX_TIMEOUT,
     ),
     WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -346,7 +329,6 @@ WORKER_LIFECYCLE_METADATA = {
         executable=True,
         timeout_origin=True,
         status_priority=6,
-        exit_code=EX_UNAVAILABLE,
     ),
     WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -355,7 +337,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         timeout_origin=True,
         status_priority=6,
-        exit_code=EX_UNAVAILABLE,
     ),
     WORKER_LIFECYCLE_TIMEOUT_ABORTED: _lifecycle_metadata(
         WORKER_STATUS_ABORTED,
@@ -364,7 +345,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         timeout_origin=True,
         status_priority=5,
-        exit_code=EX_ABORTED,
     ),
     WORKER_LIFECYCLE_ABORTED: _lifecycle_metadata(
         WORKER_STATUS_ABORTED,
@@ -373,7 +353,6 @@ WORKER_LIFECYCLE_METADATA = {
         terminal_status=True,
         failed_dependency_status=True,
         status_priority=5,
-        exit_code=EX_ABORTED,
     ),
 }
 
@@ -468,7 +447,6 @@ WORKER_RETRY_SCHEDULE_SOURCE_LIFECYCLE_STATES = frozenset(
 WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES = _lifecycle_states_matching(timeout_origin=True)
 WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS = _status_aliases_by_lifecycle_metadata()
 WORKER_STATUS_PRIORITY_BY_STATUS = _status_values_by_lifecycle_metadata("status_priority")
-WORKER_EXIT_CODE_BY_STATUS = _status_values_by_lifecycle_metadata("exit_code", skip_none=True)
 
 WORKER_LIST_FIELDS = (
     "dependencies",
@@ -528,13 +506,6 @@ def aggregate_run_status(statuses):
     if status not in WORKER_STATUS_PRIORITY_BY_STATUS:
         return WORKER_STATUS_QUEUED
     return status
-
-
-def exit_code_for_status(status, *, partial_success=False):
-    status = short_status(status)
-    if status == WORKER_STATUS_FAILED and partial_success:
-        return EX_PARTIAL
-    return WORKER_EXIT_CODE_BY_STATUS.get(status, EX_UNAVAILABLE)
 
 
 def public_worker_state(lifecycle_state):
@@ -1676,10 +1647,6 @@ def workers_in_dependency_order(workers):
 
     analysis = analyze_worker_dependencies(workers)
     return [workers[worker_id] for worker_id in analysis.worker_ids_in_dependency_order]
-
-
-def exit_code_for_run(run):
-    return exit_code_for_status(run.get("status"), partial_success=has_partial_worker_success(run))
 
 
 def has_partial_worker_success(run):

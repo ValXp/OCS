@@ -6,6 +6,11 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
+from opencode_session.cli_policy import (
+    EX_UNAVAILABLE,
+    EX_UNSUPPORTED,
+    exit_code_for_run as _exit_code_for_orchestration_run,
+)
 from opencode_session.run_persistence import (
     persist_run_mutation,
     persist_run_summary,
@@ -25,11 +30,8 @@ from opencode_session.worker_execution import (
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import (
-    EX_UNAVAILABLE,
-    EX_UNSUPPORTED,
     WorkerTransition,
     ensure_worker as _ensure_orchestration_worker,
-    exit_code_for_run as _exit_code_for_orchestration_run,
     is_executable_worker,
     is_worker_mapping,
     refresh_run_summary as _refresh_worker_run_summary,

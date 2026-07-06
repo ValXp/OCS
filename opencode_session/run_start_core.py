@@ -4,6 +4,7 @@ from typing import Optional, Protocol
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
+from opencode_session.cli_policy import EX_UNAVAILABLE
 from opencode_session.run_start_policy import blocking_execution_start_error
 from opencode_session.schema_common import CapabilitiesRecord, RunRecord, Worker
 from opencode_session.worker_cleanup_recovery import (
@@ -15,7 +16,6 @@ from opencode_session.worker_execution import (
 )
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
 from opencode_session.worker_state import (
-    EX_UNAVAILABLE,
     WorkerTransition,
     is_worker_mapping,
     worker_record_for_mutation,
