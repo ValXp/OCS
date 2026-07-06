@@ -2,7 +2,8 @@ import json
 
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event, normalize_event
+from opencode_session.event_watcher import SessionEventWatcher, is_invalid_event_stream_error
+from opencode_session.events import format_watch_event, is_abort_event, is_terminal_event
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 
 
@@ -72,7 +73,7 @@ def _watch_session(args, client, *, print_error, unavailable_exit, unsupported_e
 
     try:
         try:
-            capabilities = deadline.run(lambda: detect_capabilities(client))
+            capabilities = deadline.run(lambda current_deadline: detect_capabilities(client, deadline=current_deadline))
         except OpenCodeApiError as error:
             print_error(str(error))
             return unavailable_exit
@@ -83,10 +84,8 @@ def _watch_session(args, client, *, print_error, unavailable_exit, unsupported_e
             return unsupported_exit
 
         try:
-            for raw_event in client.stream_events(event_route["path"], deadline=event_deadline):
-                event = normalize_event(raw_event, args.session_id)
-                if event is None:
-                    continue
+            watcher = SessionEventWatcher(client, event_route["path"], args.session_id)
+            for event in watcher.iter_events(deadline=event_deadline):
                 emit_event(event)
                 if is_terminal_event(event):
                     flush_pending_text()
@@ -112,7 +111,7 @@ def _same_watch_text_group(left, right):
 
 
 def _is_invalid_event_stream(error):
-    return isinstance(error.data, dict) and error.data.get("kind") == "invalid_event_stream"
+    return is_invalid_event_stream_error(error)
 
 
 def _format_timeout(timeout):

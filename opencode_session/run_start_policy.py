@@ -13,10 +13,7 @@ def blocking_execution_start_error(capabilities):
 
 def mark_orchestration_start_failed(run, workers, error):
     run["status"] = "failed"
+    transitions = []
     for worker in workers:
-        mark_worker_failed(worker, "api", error, retryable=False)
-
-
-def mark_orchestration_cleanup_failed(run, worker, error):
-    run["status"] = "failed"
-    mark_worker_failed(worker, "api", error, retryable=False)
+        transitions.append(mark_worker_failed(worker, "api", error, retryable=False))
+    return transitions

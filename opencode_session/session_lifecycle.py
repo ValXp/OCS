@@ -1,5 +1,5 @@
 from opencode_session.formatting import compact_bool, compact_value
-from opencode_session.records import bool_value, first_present
+from opencode_session.schema_common import NormalizedAbortRecord, bool_value, first_present
 from opencode_session.status import short_status
 
 
@@ -16,7 +16,7 @@ def is_session_not_found_error(error):
     return method in {"GET", "DELETE"} and len(parts) == 4 and parts[1:3] == ["api", "session"] and bool(parts[3])
 
 
-def abort_record(session_id, data):
+def abort_record(session_id, data) -> NormalizedAbortRecord:
     if not isinstance(data, dict):
         data = {}
     raw_status = first_present(data, "status", "state")

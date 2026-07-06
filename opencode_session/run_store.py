@@ -10,6 +10,7 @@ from opencode_session.run_record import (
     RunRecordError,
     new_run_record,
     normalize_run,
+    normalize_run_for_storage,
     upsert_worker_record,
 )
 
@@ -35,6 +36,8 @@ class RunStore:
             fallback_name=name,
         )
         with self._locked_run(name):
+            if self._run_path(name).exists():
+                raise RunStoreError(f"run '{name}' already exists in {self.root}", kind="exists")
             self._write_run_unlocked(run)
         return run
 
@@ -75,10 +78,11 @@ class RunStore:
 
     def _write_run_unlocked(self, run):
         self.root.mkdir(parents=True, exist_ok=True)
-        path = self._run_path(run["name"])
+        stored_run = _normalize_for_storage(run, fallback_name=run["name"])
+        path = self._run_path(stored_run["name"])
         temporary_path = path.with_suffix(path.suffix + ".tmp")
         with temporary_path.open("w", encoding="utf-8") as file:
-            json.dump(run, file, sort_keys=True)
+            json.dump(stored_run, file, sort_keys=True)
             file.write("\n")
         os.replace(temporary_path, path)
 
@@ -121,6 +125,13 @@ def _thread_lock_for(path):
 def _normalize_for_store(run, *, fallback_name):
     try:
         return normalize_run(run, fallback_name=fallback_name)
+    except RunRecordError as error:
+        raise RunStoreError(str(error), kind=error.kind) from error
+
+
+def _normalize_for_storage(run, *, fallback_name):
+    try:
+        return normalize_run_for_storage(run, fallback_name=fallback_name)
     except RunRecordError as error:
         raise RunStoreError(str(error), kind=error.kind) from error
 

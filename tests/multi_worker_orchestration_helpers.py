@@ -39,7 +39,15 @@ class FakeClient:
         self.requests.append(("create", directory, agent, model))
         return FakeResponse({"id": self.session_ids.pop(0), "directory": directory})
 
-    def delete_session(self, session_id):
+    def delete_session_response(self, session_id):
         self.requests.append(("delete", session_id))
         if session_id in self.delete_failures:
             raise OpenCodeApiError(self.delete_failures[session_id])
+
+    def delete_session(self, session_id):
+        response = self.delete_session_response(session_id)
+        return response.data if response is not None else None
+
+    def get_session(self, session_id):
+        self.requests.append(("get", session_id))
+        raise OpenCodeApiError(f"session not found: {session_id}", status=404)

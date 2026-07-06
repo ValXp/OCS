@@ -161,7 +161,25 @@ class LifecycleCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(json.loads(result.stdout), children)
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                {
+                    **children[0],
+                    "schema_status": "known",
+                    "tokens": None,
+                    "createdAt": None,
+                    "updatedAt": None,
+                },
+                {
+                    **children[1],
+                    "schema_status": "known",
+                    "tokens": None,
+                    "createdAt": None,
+                    "updatedAt": None,
+                },
+            ],
+        )
         self.assertEqual(server.requests, [("GET", "/session/ses_parent/children", None)])
 
     def test_children_normalizes_session_aliases_for_compact_and_json_output(self):
@@ -191,6 +209,7 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertEqual(json_result.stderr, "")
         payload = json.loads(json_result.stdout)
         self.assertEqual(len(payload), 1, payload)
+        self.assertEqual(payload[0]["schema_status"], "known")
         self.assertEqual(payload[0]["id"], "ses_child_1")
         self.assertEqual(payload[0]["directory"], directory)
         self.assertEqual(payload[0]["title"], "Child one")

@@ -51,6 +51,17 @@ class InventoryOpenCodeServer:
 
             def do_GET(self):
                 parent.requests.append(("GET", self.path, None))
+                if self.path == "/doc":
+                    self._write_json(
+                        {
+                            "openapi": "3.1.0",
+                            "paths": {
+                                "/api/session": {"get": {}, "post": {}},
+                                "/api/session/{sessionID}": {"get": {}, "delete": {}},
+                            },
+                        }
+                    )
+                    return
                 if self.path == "/api/session":
                     self._write_json({"sessions": parent.sessions, "next": None})
                     return
@@ -148,6 +159,7 @@ class SessionInventoryCliTest(unittest.TestCase):
         self.assertEqual(
             server.requests,
             [
+                ("GET", "/doc", None),
                 (
                     "POST",
                     "/api/session",
@@ -200,7 +212,7 @@ class SessionInventoryCliTest(unittest.TestCase):
             f'id=ses_build title="Build task" dir={directory} agent=build model=openai/gpt-5.5 '
             "cost=1.25 tokens=150 created=2026-07-02T00:00:00Z updated=2026-07-02T00:00:02Z\n",
         )
-        self.assertEqual(server.requests, [("GET", "/api/session", None)])
+        self.assertEqual(server.requests, [("GET", "/doc", None), ("GET", "/api/session", None)])
 
     def test_list_multiple_sessions_prints_compact_table(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other_directory:
@@ -237,7 +249,7 @@ class SessionInventoryCliTest(unittest.TestCase):
             f"ses_build\t\"Build task\"\t{directory}\tbuild\topenai/gpt-5.5\t1.25\t150\t2026-07-02T00:00:02Z\n"
             f"ses_plan\t\"Plan task\"\t{other_directory}\tplan\topenai/gpt-5.5\t0.5\t30\t2026-07-02T00:01:02Z\n",
         )
-        self.assertEqual(server.requests, [("GET", "/api/session", None)])
+        self.assertEqual(server.requests, [("GET", "/doc", None), ("GET", "/api/session", None)])
 
     def test_inspect_prints_one_session_with_full_compact_fields(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -262,7 +274,7 @@ class SessionInventoryCliTest(unittest.TestCase):
             f'id=ses_build title="Build task" dir={directory} agent=build model=openai/gpt-5.5 '
             "cost=1.25 tokens=150 created=2026-07-02T00:00:00Z updated=2026-07-02T00:00:02Z\n",
         )
-        self.assertEqual(server.requests, [("GET", "/api/session/ses_build", None)])
+        self.assertEqual(server.requests, [("GET", "/doc", None), ("GET", "/api/session/ses_build", None)])
 
     def test_get_alias_prints_one_session(self):
         session = {
@@ -282,7 +294,7 @@ class SessionInventoryCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         self.assertIn("id=ses_build", result.stdout)
-        self.assertEqual(server.requests, [("GET", "/api/session/ses_build", None)])
+        self.assertEqual(server.requests, [("GET", "/doc", None), ("GET", "/api/session/ses_build", None)])
 
     def test_delete_verifies_session_is_no_longer_readable(self):
         session = {
@@ -304,7 +316,11 @@ class SessionInventoryCliTest(unittest.TestCase):
         self.assertEqual(result.stdout, "deleted id=ses_build verified=unreadable\n")
         self.assertEqual(
             server.requests,
-            [("DELETE", "/api/session/ses_build", None), ("GET", "/api/session/ses_build", None)],
+            [
+                ("GET", "/doc", None),
+                ("DELETE", "/api/session/ses_build", None),
+                ("GET", "/api/session/ses_build", None),
+            ],
         )
 
     def test_inspect_json_exposes_complete_session_data(self):
@@ -326,8 +342,8 @@ class SessionInventoryCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(json.loads(result.stdout), session)
-        self.assertEqual(server.requests, [("GET", "/api/session/ses_build", None)])
+        self.assertEqual(json.loads(result.stdout), {**session, "schema_status": "known"})
+        self.assertEqual(server.requests, [("GET", "/doc", None), ("GET", "/api/session/ses_build", None)])
 
     def test_inspect_raw_exposes_exact_api_response_body(self):
         raw_body = '{"id":"ses_build",  "title":"Build task","metadata":{"b":2,"a":1}}'
@@ -339,7 +355,7 @@ class SessionInventoryCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         self.assertEqual(result.stdout, raw_body)
-        self.assertEqual(server.requests, [("GET", "/api/session/ses_build", None)])
+        self.assertEqual(server.requests, [("GET", "/doc", None), ("GET", "/api/session/ses_build", None)])
 
 
 if __name__ == "__main__":

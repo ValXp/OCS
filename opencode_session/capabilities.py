@@ -7,10 +7,18 @@ LEGACY_RUN_PATH = "/session/{sessionID}/run"
 LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 
 
-def detect_capabilities(client):
-    health = client.get_health()
-    doc = client.get_openapi_doc()
+def detect_capabilities(client, *, deadline=None):
+    health = client.get_health(deadline=deadline)
+    doc = client.get_openapi_doc(deadline=deadline)
     return capabilities_from_openapi_doc(doc, health=health)
+
+
+def configure_client_route_plan(client, capabilities):
+    route_plan = capabilities.get("route_plan") if isinstance(capabilities, dict) else None
+    configure = getattr(client, "configure_route_plan", None)
+    if callable(configure):
+        configure(route_plan)
+    return client
 
 
 def capabilities_from_openapi_doc(doc, *, health=None):
@@ -38,17 +46,33 @@ def capabilities_from_openapi_doc(doc, *, health=None):
         "legacy_run": _route(LEGACY_RUN_PATH, "POST", legacy_run_available),
         "legacy_reply": _route(LEGACY_REPLY_PATH, "POST", legacy_reply_available),
     }
+    route_plan = route_plan_from_availability(route_availability)
 
     return {
         "health": _health_status(health),
         "version": str(health.get("version") or health.get("serverVersion") or "unknown"),
         "route_availability": route_availability,
+        "route_plan": route_plan,
         "v2_prompt_support": prompt_available,
         "v2_wait_support": wait_available,
         "event_support": events_available,
         "blocking_message_available": blocking_message_available,
         "blocking_execution_available": blocking_message_available or legacy_fallback_available,
         "legacy_fallback_available": legacy_fallback_available,
+    }
+
+
+def route_plan_from_availability(route_availability):
+    session_path = _planned_route_path(route_availability, "session", SESSION_PATHS[0])
+    return {
+        "session_collection": session_path,
+        "session_item": _session_item_path(session_path),
+        "v2_prompt": _planned_route_path(route_availability, "v2_prompt", PROMPT_PATHS[0]),
+        "v2_wait": _planned_route_path(route_availability, "v2_wait", WAIT_PATHS[0]),
+        "events": _planned_route_path(route_availability, "events", EVENT_PATHS[0]),
+        "blocking_message": _planned_route_path(route_availability, "blocking_message", SESSION_MESSAGE_PATH),
+        "legacy_run": _planned_route_path(route_availability, "legacy_run", LEGACY_RUN_PATH),
+        "legacy_reply": _planned_route_path(route_availability, "legacy_reply", LEGACY_REPLY_PATH),
     }
 
 
@@ -90,6 +114,17 @@ def unsupported_reasons(capabilities):
             "POST /session/{sessionID}/run + POST /session/{sessionID}/reply"
         )
     return reasons
+
+
+def _planned_route_path(route_availability, name, fallback):
+    route = route_availability.get(name) or {}
+    if route.get("available") and route.get("path"):
+        return route["path"]
+    return fallback
+
+
+def _session_item_path(session_collection_path):
+    return f"{session_collection_path.rstrip('/')}/{{sessionID}}"
 
 
 def _route(path, method, available):

@@ -55,6 +55,7 @@ def configure_single_worker_server(
             server.json("POST", f"/session/{session_id}/run", run_payload)
             server.json("POST", f"/session/{session_id}/reply", reply_payload)
         server.json("DELETE", f"/api/session/{session_id}", {"id": session_id, "deleted": True})
+        server.json("GET", f"/api/session/{session_id}", {"error": "not found"}, status=404)
     return server
 
 
@@ -109,6 +110,7 @@ def configure_multi_worker_server(
         server.json("POST", f"/session/{session_id}/reply", reply_payload)
     for session_id in sorted(set(session_ids) | set(run_payloads) | set(reply_payloads)):
         server.json("DELETE", f"/api/session/{session_id}", {"id": session_id, "deleted": True})
+        server.json("GET", f"/api/session/{session_id}", {"error": "not found"}, status=404)
     return server
 
 
@@ -150,6 +152,7 @@ def configure_retry_server(
         _register_json_sequence(server, "POST", f"/session/{session_id}/reply", session_reply_payloads)
     for session_id in session_ids:
         server.json("DELETE", f"/api/session/{session_id}", {"id": session_id, "deleted": True})
+        server.json("GET", f"/api/session/{session_id}", {"error": "not found"}, status=404)
     return server
 
 

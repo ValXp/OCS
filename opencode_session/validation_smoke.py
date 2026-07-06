@@ -1,6 +1,3 @@
-import queue
-import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -12,18 +9,22 @@ from opencode_session.blocking_execution import (
     skipped_blocking_execution_result,
 )
 from opencode_session.capabilities import unsupported_reasons
-from opencode_session.events import is_terminal_event, normalize_event
+from opencode_session.cli_policy import EX_UNAVAILABLE, EX_UNSUPPORTED
+from opencode_session.event_watcher import (
+    BackgroundSessionEventWatcher,
+    EventWatchEmpty,
+    EventWatchOpenTimeout,
+    EventWatchTimeout,
+)
 from opencode_session.formatting import compact_bool, compact_list, compact_value
 from opencode_session.prompt_admission import admit_prompt
-from opencode_session.records import session_value
+from opencode_session.schema_session_adapter import session_value
 from opencode_session.validation_cleanup import format_cleanup_summary
-from opencode_session.validation_harness import DisposableValidationHarness
+from opencode_session.validation_harness import DisposableValidationHarness, ValidationCheck
 
 
 SMOKE_SESSION_PREFIX = "ocs-smoke-"
 SMOKE_EVENT_TIMEOUT_SECONDS = 10.0
-EX_UNAVAILABLE = 69
-EX_UNSUPPORTED = 70
 
 
 class SmokeFailure(Exception):
@@ -50,62 +51,7 @@ def run_smoke(args, client, *, print_error, unavailable_exit=EX_UNAVAILABLE, uns
         "cleanup": {"status": "queued", "deleted": [], "verified": []},
     }
 
-    def validate(harness):
-        capabilities = harness.detect_capabilities()
-        require_smoke_capabilities(capabilities, unsupported_exit=unsupported_exit)
-
-        create_response = client.create_session_response(
-            directory,
-            title=smoke_id,
-            metadata={
-                "disposable": True,
-                "prefix": args.prefix,
-                "smoke_id": smoke_id,
-                "no_live_model": bool(args.no_live_model),
-            },
-        )
-        session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
-        if not session_id:
-            raise SmokeFailure("session creation response did not include a session id")
-        harness.track_session(session_id)
-        result["session_id"] = session_id
-        result["checks"]["create"] = {"status": "done", "session_id": session_id, "title": smoke_id}
-
-        event_collector = SmokeEventCollector(
-            client,
-            session_id,
-            capabilities["route_availability"]["events"]["path"],
-            args.event_limit,
-        )
-        event_collector.start()
-        event_collector.wait_open(args.event_timeout)
-
-        steer_message_id = f"msg_{smoke_id}-steer"
-        steer_result = admit_prompt(
-            client,
-            capabilities,
-            session_id,
-            "ocs smoke steer",
-            "steer",
-            message_id=steer_message_id,
-            map_unsupported=False,
-        )
-        admission = steer_result.record
-        result["checks"]["steer"] = admission
-
-        event_types = event_collector.collect(args.event_timeout)
-        result["event_types"] = event_types
-        result["checks"]["events"] = {"status": "done", "types": event_types}
-
-        if args.no_live_model:
-            result["checks"]["run_blocking"] = skipped_blocking_execution_result(session_id, capabilities)
-        else:
-            try:
-                result["checks"]["run_blocking"] = execute_blocking_prompt(client, session_id, "ocs smoke", capabilities)
-            except BlockingProviderFailure as error:
-                raise SmokeFailure(f"provider failure: {error}") from error
-
-        result["checks"]["blockers"] = smoke_blocker_summary(client, session_id)
+    validation = SmokeValidation(args, client, directory, smoke_id, result, unsupported_exit)
 
     return DisposableValidationHarness(
         client,
@@ -113,7 +59,7 @@ def run_smoke(args, client, *, print_error, unavailable_exit=EX_UNAVAILABLE, uns
         default_exit_code=unavailable_exit,
         cleanup_failure_message="disposable session cleanup failed",
     ).run(
-        validate,
+        validation.checks(),
         failure_types=(SmokeFailure,),
         json_output=args.json,
         compact_formatter=format_smoke_compact,
@@ -121,6 +67,91 @@ def run_smoke(args, client, *, print_error, unavailable_exit=EX_UNAVAILABLE, uns
         print_error=print_error,
         cleanup_summary_formatter=format_cleanup_summary,
     )
+
+
+class SmokeValidation:
+    def __init__(self, args, client, directory, smoke_id, result, unsupported_exit):
+        self.args = args
+        self.client = client
+        self.directory = directory
+        self.smoke_id = smoke_id
+        self.result = result
+        self.unsupported_exit = unsupported_exit
+        self.capabilities = None
+        self.session_id = None
+        self.event_collector = None
+
+    def checks(self):
+        return (
+            ValidationCheck("capabilities", self.check_capabilities),
+            ValidationCheck("create", self.create_session),
+            ValidationCheck("steer", self.steer_prompt),
+            ValidationCheck("events", self.collect_events),
+            ValidationCheck("run_blocking", self.run_blocking),
+            ValidationCheck("blockers", self.blockers),
+        )
+
+    def check_capabilities(self, harness):
+        self.capabilities = harness.detect_capabilities()
+        require_smoke_capabilities(self.capabilities, unsupported_exit=self.unsupported_exit)
+        return harness.result["checks"].get("capabilities")
+
+    def create_session(self, harness):
+        create_response = self.client.create_session_response(
+            self.directory,
+            title=self.smoke_id,
+            metadata={
+                "disposable": True,
+                "prefix": self.args.prefix,
+                "smoke_id": self.smoke_id,
+                "no_live_model": bool(self.args.no_live_model),
+            },
+        )
+        self.session_id = session_value(create_response.data, "id", "sessionID", "sessionId")
+        if not self.session_id:
+            raise SmokeFailure("session creation response did not include a session id")
+        harness.track_session(self.session_id)
+        self.result["session_id"] = self.session_id
+        self.event_collector = harness.track_resource(
+            SmokeEventCollector(
+                self.client,
+                self.session_id,
+                self.capabilities["route_availability"]["events"]["path"],
+                self.args.event_limit,
+            )
+        )
+        self.event_collector.start()
+        self.event_collector.wait_open(self.args.event_timeout)
+        return {"status": "done", "session_id": self.session_id, "title": self.smoke_id}
+
+    def steer_prompt(self, _harness):
+        steer_message_id = f"msg_{self.smoke_id}-steer"
+        steer_result = admit_prompt(
+            self.client,
+            self.capabilities,
+            self.session_id,
+            "ocs smoke steer",
+            "steer",
+            message_id=steer_message_id,
+            map_unsupported=False,
+        )
+        return steer_result.record
+
+    def collect_events(self, _harness):
+        event_types = self.event_collector.collect(self.args.event_timeout)
+        self.result["event_types"] = event_types
+        return {"status": "done", "types": event_types}
+
+    def run_blocking(self, _harness):
+        if self.args.no_live_model:
+            return skipped_blocking_execution_result(self.session_id, self.capabilities)
+        try:
+            return execute_blocking_prompt(self.client, self.session_id, "ocs smoke", self.capabilities)
+        except BlockingProviderFailure as error:
+            raise SmokeFailure(f"provider failure: {error}") from error
+
+    def blockers(self, _harness):
+        return smoke_blocker_summary(self.client, self.session_id)
 
 
 def require_smoke_capabilities(capabilities, *, unsupported_exit=EX_UNSUPPORTED):
@@ -138,79 +169,34 @@ def require_smoke_capabilities(capabilities, *, unsupported_exit=EX_UNSUPPORTED)
 
 class SmokeEventCollector:
     def __init__(self, client, session_id, event_path, event_limit):
-        self.client = client
-        self.session_id = session_id
-        self.event_path = event_path
         self.event_limit = event_limit
-        self.opened = threading.Event()
-        self.items = queue.Queue()
-        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.watcher = BackgroundSessionEventWatcher(client, event_path, session_id)
 
     def start(self):
-        self.thread.start()
+        self.watcher.start()
 
     def wait_open(self, timeout):
-        if self.opened.wait(timeout):
-            return
-        error = self._first_error()
-        if error is not None:
-            raise error
-        raise SmokeFailure(f"event stream did not open within {format_timeout(timeout)}s")
+        try:
+            self.watcher.wait_open(timeout)
+        except EventWatchOpenTimeout as error:
+            raise SmokeFailure(f"event stream did not open within {format_timeout(error.timeout)}s") from error
 
     def collect(self, timeout):
+        try:
+            events = self.watcher.collect(timeout=timeout, limit=self.event_limit)
+        except EventWatchTimeout as error:
+            raise SmokeFailure(f"event stream timed out after {format_timeout(error.timeout)}s") from error
+        except EventWatchEmpty as error:
+            raise SmokeFailure("event stream produced no events for disposable session") from error
         event_types = []
-        deadline = time.monotonic() + timeout
-        while len(event_types) < self.event_limit:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                kind, value = self.items.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if kind == "error":
-                raise value
-            if kind == "done":
-                break
-            event = value
+        for event in events:
             event_type = event.get("type") or event.get("kind")
             if event_type and event_type not in event_types:
                 event_types.append(event_type)
-            if is_terminal_event(event):
-                break
-        if event_types:
-            return event_types
-        if self.thread.is_alive():
-            raise SmokeFailure(f"event stream timed out after {format_timeout(timeout)}s")
-        raise SmokeFailure("event stream produced no events for disposable session")
+        return event_types
 
-    def _run(self):
-        try:
-            for raw_event in self.client.stream_events(self.event_path, on_open=self.opened.set):
-                event = normalize_event(raw_event, self.session_id)
-                if event is None:
-                    continue
-                self.items.put(("event", event))
-        except OpenCodeApiError as error:
-            self.items.put(("error", error))
-        finally:
-            self.items.put(("done", None))
-
-    def _first_error(self):
-        pending = []
-        error = None
-        while True:
-            try:
-                item = self.items.get_nowait()
-            except queue.Empty:
-                break
-            pending.append(item)
-            if item[0] == "error":
-                error = item[1]
-                break
-        for item in pending:
-            self.items.put(item)
-        return error
+    def close(self):
+        return self.watcher.close()
 
 
 def smoke_blocker_summary(client, session_id):

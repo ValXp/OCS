@@ -1,5 +1,3 @@
-import queue
-import threading
 import time
 
 
@@ -28,25 +26,7 @@ class TimeoutDeadline:
         return remaining
 
     def run(self, callback):
-        remaining = self.require_time()
-        if remaining is None:
-            return callback()
-
-        result = queue.Queue(maxsize=1)
-        thread = threading.Thread(target=_run_callback, args=(callback, result), daemon=True)
-        thread.start()
-        thread.join(timeout=remaining)
-        if thread.is_alive():
-            raise TimeoutExpired()
-
-        kind, value = result.get_nowait()
-        if kind == "error":
-            raise value
-        return value
-
-
-def _run_callback(callback, result):
-    try:
-        result.put(("value", callback()))
-    except BaseException as error:
-        result.put(("error", error))
+        self.require_time()
+        result = callback(self)
+        self.require_time()
+        return result

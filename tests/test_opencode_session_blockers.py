@@ -369,7 +369,12 @@ class BlockerCliTest(unittest.TestCase):
         )
         self.assertEqual(
             server.requests,
-            [("GET", "/api/session/ses_build", None), ("GET", "/permission", None), ("GET", "/question", None)],
+            [
+                ("GET", "/doc", None),
+                ("GET", "/api/session/ses_build", None),
+                ("GET", "/permission", None),
+                ("GET", "/question", None),
+            ],
         )
 
     def test_question_list_filters_pending_questions_by_session(self):

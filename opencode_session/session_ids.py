@@ -1,5 +1,5 @@
 from opencode_session.api_client import OpenCodeApiError
-from opencode_session.records import session_value
+from opencode_session.schema_session_adapter import session_value
 
 
 SESSION_ID_FIELDS = ("id", "sessionID", "sessionId")

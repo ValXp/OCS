@@ -260,6 +260,7 @@ class RunCliTest(unittest.TestCase):
                 ("POST", "/session/ses_new/run", {"message": "Run in a disposable session"}),
                 ("POST", "/session/ses_new/reply", {}),
                 ("DELETE", "/api/session/ses_new", None),
+                ("GET", "/api/session/ses_new", None),
             ],
         )
 

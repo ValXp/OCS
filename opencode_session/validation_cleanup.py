@@ -1,19 +1,20 @@
-import json
 from pathlib import Path
 
 from opencode_session.api_client import OpenCodeApiError
+from opencode_session.capabilities import capabilities_from_openapi_doc, configure_client_route_plan
+from opencode_session.commands.rendering import CommandResult, render_command_result
+from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session
 from opencode_session.formatting import compact_value
-from opencode_session.records import collection_sessions, session_value
-from opencode_session.validation_harness import delete_and_verify_session
+from opencode_session.schema_session_adapter import collection_sessions, session_value
 
 
 def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
     directory = str(Path(args.directory).resolve()) if args.directory else None
     try:
+        configure_client_route_plan(client, capabilities_from_openapi_doc(client.get_openapi_doc()))
         response = client.list_sessions_response()
     except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
 
     sessions = [
         session
@@ -36,7 +37,7 @@ def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
             result["status"] = "failed"
             result["errors"].append({"session_id": None, "error": "session has no id"})
             continue
-        error = delete_and_verify_session(client, session_id)
+        error = delete_and_verify_disposable_session(client, session_id)
         if error is not None:
             result["status"] = "failed"
             result["errors"].append({"session_id": session_id, "error": str(error)})
@@ -45,13 +46,12 @@ def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
         result["verified"].append(session_id)
 
     if result["status"] != "done":
-        print_error(f"cleanup failed: {format_cleanup_command_compact(result)}")
-        return unavailable_exit
-    if args.json:
-        print(json.dumps(result, sort_keys=True))
-    else:
-        print(format_cleanup_command_compact(result))
-    return 0
+        return _error_result(args, f"cleanup failed: {format_cleanup_command_compact(result)}", unavailable_exit, print_error)
+    return render_command_result(args, CommandResult(result, compact=format_cleanup_command_compact))
+
+
+def _error_result(args, message, exit_code, print_error):
+    return render_command_result(args, CommandResult(error=message, exit_code=exit_code), print_error=print_error)
 
 
 def is_disposable_session(session, *, prefix, directory):

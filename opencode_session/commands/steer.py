@@ -1,8 +1,6 @@
-import json
-
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
 from opencode_session.capabilities import detect_capabilities
-from opencode_session.formatting import write_raw
+from opencode_session.commands.rendering import CommandResult, render_command_result
 from opencode_session.prompt_admission import (
     PromptAdmissionFailure,
     PromptAdmissionUnsupported,
@@ -42,14 +40,12 @@ def handle_steer_command(
     try:
         client = client_factory(args.server)
     except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
 
     try:
         capabilities = detect_capabilities(client)
     except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
 
     try:
         result = admit_prompt(
@@ -61,19 +57,16 @@ def handle_steer_command(
             message_id=args.message_id,
         )
     except PromptAdmissionUnsupported as error:
-        print_error(str(error))
-        return unsupported_exit
+        return _error_result(args, str(error), unsupported_exit, print_error)
     except PromptAdmissionFailure as error:
-        print_error(str(error))
-        return unavailable_exit
-
-    if args.raw:
-        write_raw(result.body)
-        return 0
+        return _error_result(args, str(error), unavailable_exit, print_error)
 
     admission = result.record
-    if args.json:
-        print(json.dumps(admission, sort_keys=True))
-    else:
-        print(format_admission_compact(admission))
-    return 0
+    return render_command_result(
+        args,
+        CommandResult(admission, raw_body=result.body, compact=format_admission_compact),
+    )
+
+
+def _error_result(args, message, exit_code, print_error):
+    return render_command_result(args, CommandResult(error=message, exit_code=exit_code), print_error=print_error)

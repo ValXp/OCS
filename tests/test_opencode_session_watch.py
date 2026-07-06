@@ -24,12 +24,14 @@ class WatchOpenCodeServer:
         raw_event_body=None,
         keep_open_seconds=0,
         event_start_delay_seconds=0,
+        capability_delay_seconds=0,
     ):
         self.events = events or []
         self.event_status = event_status
         self.raw_event_body = raw_event_body
         self.keep_open_seconds = keep_open_seconds
         self.event_start_delay_seconds = event_start_delay_seconds
+        self.capability_delay_seconds = capability_delay_seconds
         self.requests = []
         self.server = None
         self.thread = None
@@ -44,9 +46,13 @@ class WatchOpenCodeServer:
             def do_GET(self):
                 parent.requests.append(("GET", self.path, None))
                 if self.path == "/global/health":
+                    if parent.capability_delay_seconds:
+                        time.sleep(parent.capability_delay_seconds)
                     self._write_json({"status": "ok", "version": "2.0.0"})
                     return
                 if self.path == "/doc":
+                    if parent.capability_delay_seconds:
+                        time.sleep(parent.capability_delay_seconds)
                     self._write_json(
                         {
                             "openapi": "3.1.0",
@@ -258,6 +264,7 @@ class WatchCliTest(unittest.TestCase):
             [
                 {
                     "kind": "text",
+                    "schema_status": "known",
                     "session_id": "ses_target",
                     "type": "message.part.updated",
                     "message_id": "msg_assistant",
@@ -265,6 +272,7 @@ class WatchCliTest(unittest.TestCase):
                 },
                 {
                     "kind": "text",
+                    "schema_status": "known",
                     "session_id": "ses_target",
                     "type": "message.part.updated",
                     "message_id": "msg_assistant",
@@ -272,6 +280,7 @@ class WatchCliTest(unittest.TestCase):
                 },
                 {
                     "kind": "blocker",
+                    "schema_status": "known",
                     "session_id": "ses_target",
                     "type": "permission.requested",
                     "message_id": "msg_assistant",
@@ -283,6 +292,7 @@ class WatchCliTest(unittest.TestCase):
                 },
                 {
                     "kind": "status",
+                    "schema_status": "known",
                     "session_id": "ses_target",
                     "type": "session.status",
                     "status": "done",
@@ -298,6 +308,18 @@ class WatchCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 124)
         self.assertEqual(result.stdout, "")
         self.assertIn("watch timed out after 0.1s", result.stderr)
+
+    def test_watch_timeout_budget_covers_capability_detection(self):
+        with WatchOpenCodeServer(capability_delay_seconds=2) as server:
+            started = time.monotonic()
+            result = self.run_cli("watch", "ses_target", "--timeout", "0.1", "--server", server.url)
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("watch timed out after 0.1s", result.stderr)
+        self.assertNotIn(("GET", "/api/event", None), server.requests)
 
     def test_watch_timeout_boundary_does_not_require_main_thread_signal_handling(self):
         from opencode_session.cli import main

@@ -120,6 +120,54 @@ class RunStoreCliTest(unittest.TestCase):
         self.assertEqual(status.stderr, "")
         self.assertEqual(status.stdout, expected)
 
+    def test_init_existing_run_fails_without_destroying_workers(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            init = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                directory,
+                "--server",
+                "http://opencode.example",
+            )
+            worker = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "build",
+                "--role",
+                "build",
+                "--prompt",
+                "Build",
+            )
+            duplicate = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                "/tmp/other",
+                "--server",
+                "http://other.example",
+            )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(duplicate.returncode, 65)
+        self.assertEqual(duplicate.stdout, "")
+        self.assertIn("run 'demo' already exists", duplicate.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["directory"], directory)
+        self.assertEqual(payload["server_url"], "http://opencode.example")
+        self.assertEqual(set(payload["workers"]), {"build"})
+
     def test_status_with_multiple_workers_prints_compact_worker_table(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             init = self.run_cli(
@@ -259,6 +307,7 @@ class RunStoreCliTest(unittest.TestCase):
                     "timeout_policy": "timeout",
                     "timeout_started_at": None,
                     "timed_out_at": None,
+                    "lifecycle_state": "blocked_dependency",
                     "failure_category": None,
                     "failure_reason": None,
                     "last_failure_category": None,
@@ -381,6 +430,7 @@ class RunStoreCliTest(unittest.TestCase):
                     "timeout_policy": "timeout",
                     "timeout_started_at": None,
                     "timed_out_at": None,
+                    "lifecycle_state": "queued",
                     "failure_category": None,
                     "failure_reason": None,
                     "last_failure_category": None,

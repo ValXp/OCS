@@ -3,13 +3,13 @@ import unittest
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.run_state import SingleWorkerRunStartRequest, SingleWorkerRunStateService
+from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
 
 try:
-    from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient
+    from tests.single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
 except ModuleNotFoundError:
-    from single_worker_run_state_helpers import CAPABILITIES, FakeClient
+    from single_worker_run_state_helpers import CAPABILITIES, FakeClient, start_single_worker_run
 
 
 class SingleWorkerRunStateRetryTest(unittest.TestCase):
@@ -49,7 +49,7 @@ class SingleWorkerRunStateRetryTest(unittest.TestCase):
                     raise attempt
                 return attempt
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -57,13 +57,13 @@ class SingleWorkerRunStateRetryTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 
@@ -126,7 +126,7 @@ class SingleWorkerRunStateRetryTest(unittest.TestCase):
                     raise attempt
                 return attempt
 
-            service = SingleWorkerRunStateService(
+            service = DependencyOrderedSerialRunOrchestrationService(
                 store,
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
@@ -134,13 +134,13 @@ class SingleWorkerRunStateRetryTest(unittest.TestCase):
                 now=lambda: "2026-07-03T00:00:00Z",
             )
 
-            outcome = service.start(
-                SingleWorkerRunStartRequest(
-                    name="demo",
-                    worker_id="worker",
-                    role="worker",
-                    prompt="Finish the worker task",
-                )
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
             )
             run = store.load_run("demo")
 

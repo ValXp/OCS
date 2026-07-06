@@ -1,20 +1,14 @@
-import json
-from pathlib import Path
-
 from opencode_session.api_client import OpenCodeApiClient, OpenCodeApiError
-from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
-from opencode_session.formatting import (
-    compact_value as _compact_value,
-    format_table as _format_table,
-    write_raw as _write_raw,
+from opencode_session.commands.rendering import render_command_result
+from opencode_session.formatting import compact_value as _compact_value
+from opencode_session.session_formatting import format_fork_compact, format_session_compact, format_session_table
+from opencode_session.session_lifecycle import format_abort_compact
+from opencode_session.session_services import (
+    SessionCommandError,
+    SessionCommandService,
+    counts_for_session,
+    session_with_blocker_counts,
 )
-from opencode_session.records import (
-    collection_sessions,
-    first_present as _first_present,
-    session_record as _session_record,
-    tokens_total as _tokens_total,
-)
-from opencode_session.session_lifecycle import abort_record, format_abort_compact, is_session_not_found_error
 
 
 def add_session_parsers(subparsers, *, add_server_argument, add_output_arguments, handler):
@@ -72,305 +66,110 @@ def add_session_parsers(subparsers, *, add_server_argument, add_output_arguments
 
 def handle_session_command(args, *, print_error, unavailable_exit, client_factory=OpenCodeApiClient):
     try:
-        client = client_factory(args.server)
+        service = SessionCommandService(client_factory(args.server))
     except OpenCodeApiError as error:
         print_error(str(error))
         return unavailable_exit
 
-    if args.command == "create":
-        return _handle_create(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
-    if args.command == "list":
-        return _handle_list(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
-    if args.command in ("inspect", "get"):
-        return _handle_inspect(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
-    if args.command == "delete":
-        return _handle_delete(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
-    if args.command == "abort":
-        return _handle_abort(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
-    if args.command == "fork":
-        return _handle_fork(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
-    if args.command == "children":
-        return _handle_children(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
+    try:
+        handler = _SESSION_HANDLERS.get(args.command)
+        if handler is not None:
+            return handler(args, service)
+    except SessionCommandError as error:
+        print_error(str(error))
+        return unavailable_exit
     return 64
 
 
-def _handle_create(args, client, *, print_error, unavailable_exit):
-    directory = str(Path(args.directory).resolve())
-    try:
-        response = client.create_session_response(directory, agent=args.agent, model=args.model)
-    except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
-    if args.raw:
-        _write_raw(response.body)
-        return 0
-    session = response.data
-    if args.json:
-        print(json.dumps(session, sort_keys=True))
-        return 0
-    print(_format_session_compact(session))
-    return 0
+def _handle_create(args, service):
+    result = service.create(args.directory, agent=args.agent, model=args.model)
+    return render_command_result(args, result.session, raw_body=result.raw_body, compact=format_session_compact(result.session))
 
 
-def _handle_list(args, client, *, print_error, unavailable_exit):
-    try:
-        response = client.list_sessions_response()
-    except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+def _handle_list(args, service):
+    result = service.list(
+        directory=args.directory,
+        agent=args.agent,
+        model=args.model,
+        include_blockers=args.blockers,
+    )
     if args.raw:
-        _write_raw(response.body)
-        return 0
-    collection = response.data
-    directory = str(Path(args.directory).resolve()) if args.directory else None
-    sessions = _filter_sessions(collection_sessions(collection), directory=directory, agent=args.agent, model=args.model)
-    blocker_counts = None
-    if args.blockers:
-        try:
-            blocker_counts = load_blocker_counts(client)
-        except OpenCodeApiError as error:
-            print_error(f"blocker summary failed: {error}")
-            return unavailable_exit
+        return render_command_result(args, raw_body=result.raw_body)
+    sessions = result.sessions
     if args.json:
-        if blocker_counts is not None:
-            sessions = [_session_with_blocker_counts(session, blocker_counts) for session in sessions]
-        print(json.dumps(sessions, sort_keys=True))
-        return 0
+        if result.blocker_counts is not None:
+            sessions = [session_with_blocker_counts(session, result.blocker_counts) for session in sessions]
+        return render_command_result(args, sessions)
     if sessions:
         if len(sessions) > 1:
-            print(_format_session_table(sessions, blocker_counts))
+            print(format_session_table(sessions, result.blocker_counts))
         else:
-            print(_format_session_compact(sessions[0], _counts_for_session(blocker_counts, sessions[0])))
+            print(format_session_compact(sessions[0], counts_for_session(result.blocker_counts, sessions[0])))
     return 0
 
 
-def _handle_inspect(args, client, *, print_error, unavailable_exit):
-    try:
-        response = client.get_session_response(args.session_id)
-    except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+def _handle_inspect(args, service):
+    result = service.inspect(args.session_id, include_blockers=args.blockers)
     if args.raw:
-        _write_raw(response.body)
-        return 0
-    session = response.data
-    blocker_counts = None
-    if args.blockers:
-        try:
-            blocker_counts = load_blocker_counts(client)
-        except OpenCodeApiError as error:
-            print_error(f"blocker summary failed: {error}")
-            return unavailable_exit
+        return render_command_result(args, raw_body=result.raw_body)
+    session = result.session
     if args.json:
-        if blocker_counts is not None:
-            session = _session_with_blocker_counts(session, blocker_counts)
-        print(json.dumps(session, sort_keys=True))
-        return 0
-    print(_format_session_compact(session, _counts_for_session(blocker_counts, session)))
-    return 0
+        if result.blocker_counts is not None:
+            session = session_with_blocker_counts(session, result.blocker_counts)
+    return render_command_result(
+        args,
+        session,
+        compact=format_session_compact(session, counts_for_session(result.blocker_counts, session)),
+    )
 
 
-def _handle_delete(args, client, *, print_error, unavailable_exit):
-    delete_response = None
-    deleted = False
-    try:
-        delete_response = client.delete_session_response(args.session_id)
-        deleted = True
-        client.get_session(args.session_id)
-    except OpenCodeApiError as error:
-        if deleted and error.status == 404:
-            if args.raw:
-                _write_raw(delete_response.body if delete_response else "")
-                return 0
-            if args.json:
-                print(
-                    json.dumps(
-                        {
-                            "deleted": True,
-                            "id": args.session_id,
-                            "response": delete_response.data if delete_response else None,
-                            "verified": "unreadable",
-                        },
-                        sort_keys=True,
-                    )
-                )
-                return 0
-            print(f"deleted id={_compact_value(args.session_id)} verified=unreadable")
-            return 0
-        print_error(str(error))
-        return unavailable_exit
-    print_error(f"delete verification failed; session {args.session_id} is still readable")
-    return unavailable_exit
-
-
-def _handle_abort(args, client, *, print_error, unavailable_exit):
-    try:
-        response = client.abort_session_response(args.session_id)
-    except OpenCodeApiError as error:
-        if is_session_not_found_error(error):
-            print_error(f"session not found: {args.session_id}")
-        else:
-            print_error(str(error))
-        return unavailable_exit
-    if args.raw:
-        _write_raw(response.body)
-        return 0
-    abort = abort_record(args.session_id, response.data)
-    if args.json:
-        print(json.dumps(abort, sort_keys=True))
-    else:
-        print(format_abort_compact(abort))
-    return 0
-
-
-def _handle_fork(args, client, *, print_error, unavailable_exit):
-    try:
-        response = client.fork_session_response(args.session_id, message_id=args.message_id)
-    except OpenCodeApiError as error:
-        if is_session_not_found_error(error):
-            print_error(f"session not found: {args.session_id}")
-        else:
-            print_error(str(error))
-        return unavailable_exit
-    if args.raw:
-        _write_raw(response.body)
-        return 0
-    fork = _fork_record(args.session_id, args.message_id, response.data)
-    if args.json:
-        print(json.dumps(fork, sort_keys=True))
-    else:
-        print(_format_fork_compact(fork))
-    return 0
-
-
-def _handle_children(args, client, *, print_error, unavailable_exit):
-    try:
-        response = client.list_child_sessions_response(args.session_id)
-    except OpenCodeApiError as error:
-        if is_session_not_found_error(error):
-            print_error(f"session not found: {args.session_id}")
-        else:
-            print_error(str(error))
-        return unavailable_exit
-    if args.raw:
-        _write_raw(response.body)
-        return 0
-    directory = str(Path(args.directory).resolve()) if args.directory else None
-    children = _filter_sessions(collection_sessions(response.data), directory=directory)
-    if args.json:
-        print(json.dumps(children, sort_keys=True))
-    elif children:
-        if len(children) > 1:
-            print(_format_session_table(children))
-        else:
-            print(_format_session_compact(children[0]))
-    return 0
-
-
-def _format_session_compact(session, blocker_counts=None):
-    session = _session_record(session)
-    fields = [
-        ("id", session.get("id")),
-        ("title", session.get("title")),
-        ("dir", session.get("directory")),
-        ("agent", session.get("agent")),
-        ("model", session.get("model")),
-        ("cost", session.get("cost")),
-        ("tokens", _session_tokens(session)),
-        ("created", session.get("createdAt")),
-        ("updated", session.get("updatedAt")),
-    ]
-    if blocker_counts is not None:
-        fields.extend(
-            [
-                ("permissions", blocker_counts["permissions"]),
-                ("questions", blocker_counts["questions"]),
-                ("blockers", blocker_counts["total"]),
-            ]
-        )
-    return " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
-
-
-def _format_session_table(sessions, blocker_counts=None):
-    headers = ["id", "title", "dir", "agent", "model", "cost", "tokens", "updated"]
-    if blocker_counts is not None:
-        headers.extend(["permissions", "questions", "blockers"])
-    rows = []
-    for session in sessions:
-        session = _session_record(session)
-        row = [
-            session.get("id"),
-            session.get("title"),
-            session.get("directory"),
-            session.get("agent"),
-            session.get("model"),
-            session.get("cost"),
-            _session_tokens(session),
-            session.get("updatedAt"),
-        ]
-        if blocker_counts is not None:
-            counts = _counts_for_session(blocker_counts, session)
-            row.extend([counts["permissions"], counts["questions"], counts["total"]])
-        rows.append(row)
-    return _format_table(headers, rows)
-
-
-def _format_fork_compact(fork):
-    fields = [
-        ("parent", fork["parent_session_id"]),
-        ("child", fork["session_id"]),
-        ("message", fork["message_id"]),
-    ]
-    return "forked " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
-
-
-def _fork_record(parent_session_id, message_id, data):
-    if not isinstance(data, dict):
-        data = {}
-    session = data.get("session") if isinstance(data.get("session"), dict) else {}
-    return {
-        "parent_session_id": _first_present(
-            data,
-            "parentID",
-            "parentId",
-            "parentSessionID",
-            "parentSessionId",
-            "parent_session_id",
-        )
-        or parent_session_id,
-        "session_id": _first_present(data, "id", "sessionID", "sessionId", "childSessionID", "childSessionId")
-        or _first_present(session, "id", "sessionID", "sessionId"),
-        "message_id": _first_present(data, "messageID", "messageId", "message_id") or message_id,
-        "response": data,
+def _handle_delete(args, service):
+    result = service.delete(args.session_id)
+    data = {
+        "deleted": True,
+        "id": result.session_id,
+        "response": result.response,
+        "verified": result.verified,
     }
+    return render_command_result(
+        args,
+        data,
+        raw_body=result.raw_body,
+        compact=f"deleted id={_compact_value(result.session_id)} verified={result.verified}",
+    )
 
 
-def _filter_sessions(sessions, *, directory=None, agent=None, model=None):
-    filtered = []
-    for session in sessions:
-        session_record = _session_record(session)
-        if directory is not None and session_record.get("directory") != directory:
-            continue
-        if agent is not None and session_record.get("agent") != agent:
-            continue
-        if model is not None and session_record.get("model") != model:
-            continue
-        filtered.append(session)
-    return filtered
+def _handle_abort(args, service):
+    result = service.abort(args.session_id)
+    return render_command_result(args, result.abort, raw_body=result.raw_body, compact=format_abort_compact(result.abort))
 
 
-def _counts_for_session(counts, session):
-    if counts is None:
-        return None
-    return blocker_counts_for_session(counts, _session_record(session).get("id"))
+def _handle_fork(args, service):
+    result = service.fork(args.session_id, message_id=args.message_id)
+    return render_command_result(args, result.fork, raw_body=result.raw_body, compact=format_fork_compact(result.fork))
 
 
-def _session_with_blocker_counts(session, counts):
-    augmented = dict(session)
-    augmented["blockers"] = _counts_for_session(counts, session)
-    return augmented
+def _handle_children(args, service):
+    result = service.children(args.session_id, directory=args.directory)
+    if args.raw:
+        return render_command_result(args, raw_body=result.raw_body)
+    if args.json:
+        return render_command_result(args, result.children)
+    elif result.children:
+        if len(result.children) > 1:
+            print(format_session_table(result.children))
+        else:
+            print(format_session_compact(result.children[0]))
+    return 0
 
 
-def _session_tokens(session):
-    session = _session_record(session)
-    return _tokens_total(session.get("tokens"))
+_SESSION_HANDLERS = {
+    "create": _handle_create,
+    "list": _handle_list,
+    "inspect": _handle_inspect,
+    "get": _handle_inspect,
+    "delete": _handle_delete,
+    "abort": _handle_abort,
+    "fork": _handle_fork,
+    "children": _handle_children,
+}

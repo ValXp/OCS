@@ -1,39 +1,72 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol
 
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.blocking_execution import execute_blocking_prompt
-from opencode_session.capabilities import detect_capabilities
-from opencode_session.run_start_policy import blocking_execution_start_error, mark_orchestration_cleanup_failed
-from opencode_session.worker_execution import cleanup_created_worker_sessions, execute_worker_attempts
+from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
+from opencode_session.run_start_policy import blocking_execution_start_error
+from opencode_session.schema_common import CapabilitiesRecord, RunRecord, Worker
+from opencode_session.worker_execution import (
+    WorkerExecutionCheckpoint,
+    cleanup_created_worker_sessions,
+    execute_worker_attempt_events,
+)
+from opencode_session.worker_domain import WorkerTransition
 from opencode_session.worker_state import EX_UNAVAILABLE
 
 
 @dataclass
 class CapabilityProbeOutcome:
-    client: object
-    capabilities: dict
+    client: "RunStartClientProtocol"
+    capabilities: CapabilitiesRecord
     start_error: Optional[str] = None
 
 
 @dataclass
-class CleanupFailureOutcome:
+class PersistedTransitionOutcome:
+    run: RunRecord
+    worker: Optional[Worker] = None
+
+
+@dataclass
+class CleanupWorkersOutcome:
+    run: RunRecord
     exit_code: int
-    error: str
+    error: Optional[str] = None
+
+
+class RunStartClientProtocol(Protocol):
+    def configure_route_plan(self, route_plan): ...
+
+    def get_health(self, *, deadline=None): ...
+
+    def get_openapi_doc(self, *, deadline=None): ...
+
+    def create_session_response(self, directory, *, agent=None, model=None, title=None, metadata=None): ...
+
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None, deadline=None): ...
+
+    def run_session_response(self, session_id, message, *, timeout=None, deadline=None): ...
+
+    def reply_session_response(self, session_id, *, timeout=None, deadline=None): ...
+
+    def delete_session_response(self, session_id): ...
+
+    def get_session(self, session_id): ...
 
 
 class RunStartCore:
     def __init__(
         self,
         *,
-        persist_worker_update,
+        persist_worker_transition,
         refresh_run_summary,
         client_factory=OpenCodeApiClient,
         capability_detector=detect_capabilities,
         executor=execute_blocking_prompt,
         now,
     ):
-        self.persist_worker_update = persist_worker_update
+        self.persist_worker_transition = persist_worker_transition
         self.refresh_run_summary = refresh_run_summary
         self.client_factory = client_factory
         self.capability_detector = capability_detector
@@ -43,6 +76,7 @@ class RunStartCore:
     def probe_capabilities(self, run):
         client = self.client_factory(run["server_url"])
         capabilities = self.capability_detector(client)
+        configure_client_route_plan(client, capabilities)
         return CapabilityProbeOutcome(client, capabilities, blocking_execution_start_error(capabilities))
 
     def execute_worker(
@@ -58,7 +92,49 @@ class RunStartCore:
         model=None,
         stop_after_retry=False,
     ):
-        return execute_worker_attempts(
+        current_run = run
+        events = self.worker_execution_events(
+            client,
+            current_run,
+            worker,
+            prompt,
+            capabilities,
+            session_id=session_id,
+            agent=agent,
+            model=model,
+            stop_after_retry=stop_after_retry,
+        )
+        checkpoint = None
+        while True:
+            try:
+                event = events.send(checkpoint) if checkpoint is not None else next(events)
+            except StopIteration:
+                break
+            checkpoint = None
+            if event.transition is not None:
+                persisted = self._persist_transition(current_run, event.transition)
+                current_run = persisted.run
+                checkpoint = WorkerExecutionCheckpoint(current_run, persisted.worker)
+                continue
+            if event.outcome is not None:
+                event.outcome.run = current_run
+                return event.outcome
+        raise RuntimeError("worker execution completed without an outcome")
+
+    def worker_execution_events(
+        self,
+        client,
+        run,
+        worker,
+        prompt,
+        capabilities,
+        *,
+        session_id=None,
+        agent=None,
+        model=None,
+        stop_after_retry=False,
+    ):
+        return execute_worker_attempt_events(
             client,
             run,
             worker,
@@ -69,32 +145,36 @@ class RunStartCore:
             session_id=session_id,
             agent=agent,
             model=model,
+            create_session=True,
             stop_after_retry=stop_after_retry,
-            on_worker_update=lambda: self.persist_worker_update(run, worker),
         )
 
     def cleanup_created_workers(self, client, run, created_session_ids_by_worker):
-        workers = run.get("workers", {})
         first_error = None
+        current_run = run
         for worker_id, session_ids in created_session_ids_by_worker.items():
-            worker = workers.get(worker_id)
+            worker = current_run.get("workers", {}).get(worker_id)
             if not isinstance(worker, dict):
                 continue
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
-            self.persist_worker_update(run, worker)
+            persisted = self._persist_transition(current_run, WorkerTransition.cleanup_updated(worker))
+            current_run = persisted.run
             if cleanup_outcome.error is not None:
                 if first_error is None:
                     first_error = cleanup_outcome.error
-                mark_orchestration_cleanup_failed(run, worker, str(cleanup_outcome.error))
-                self.persist_worker_update(run, worker)
         if first_error is not None:
-            self.refresh_run_summary(run)
-            return CleanupFailureOutcome(
+            self.refresh_run_summary(current_run)
+            return CleanupWorkersOutcome(
+                current_run,
                 EX_UNAVAILABLE,
                 f"api failure: disposable session cleanup failed: {first_error}",
             )
-        return None
+        return CleanupWorkersOutcome(current_run, 0)
 
+    def _persist_transition(self, run, transition):
+        result = self.persist_worker_transition(run, transition)
+        worker = result.workers[0] if result.workers else result.run.get("workers", {}).get(transition.worker_id)
+        return PersistedTransitionOutcome(result.run, worker)
 
 def remember_created_worker_sessions(created_session_ids_by_worker, worker, session_ids):
     if not session_ids:

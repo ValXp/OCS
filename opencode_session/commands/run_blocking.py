@@ -1,4 +1,3 @@
-import json
 import sys
 from pathlib import Path
 
@@ -10,7 +9,9 @@ from opencode_session.blocking_execution import (
     format_blocking_execution_compact,
     unsupported_blocking_execution_message,
 )
-from opencode_session.capabilities import capabilities_from_openapi_doc
+from opencode_session.capabilities import capabilities_from_openapi_doc, configure_client_route_plan
+from opencode_session.commands.rendering import CommandResult, render_command_result
+from opencode_session.disposable_session_lifecycle import delete_and_verify_disposable_session
 from opencode_session.session_ids import require_session_id
 from opencode_session.session_lifecycle import is_session_not_found_error
 
@@ -45,14 +46,13 @@ def handle_run_blocking_command(
     try:
         client = client_factory(args.server)
     except OpenCodeApiError as error:
-        print_error(str(error))
-        return unavailable_exit
+        return _error_result(args, str(error), unavailable_exit, print_error)
 
     try:
         capabilities = capabilities_from_openapi_doc(client.require_openapi_doc())
+        configure_client_route_plan(client, capabilities)
         if blocking_execution_strategy(capabilities) is None:
-            print_error(unsupported_blocking_execution_message())
-            return unsupported_exit
+            return _error_result(args, unsupported_blocking_execution_message(), unsupported_exit, print_error)
         if session_id is None:
             directory = str(Path(args.directory or ".").resolve())
             create_response = client.create_session_response(
@@ -65,28 +65,35 @@ def handle_run_blocking_command(
         result = execute_blocking_prompt(client, session_id, prompt, capabilities)
     except BlockingProviderFailure as error:
         cleanup_error = _delete_disposable_session(client, created_session_id)
-        if cleanup_error:
-            _print_cleanup_error(print_error, cleanup_error)
-        print_error(f"provider failure: {error}")
-        return unavailable_exit
+        return _error_result(
+            args,
+            f"provider failure: {error}",
+            unavailable_exit,
+            print_error,
+            warnings=_cleanup_warnings(cleanup_error),
+        )
     except OpenCodeApiError as error:
         cleanup_error = _delete_disposable_session(client, created_session_id)
-        if cleanup_error:
-            _print_cleanup_error(print_error, cleanup_error)
         if session_id is not None and is_session_not_found_error(error):
-            print_error(f"session not found: {session_id}")
+            return _error_result(
+                args,
+                f"session not found: {session_id}",
+                unavailable_exit,
+                print_error,
+                warnings=_cleanup_warnings(cleanup_error),
+            )
         else:
-            print_error(f"api failure: {error}")
-        return unavailable_exit
+            return _error_result(
+                args,
+                f"api failure: {error}",
+                unavailable_exit,
+                print_error,
+                warnings=_cleanup_warnings(cleanup_error),
+            )
     cleanup_error = _delete_disposable_session(client, created_session_id)
     if cleanup_error:
-        _print_cleanup_error(print_error, cleanup_error)
-        return unavailable_exit
-    if args.json:
-        print(json.dumps(result, sort_keys=True))
-        return 0
-    print(format_blocking_execution_compact(result))
-    return 0
+        return _error_result(args, f"api failure: disposable session cleanup failed: {cleanup_error}", unavailable_exit, print_error)
+    return render_command_result(args, CommandResult(result, compact=format_blocking_execution_compact))
 
 
 def _read_prompt(prompt_words):
@@ -100,15 +107,21 @@ def _read_prompt(prompt_words):
     return prompt
 
 
-def _print_cleanup_error(print_error, error):
-    print_error(f"api failure: disposable session cleanup failed: {error}")
+def _error_result(args, message, exit_code, print_error, *, warnings=()):
+    return render_command_result(
+        args,
+        CommandResult(error=message, exit_code=exit_code, warnings=warnings),
+        print_error=print_error,
+    )
+
+
+def _cleanup_warnings(error):
+    if error is None:
+        return ()
+    return (f"api failure: disposable session cleanup failed: {error}",)
 
 
 def _delete_disposable_session(client, session_id):
     if session_id is None:
         return None
-    try:
-        client.delete_session(session_id)
-    except OpenCodeApiError as error:
-        return error
-    return None
+    return delete_and_verify_disposable_session(client, session_id)

@@ -33,12 +33,12 @@ class ImportBoundaryTest(unittest.TestCase):
         blocked = BlockedModuleFinder(
             {
                 "opencode_session.api_client",
-                "opencode_session.records",
+                "opencode_session.schema_session_adapter",
             }
         )
         with temporarily_unimported(
             "opencode_session.api_client",
-            "opencode_session.records",
+            "opencode_session.schema_session_adapter",
             "opencode_session.run_record",
             "opencode_session.worker_state",
         ):

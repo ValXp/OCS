@@ -1,18 +1,35 @@
+import inspect
 from dataclasses import dataclass, field
 from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
+from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
+from opencode_session.schema_common import ExecutionResultRecord, RunRecord, Worker
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
+from opencode_session.worker_domain import WorkerTransition, new_worker_attempt_record
 from opencode_session.worker_state import (
+    apply_worker_transition_to_worker,
     apply_worker_result,
     mark_worker_active,
     mark_worker_failed,
     mark_worker_timeout,
     schedule_worker_retry,
+    worker_retry_available,
     worker_timeout_reason,
 )
+
+
+COMPLETED = "completed"
+RETRY_SCHEDULED = "retry_scheduled"
+TERMINAL_FAILURE = "terminal_failure"
+
+WORKER_EXECUTION_TRANSITION = "transition"
+WORKER_EXECUTION_OUTCOME = "outcome"
+
+_ATTEMPT_COMPLETED = "completed"
+_ATTEMPT_FAILED = "failed"
 
 
 @dataclass
@@ -27,6 +44,38 @@ class WorkerExecutionOutcome:
     created_session_ids: list = field(default_factory=list)
     error: Optional[str] = None
     failure_category: Optional[str] = None
+    run: Optional[RunRecord] = None
+
+
+@dataclass
+class WorkerExecutionEvent:
+    kind: str
+    transition: Optional[WorkerTransition] = None
+    outcome: Optional[WorkerExecutionOutcome] = None
+
+
+@dataclass
+class WorkerExecutionCheckpoint:
+    run: Optional[RunRecord] = None
+    worker: Optional[Worker] = None
+
+
+@dataclass
+class WorkerAttemptOutcome:
+    kind: str
+    result: Optional[ExecutionResultRecord] = None
+    failure_category: Optional[str] = None
+    reason: Optional[str] = None
+    prompt_id: Optional[str] = None
+
+
+@dataclass
+class WorkerAttemptTransition:
+    kind: str
+    created_session_id: Optional[str] = None
+    error: Optional[str] = None
+    failure_category: Optional[str] = None
+    worker_transition: Optional[WorkerTransition] = None
 
 
 @dataclass
@@ -64,32 +113,84 @@ def ensure_worker_session(
     return WorkerSessionOutcome(worker_session_id, created_session_id)
 
 
-def create_isolated_timeout_retry_session(client, run, worker, reason, created_at, *, agent=None, model=None):
-    timed_out_session_id = worker.get("session_id")
-    retry_agent = agent if agent is not None else worker.get("agent")
-    retry_model = model if model is not None else worker.get("model")
-    create_response = client.create_session_response(run["directory"], agent=retry_agent, model=retry_model)
-    retry_session_id = require_session_id(create_response, "timeout retry session creation")
-    if retry_session_id == timed_out_session_id:
-        raise OpenCodeApiError(f"timeout retry session creation returned original in-flight session '{timed_out_session_id}'")
-    worker["session_id"] = retry_session_id
-    _timeout_retry_sessions(worker).append(
-        {
-            "timed_out_session_id": timed_out_session_id,
-            "retry_session_id": retry_session_id,
-            "reason": reason,
-            "created_at": created_at,
-        }
+def provision_worker_session(
+    client,
+    run,
+    worker,
+    *,
+    session_id=None,
+    agent=None,
+    model=None,
+    create_session=True,
+):
+    if create_session:
+        return ensure_worker_session(
+            client,
+            run,
+            worker,
+            session_id=session_id,
+            agent=agent,
+            model=model,
+            treat_falsey_session_as_missing=True,
+        )
+    worker["session_id"] = session_id or worker.get("session_id")
+    if agent is not None:
+        worker["agent"] = agent
+    if model is not None:
+        worker["model"] = model
+    return WorkerSessionOutcome(worker.get("session_id"))
+
+
+def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor):
+    attempt_session_id = worker["session_id"]
+    try:
+        result = _call_worker_with_deadline(
+            worker,
+            lambda deadline, attempt_session_id=attempt_session_id: _execute_with_optional_deadline(
+                executor,
+                client,
+                attempt_session_id,
+                prompt,
+                capabilities,
+                deadline=deadline,
+            ),
+        )
+    except WorkerExecutionTimeout:
+        return WorkerAttemptOutcome(_ATTEMPT_FAILED, failure_category="timeout", reason=worker_timeout_reason(worker))
+    except OpenCodeApiError as error:
+        return WorkerAttemptOutcome(_ATTEMPT_FAILED, failure_category="api", reason=str(error))
+    except BlockingProviderFailure as error:
+        return WorkerAttemptOutcome(
+            _ATTEMPT_FAILED,
+            failure_category="provider",
+            reason=str(error),
+            prompt_id=error.prompt_id,
+        )
+    return WorkerAttemptOutcome(_ATTEMPT_COMPLETED, result=result)
+
+
+def apply_worker_attempt_transition(client, run, worker, attempt, *, now, agent=None, model=None):
+    if attempt.kind == _ATTEMPT_COMPLETED:
+        return _apply_completed_attempt(worker, attempt.result)
+    if attempt.failure_category == "timeout":
+        return _apply_timeout_attempt_failure(client, run, worker, attempt.reason, now, agent=agent, model=model)
+    if attempt.failure_category == "api":
+        return _apply_retryable_attempt_failure(worker, "api", attempt.reason, error_prefix="api failure")
+    if attempt.failure_category == "provider":
+        return _apply_retryable_attempt_failure(
+            worker,
+            "provider",
+            attempt.reason,
+            error_prefix="provider failure",
+            prompt_ids=(attempt.prompt_id,),
+        )
+    failure_transition = mark_worker_failed(worker, "unknown", attempt.reason or "worker attempt failed")
+    return WorkerAttemptTransition(
+        TERMINAL_FAILURE,
+        error=attempt.reason or "worker attempt failed",
+        failure_category="unknown",
+        worker_transition=failure_transition,
     )
-    return retry_session_id
-
-
-def _timeout_retry_sessions(worker):
-    sessions = worker.get("timeout_retry_sessions")
-    if not isinstance(sessions, list):
-        sessions = []
-        worker["timeout_retry_sessions"] = sessions
-    return sessions
 
 
 def execute_worker_attempts(
@@ -106,114 +207,201 @@ def execute_worker_attempts(
     model=None,
     create_session=True,
     stop_after_retry=False,
-    on_worker_update=None,
+):
+    outcome = None
+    for event in execute_worker_attempt_events(
+        client,
+        run,
+        worker,
+        prompt,
+        capabilities,
+        executor=executor,
+        now=now,
+        session_id=session_id,
+        agent=agent,
+        model=model,
+        create_session=create_session,
+        stop_after_retry=stop_after_retry,
+    ):
+        if event.outcome is not None:
+            outcome = event.outcome
+    if outcome is None:
+        raise RuntimeError("worker execution completed without an outcome")
+    return outcome
+
+
+def execute_worker_attempt_events(
+    client,
+    run,
+    worker,
+    prompt,
+    capabilities,
+    *,
+    executor=execute_blocking_prompt,
+    now,
+    session_id=None,
+    agent=None,
+    model=None,
+    create_session=True,
+    stop_after_retry=False,
 ):
     created_session_ids = []
-    if create_session:
-        session_outcome = ensure_worker_session(
-            client,
-            run,
-            worker,
-            session_id=session_id,
-            agent=agent,
-            model=model,
-            treat_falsey_session_as_missing=True,
-        )
-        if session_outcome.created_session_id is not None:
-            created_session_ids.append(session_outcome.created_session_id)
-        _notify_worker_update(on_worker_update)
-    else:
-        worker["session_id"] = session_id or worker.get("session_id")
-        if agent is not None:
-            worker["agent"] = agent
-        if model is not None:
-            worker["model"] = model
+    created_session_ids_for_next_attempt = []
+    session_outcome = provision_worker_session(
+        client,
+        run,
+        worker,
+        session_id=session_id,
+        agent=agent,
+        model=model,
+        create_session=create_session,
+    )
+    if session_outcome.created_session_id is not None:
+        created_session_ids.append(session_outcome.created_session_id)
+        created_session_ids_for_next_attempt.append(session_outcome.created_session_id)
+    run, worker = yield from _emit_worker_transition(run, worker, WorkerTransition.provisioned(worker))
 
     while True:
-        mark_worker_active(worker, now=now)
-        attempt_session_id = worker["session_id"]
-        try:
-            result = _call_worker_with_timeout(
-                worker,
-                lambda attempt_session_id=attempt_session_id: executor(
-                    client,
-                    attempt_session_id,
-                    prompt,
-                    capabilities,
-                ),
-            )
-        except WorkerExecutionTimeout:
-            reason = worker_timeout_reason(worker)
-            if schedule_worker_retry(worker, "timeout", reason):
-                timed_out_at = now()
-                worker["timed_out_at"] = timed_out_at
-                try:
-                    retry_session_id = create_isolated_timeout_retry_session(
-                        client,
-                        run,
-                        worker,
-                        reason,
-                        timed_out_at,
-                        agent=agent,
-                        model=model,
-                    )
-                except OpenCodeApiError as error:
-                    message = f"timeout retry session creation failed: {error}"
-                    mark_worker_failed(worker, "api", message)
-                    _notify_worker_update(on_worker_update)
-                    return WorkerExecutionOutcome("failed", created_session_ids, f"api failure: {message}", "api")
-                created_session_ids.append(retry_session_id)
-                _notify_worker_update(on_worker_update)
-                if stop_after_retry:
-                    return WorkerExecutionOutcome("retry", created_session_ids, failure_category="timeout")
-                continue
-            mark_worker_timeout(worker, reason, now)
-            _notify_worker_update(on_worker_update)
-            return WorkerExecutionOutcome("failed", created_session_ids, reason, "timeout")
-        except OpenCodeApiError as error:
-            if schedule_worker_retry(worker, "api", str(error)):
-                _notify_worker_update(on_worker_update)
-                if stop_after_retry:
-                    return WorkerExecutionOutcome("retry", created_session_ids, failure_category="api")
-                continue
-            mark_worker_failed(worker, "api", str(error))
-            _notify_worker_update(on_worker_update)
-            return WorkerExecutionOutcome("failed", created_session_ids, f"api failure: {error}", "api")
-        except BlockingProviderFailure as error:
-            if error.prompt_id is not None:
-                worker["prompt_ids"] = [error.prompt_id]
-            if schedule_worker_retry(worker, "provider", str(error)):
-                _notify_worker_update(on_worker_update)
-                if stop_after_retry:
-                    return WorkerExecutionOutcome("retry", created_session_ids, failure_category="provider")
-                continue
-            mark_worker_failed(worker, "provider", str(error))
-            _notify_worker_update(on_worker_update)
-            return WorkerExecutionOutcome("failed", created_session_ids, f"provider failure: {error}", "provider")
+        active_transition = mark_worker_active(worker, now=now)
+        run, worker = yield from _emit_worker_transition(run, worker, active_transition)
+        attempt_record = new_worker_attempt_record(
+            worker,
+            started_at=now(),
+            created_session_ids=created_session_ids_for_next_attempt,
+        )
+        created_session_ids_for_next_attempt = []
+        run, worker = yield from _emit_worker_transition(
+            run,
+            worker,
+            WorkerTransition.attempt_started(worker["id"], attempt_record),
+        )
+        attempt = execute_single_worker_attempt(
+            client,
+            worker,
+            prompt,
+            capabilities,
+            executor=executor,
+        )
+        transition = apply_worker_attempt_transition(client, run, worker, attempt, now=now, agent=agent, model=model)
+        if transition.created_session_id is not None:
+            created_session_ids.append(transition.created_session_id)
+            created_session_ids_for_next_attempt.append(transition.created_session_id)
+        transition.worker_transition = _with_finalized_attempt(
+            transition.worker_transition,
+            attempt_record["id"],
+            transition,
+            attempt,
+            finished_at=now(),
+        )
+        run, worker = yield from _emit_worker_transition(run, worker, transition.worker_transition)
+        if transition.kind == RETRY_SCHEDULED and not stop_after_retry:
+            continue
+        yield WorkerExecutionEvent(
+            WORKER_EXECUTION_OUTCOME,
+            outcome=WorkerExecutionOutcome(
+                transition.kind,
+                created_session_ids,
+                transition.error,
+                transition.failure_category,
+                run,
+            ),
+        )
+        return
 
-        prompt_id = result["message_ids"].get("user")
-        if prompt_id is not None:
-            worker["prompt_ids"] = [prompt_id]
-        apply_worker_result(worker, result)
-        _notify_worker_update(on_worker_update)
-        return WorkerExecutionOutcome("completed", created_session_ids)
+
+def _emit_worker_transition(run, worker, transition):
+    if transition is None:
+        return run, worker
+    checkpoint = yield WorkerExecutionEvent(WORKER_EXECUTION_TRANSITION, transition=transition)
+    if isinstance(checkpoint, WorkerExecutionCheckpoint):
+        checkpoint_run = checkpoint.run or run
+        checkpoint_worker = checkpoint.worker
+        if checkpoint_worker is None:
+            checkpoint_worker = checkpoint_run.get("workers", {}).get(transition.worker_id)
+        return checkpoint_run, checkpoint_worker or worker
+    return run, apply_worker_transition_to_worker(worker, transition)
+
+
+def _with_finalized_attempt(worker_transition, attempt_id, transition, attempt, *, finished_at):
+    if worker_transition is None:
+        return None
+    return worker_transition.with_finalized_attempt(
+        attempt_id,
+        _attempt_finalization_fields(transition, attempt, finished_at=finished_at),
+    )
+
+
+def _attempt_finalization_fields(transition, attempt, *, finished_at):
+    fields = {
+        "status": _attempt_status(transition),
+        "finished_at": finished_at,
+    }
+    if transition.error is not None:
+        fields["error"] = transition.error
+    if transition.failure_category is not None:
+        fields["failure_category"] = transition.failure_category
+    if isinstance(attempt.result, dict):
+        fields["result_status"] = attempt.result.get("status")
+        message_ids = attempt.result.get("message_ids") if isinstance(attempt.result.get("message_ids"), dict) else {}
+        if message_ids.get("user") is not None:
+            fields["user_message_id"] = message_ids["user"]
+        if message_ids.get("assistant") is not None:
+            fields["assistant_message_id"] = message_ids["assistant"]
+    if attempt.prompt_id is not None:
+        fields["user_message_id"] = attempt.prompt_id
+    return fields
+
+
+def _attempt_status(transition):
+    if transition.kind == COMPLETED:
+        return "completed"
+    if transition.kind == RETRY_SCHEDULED:
+        return "retry_scheduled"
+    return "failed"
+
+
+def _apply_completed_attempt(worker, result):
+    prompt_id = result["message_ids"].get("user")
+    transition = apply_worker_result(worker, result, prompt_ids=(prompt_id,))
+    return WorkerAttemptTransition(COMPLETED, worker_transition=transition)
+
+
+def _apply_timeout_attempt_failure(client, run, worker, reason, now, *, agent=None, model=None):
+    manual_retry_available = worker_retry_available(worker, "timeout")
+    transition = mark_worker_timeout(worker, reason, now, manual_retry_required=manual_retry_available)
+    if manual_retry_available:
+        return WorkerAttemptTransition(
+            TERMINAL_FAILURE,
+            error=f"{reason}; automatic timeout retry skipped because the timed-out request may still be running",
+            failure_category="timeout",
+            worker_transition=transition,
+        )
+    return WorkerAttemptTransition(TERMINAL_FAILURE, error=reason, failure_category="timeout", worker_transition=transition)
+
+
+def _apply_retryable_attempt_failure(worker, category, reason, *, error_prefix, prompt_ids=()):
+    retry_transition = schedule_worker_retry(worker, category, reason, prompt_ids=prompt_ids)
+    if retry_transition:
+        return WorkerAttemptTransition(RETRY_SCHEDULED, failure_category=category, worker_transition=retry_transition)
+    failure_transition = mark_worker_failed(worker, category, reason, prompt_ids=prompt_ids)
+    return WorkerAttemptTransition(
+        TERMINAL_FAILURE,
+        error=f"{error_prefix}: {reason}",
+        failure_category=category,
+        worker_transition=failure_transition,
+    )
 
 
 def cleanup_created_worker_sessions(client, worker, session_ids):
     cleanup = worker.setdefault("cleanup", {"requested": True, "deleted": False})
-    deleted_session_ids = []
-    errors = []
-    for session_id in session_ids:
-        try:
-            client.delete_session(session_id)
-        except OpenCodeApiError as error:
-            errors.append(error)
-            continue
-        deleted_session_ids.append(session_id)
+    cleanup_outcome = cleanup_disposable_sessions(client, session_ids)
+    cleanup_record = cleanup_outcome.record
+    deleted_session_ids = list(cleanup_record["deleted"])
+    errors = cleanup_record["errors"]
 
-    cleanup["deleted"] = bool(deleted_session_ids) and not errors
+    cleanup["deleted"] = bool(cleanup_record["verified"]) and not errors
     if errors:
-        cleanup["error"] = str(errors[0])
+        cleanup["error"] = errors[0]["error"]
     else:
         cleanup.pop("error", None)
     if deleted_session_ids:
@@ -223,19 +411,48 @@ def cleanup_created_worker_sessions(client, worker, session_ids):
             cleanup.pop("sessions", None)
     else:
         cleanup.pop("sessions", None)
+    if cleanup_record["verified"]:
+        if len(cleanup_record["verified"]) > 1 or errors:
+            cleanup["verified"] = list(cleanup_record["verified"])
+        else:
+            cleanup.pop("verified", None)
+    else:
+        cleanup.pop("verified", None)
     if errors:
-        return WorkerCleanupOutcome(deleted_session_ids, errors[0])
+        return WorkerCleanupOutcome(deleted_session_ids, cleanup_outcome.first_error)
     return WorkerCleanupOutcome(deleted_session_ids)
 
 
-def _call_worker_with_timeout(worker, callback):
+def _call_worker_with_deadline(worker, callback):
     timeout = worker.get("timeout_seconds")
+    deadline = TimeoutDeadline(timeout) if timeout is not None else None
     try:
-        return TimeoutDeadline(timeout).run(callback)
+        if deadline is not None:
+            deadline.require_time()
+        return callback(deadline)
     except TimeoutExpired as error:
+        raise WorkerExecutionTimeout() from error
+    except TimeoutError as error:
         raise WorkerExecutionTimeout() from error
 
 
-def _notify_worker_update(callback):
-    if callback is not None:
-        callback()
+def _execute_with_optional_deadline(executor, client, session_id, prompt, capabilities, *, deadline):
+    if deadline is not None and _accepts_keyword(executor, "deadline"):
+        return executor(client, session_id, prompt, capabilities, deadline=deadline)
+    if deadline is not None and _accepts_keyword(executor, "timeout"):
+        return executor(client, session_id, prompt, capabilities, timeout=deadline.require_time())
+    return executor(client, session_id, prompt, capabilities)
+
+
+def _accepts_keyword(callable_object, name):
+    try:
+        signature = inspect.signature(callable_object)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.kind in {inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
+            if parameter.name == name:
+                return True
+    return False

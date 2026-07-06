@@ -4,9 +4,9 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from opencode_session.events import EventStreamError, iter_event_stream
-from opencode_session.records import normalized_tokens as _normalized_tokens
-from opencode_session.records import session_value as _session_value
+from opencode_session.schema_session_adapter import normalize_session_payload
 from opencode_session.timeout_boundary import TimeoutExpired
+from opencode_session.urllib_compat import set_response_socket_timeout
 
 
 class OpenCodeApiError(Exception):
@@ -25,58 +25,73 @@ class OpenCodeApiResponse:
         self.body = body
 
 
+DEFAULT_ROUTE_PLAN = {
+    "session_collection": "/api/session",
+    "session_item": "/api/session/{sessionID}",
+    "blocking_message": "/session/{sessionID}/message",
+    "legacy_run": "/session/{sessionID}/run",
+    "legacy_reply": "/session/{sessionID}/reply",
+}
+
+
 class OpenCodeApiClient:
     def __init__(self, base_url, *, timeout=3):
         _validate_base_url(base_url)
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
+        self.route_plan = None
 
-    def get_health(self):
+    def configure_route_plan(self, route_plan):
+        self.route_plan = {**DEFAULT_ROUTE_PLAN, **(route_plan or {})}
+        return self
+
+    def get_health(self, *, deadline=None):
         errors = []
         for path in ("global/health", "api/health", "health"):
             try:
-                return self.get_json(path)
+                return self.get_json(path, deadline=deadline)
             except OpenCodeApiError as error:
                 errors.append(str(error))
         raise OpenCodeApiError("; ".join(errors))
 
-    def get_openapi_doc(self):
+    def get_openapi_doc(self, *, deadline=None):
         try:
-            return self.get_json("doc")
+            return self.get_json("doc", deadline=deadline)
         except OpenCodeApiError:
             return {"paths": {}}
 
-    def require_openapi_doc(self):
-        return self.get_json("doc")
+    def require_openapi_doc(self, *, deadline=None):
+        return self.get_json("doc", deadline=deadline)
 
-    def get_json(self, path, *, timeout=None):
-        return self.get_response(path, timeout=timeout).data
+    def get_json(self, path, *, timeout=None, deadline=None):
+        return self.get_response(path, timeout=timeout, deadline=deadline).data
 
-    def get_response(self, path, *, timeout=None):
-        return self._request_json("GET", path, timeout=timeout)
+    def get_response(self, path, *, timeout=None, deadline=None):
+        return self._request_json("GET", path, timeout=timeout, deadline=deadline)
 
-    def post_json(self, path, payload, *, timeout=None):
-        return self.post_response(path, payload, timeout=timeout).data
+    def post_json(self, path, payload, *, timeout=None, deadline=None):
+        return self.post_response(path, payload, timeout=timeout, deadline=deadline).data
 
-    def post_response(self, path, payload, *, timeout=None):
-        return self._request_json("POST", path, payload, timeout=timeout)
+    def post_response(self, path, payload, *, timeout=None, deadline=None):
+        return self._request_json("POST", path, payload, timeout=timeout, deadline=deadline)
 
-    def delete_json(self, path, *, timeout=None):
-        return self.delete_response(path, timeout=timeout).data
+    def delete_json(self, path, *, timeout=None, deadline=None):
+        return self.delete_response(path, timeout=timeout, deadline=deadline).data
 
-    def delete_response(self, path, *, timeout=None):
-        return self._request_json("DELETE", path, timeout=timeout)
+    def delete_response(self, path, *, timeout=None, deadline=None):
+        return self._request_json("DELETE", path, timeout=timeout, deadline=deadline)
 
-    def stream_events(self, path, *, on_open=None, deadline=None):
+    def stream_events(self, path, *, on_open=None, deadline=None, stop_event=None):
         url = urljoin(self.base_url, path.lstrip("/"))
         headers = {"Accept": "text/event-stream, application/json"}
         request = Request(url, headers=headers, method="GET")
         try:
             with urlopen(request, timeout=self._stream_open_timeout(deadline)) as response:
-                _set_response_socket_timeout(response, None if deadline is None else deadline.require_time())
+                stream_timeout = _event_stream_read_timeout(deadline, stop_event)
+                set_response_socket_timeout(response, stream_timeout)
                 if on_open is not None:
                     on_open()
-                lines = response if deadline is None else _iter_response_lines_until_deadline(response, deadline)
+                lines = _event_stream_lines(response, deadline, stop_event)
                 yield from iter_event_stream(lines)
         except TimeoutExpired:
             raise
@@ -88,29 +103,14 @@ class OpenCodeApiClient:
                 data={"kind": "invalid_event_stream"},
             ) from error
         except HTTPError as error:
-            error_body = error.read().decode("utf-8")
-            error_data = None
-            try:
-                error_data = json.loads(error_body or "{}")
-            except json.JSONDecodeError:
-                pass
-            raise OpenCodeApiError(
-                f"GET /{path.lstrip('/')} failed: HTTP {error.code}",
-                status=error.code,
-                method="GET",
-                path=f"/{path.lstrip('/')}",
-                body=error_body,
-                data=error_data,
-            ) from error
+            _raise_http_error(error, "GET", path)
         except URLError as error:
-            raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline, stream=True)
         except TimeoutError as error:
-            if deadline is not None and deadline.expired():
-                raise TimeoutExpired() from error
-            raise OpenCodeApiError(f"OpenCode event stream timed out at {self.base_url.rstrip('/')}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline, stream=True)
 
-    def _request_json(self, method, path, payload=None, *, timeout=None):
-        response_body = self._request_body(method, path, payload, timeout=timeout)
+    def _request_json(self, method, path, payload=None, *, timeout=None, deadline=None):
+        response_body = self._request_body(method, path, payload, timeout=timeout, deadline=deadline)
         try:
             data = json.loads(response_body or "{}")
         except json.JSONDecodeError as error:
@@ -121,7 +121,7 @@ class OpenCodeApiClient:
             ) from error
         return OpenCodeApiResponse(data, response_body)
 
-    def _request_body(self, method, path, payload=None, *, timeout=None):
+    def _request_body(self, method, path, payload=None, *, timeout=None, deadline=None):
         url = urljoin(self.base_url, path.lstrip("/"))
         headers = {"Accept": "application/json"}
         body = None
@@ -130,27 +130,16 @@ class OpenCodeApiClient:
             headers["Content-Type"] = "application/json"
         request = Request(url, data=body, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=self._request_timeout(timeout)) as response:
+            with urlopen(request, timeout=self._request_timeout(timeout, deadline)) as response:
                 return response.read().decode("utf-8")
+        except TimeoutExpired:
+            raise
         except HTTPError as error:
-            error_body = error.read().decode("utf-8")
-            error_data = None
-            try:
-                error_data = json.loads(error_body or "{}")
-            except json.JSONDecodeError:
-                pass
-            raise OpenCodeApiError(
-                f"{method} /{path.lstrip('/')} failed: HTTP {error.code}",
-                status=error.code,
-                method=method,
-                path=f"/{path.lstrip('/')}",
-                body=error_body,
-                data=error_data,
-            ) from error
+            _raise_http_error(error, method, path)
         except URLError as error:
-            raise OpenCodeApiError(f"cannot reach OpenCode server at {self.base_url.rstrip('/')}: {error.reason}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline)
         except TimeoutError as error:
-            raise OpenCodeApiError(f"OpenCode server timed out at {self.base_url.rstrip('/')}") from error
+            _raise_transport_error(error, base_url=self.base_url, deadline=deadline)
 
     def create_session(self, directory, *, agent=None, model=None, title=None, metadata=None):
         return self.create_session_response(directory, agent=agent, model=model, title=title, metadata=metadata).data
@@ -165,31 +154,25 @@ class OpenCodeApiClient:
             payload["title"] = title
         if metadata is not None:
             payload["metadata"] = metadata
-        return _with_session_payload(self.post_response("api/session", payload))
+        return _with_session_payload(self.post_response(self._route_path("session_collection"), payload), self.route_plan)
 
     def list_sessions(self):
         return self.list_sessions_response().data
 
     def list_sessions_response(self):
-        return _with_session_payload(self.get_response("api/session"))
+        return _with_session_payload(self.get_response(self._route_path("session_collection")), self.route_plan)
 
     def get_session(self, session_id):
         return self.get_session_response(session_id).data
 
     def get_session_response(self, session_id):
-        return _with_session_payload(self.get_response(f"api/session/{quote(session_id, safe='')}"))
+        return _with_session_payload(self.get_response(self._route_path("session_item", session_id=session_id)), self.route_plan)
 
     def delete_session(self, session_id):
         return self.delete_session_response(session_id).data
 
     def delete_session_response(self, session_id):
-        quoted_session_id = quote(session_id, safe="")
-        try:
-            return self.delete_response(f"api/session/{quoted_session_id}")
-        except OpenCodeApiError as error:
-            if error.method == "DELETE" and error.path == f"/api/session/{quoted_session_id}" and "invalid JSON" in str(error):
-                return self.delete_response(f"session/{quoted_session_id}")
-            raise
+        return self.delete_response(self._route_path("session_item", session_id=session_id))
 
     def abort_session_response(self, session_id):
         return self.post_response(f"session/{quote(session_id, safe='')}/abort", {})
@@ -201,25 +184,40 @@ class OpenCodeApiClient:
         return self.post_response(f"session/{quote(session_id, safe='')}/fork", payload)
 
     def list_child_sessions_response(self, session_id):
-        return _with_session_payload(self.get_response(f"session/{quote(session_id, safe='')}/children"))
+        return _with_session_payload(self.get_response(f"session/{quote(session_id, safe='')}/children"), route_path="/session")
 
-    def run_session_response(self, session_id, message, *, timeout=None):
-        return self.post_response(f"session/{quote(session_id, safe='')}/run", {"message": message}, timeout=timeout)
+    def run_session_response(self, session_id, message, *, timeout=None, deadline=None):
+        return self.post_response(
+            self._route_path("legacy_run", session_id=session_id),
+            {"message": message},
+            timeout=timeout,
+            deadline=deadline,
+        )
 
-    def reply_session_response(self, session_id, *, timeout=None):
-        return self.post_response(f"session/{quote(session_id, safe='')}/reply", {}, timeout=timeout)
+    def reply_session_response(self, session_id, *, timeout=None, deadline=None):
+        return self.post_response(
+            self._route_path("legacy_reply", session_id=session_id),
+            {},
+            timeout=timeout,
+            deadline=deadline,
+        )
 
-    def message_session_response(self, session_id, message, *, message_id=None, timeout=None):
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None, deadline=None):
         payload = {"parts": [{"type": "text", "text": message}]}
         if message_id is not None:
             payload["messageID"] = message_id
-        return self.post_response(f"session/{quote(session_id, safe='')}/message", payload, timeout=timeout)
+        return self.post_response(
+            self._route_path("blocking_message", session_id=session_id),
+            payload,
+            timeout=timeout,
+            deadline=deadline,
+        )
 
     def admit_prompt_response(self, session_id, payload, prompt_path):
         return self.post_response(_session_prompt_path(prompt_path, session_id), payload)
 
-    def wait_session_response(self, session_id, wait_path):
-        return self.post_response(_session_prompt_path(wait_path, session_id), {})
+    def wait_session_response(self, session_id, wait_path, *, deadline=None):
+        return self.post_response(_session_prompt_path(wait_path, session_id), {}, deadline=deadline)
 
     def list_permissions_response(self):
         return self.get_response("permission")
@@ -239,7 +237,9 @@ class OpenCodeApiClient:
     def reject_question_response(self, request_id):
         return self.post_response(f"question/{quote(request_id, safe='')}/reject", {})
 
-    def _request_timeout(self, timeout):
+    def _request_timeout(self, timeout, deadline):
+        if deadline is not None:
+            return deadline.require_time()
         if timeout is None:
             return self.timeout
         return timeout
@@ -248,6 +248,21 @@ class OpenCodeApiClient:
         if deadline is None:
             return self.timeout
         return deadline.require_time()
+
+    def _route_path(self, name, *, session_id=None):
+        route_plan = self._require_route_plan()
+        path = route_plan.get(name) or DEFAULT_ROUTE_PLAN[name]
+        if session_id is not None:
+            path = _session_prompt_path(path, session_id)
+        return path.lstrip("/")
+
+    def _require_route_plan(self):
+        if self.route_plan is None:
+            raise OpenCodeApiError(
+                "client route plan is not configured; discover capabilities and configure routes before session calls",
+                data={"kind": "route_plan_required"},
+            )
+        return self.route_plan
 
 
 def _session_prompt_path(prompt_path, session_id):
@@ -258,57 +273,8 @@ def _session_prompt_path(prompt_path, session_id):
     return path
 
 
-def _with_session_payload(response):
-    return OpenCodeApiResponse(_normalize_session_payload(response.data), response.body)
-
-
-def _normalize_session_payload(payload):
-    if isinstance(payload, list):
-        return [_normalize_session_record(item) for item in payload]
-    if not isinstance(payload, dict):
-        return payload
-
-    normalized = dict(payload)
-    data = normalized.get("data")
-    if isinstance(data, list):
-        normalized["data"] = [_normalize_session_record(item) for item in data]
-        return normalized
-    if isinstance(data, dict):
-        normalized["data"] = _normalize_session_record(data)
-        return normalized
-
-    for name in ("sessions", "children"):
-        records = normalized.get(name)
-        if isinstance(records, list):
-            normalized[name] = [_normalize_session_record(item) for item in records]
-            return normalized
-
-    return _normalize_session_record(normalized)
-
-
-def _normalize_session_record(record):
-    if not isinstance(record, dict):
-        return record
-    if isinstance(record.get("data"), dict):
-        normalized = dict(record)
-        normalized["data"] = _normalize_session_record(record["data"])
-        return normalized
-
-    normalized = dict(record)
-    _set_missing(normalized, "id", _session_value(record, "id", "sessionID", "sessionId", "session_id"))
-    _set_missing(normalized, "directory", _session_value(record, "directory", "cwd"))
-    _set_missing(normalized, "title", _session_value(record, "title", "name"))
-    _set_missing(normalized, "agent", _session_value(record, "agent", "agentID", "agentId", "agent_id"))
-    _set_missing(normalized, "model", _session_value(record, "model", "modelID", "modelId", "model_id"))
-    _set_missing(normalized, "tokens", _normalized_tokens(_session_value(record, "tokens", "token", "tokenUsage", "token_usage", "usage")))
-    _set_missing(normalized, "createdAt", _session_value(record, "createdAt", "created_at", "created"))
-    _set_missing(normalized, "updatedAt", _session_value(record, "updatedAt", "updated_at", "updated"))
-    return normalized
-
-
-def _set_missing(record, name, value):
-    if value is not None and record.get(name) is None:
-        record[name] = value
+def _with_session_payload(response, route_plan=None, *, route_path=None):
+    return OpenCodeApiResponse(normalize_session_payload(response.data, route_plan=route_plan, route_path=route_path), response.body)
 
 
 def _validate_base_url(base_url):
@@ -317,9 +283,41 @@ def _validate_base_url(base_url):
         raise OpenCodeApiError(f"invalid OpenCode server URL {base_url!r}: expected http(s) URL")
 
 
+def _raise_http_error(error, method, path):
+    error_body = error.read().decode("utf-8")
+    error_data = None
+    try:
+        error_data = json.loads(error_body or "{}")
+    except json.JSONDecodeError:
+        pass
+    raise OpenCodeApiError(
+        f"{method} /{path.lstrip('/')} failed: HTTP {error.code}",
+        status=error.code,
+        method=method,
+        path=f"/{path.lstrip('/')}",
+        body=error_body,
+        data=error_data,
+    ) from error
+
+
+def _raise_transport_error(error, *, base_url, deadline=None, stream=False):
+    if isinstance(error, URLError):
+        if deadline is not None and _url_error_is_timeout(error):
+            raise TimeoutExpired() from error
+        raise OpenCodeApiError(f"cannot reach OpenCode server at {base_url.rstrip('/')}: {error.reason}") from error
+    if deadline is not None:
+        raise TimeoutExpired() from error
+    target = "event stream" if stream else "server"
+    raise OpenCodeApiError(f"OpenCode {target} timed out at {base_url.rstrip('/')}") from error
+
+
+def _url_error_is_timeout(error):
+    return isinstance(getattr(error, "reason", None), TimeoutError)
+
+
 def _iter_response_lines_until_deadline(response, deadline):
     while True:
-        _set_response_socket_timeout(response, deadline.require_time())
+        set_response_socket_timeout(response, deadline.require_time())
         try:
             line = response.readline()
         except TimeoutError as error:
@@ -329,5 +327,29 @@ def _iter_response_lines_until_deadline(response, deadline):
         yield line
 
 
-def _set_response_socket_timeout(response, timeout):
-    response.fp.raw._sock.settimeout(timeout)
+def _event_stream_lines(response, deadline, stop_event):
+    if stop_event is None:
+        return response if deadline is None else _iter_response_lines_until_deadline(response, deadline)
+    return _iter_response_lines_until_stop(response, deadline, stop_event)
+
+
+def _iter_response_lines_until_stop(response, deadline, stop_event):
+    while not stop_event.is_set():
+        set_response_socket_timeout(response, _event_stream_read_timeout(deadline, stop_event))
+        try:
+            line = response.readline()
+        except TimeoutError as error:
+            if deadline is not None and deadline.expired():
+                raise TimeoutExpired() from error
+            continue
+        if line == b"":
+            return
+        yield line
+
+
+def _event_stream_read_timeout(deadline, stop_event):
+    if stop_event is None:
+        return None if deadline is None else deadline.require_time()
+    if deadline is None:
+        return 0.2
+    return min(0.2, deadline.require_time())

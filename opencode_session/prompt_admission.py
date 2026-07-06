@@ -2,8 +2,8 @@ import uuid
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.formatting import compact_value
-from opencode_session.records import first_present as _first_present
-from opencode_session.status import short_status
+from opencode_session.schema_admission_adapter import normalize_admission_record
+from opencode_session.schema_common import first_present as _first_present
 
 
 UNSUPPORTED_BEHAVIOR_STATUSES = {400, 404, 405, 415, 422}
@@ -63,33 +63,7 @@ def admit_prompt(client, capabilities, session_id, text, delivery, *, message_id
 
 
 def admission_record(session_id, delivery, message_id, data, *, capabilities):
-    if isinstance(data, dict) and isinstance(data.get("data"), dict):
-        data = data["data"]
-    if not isinstance(data, dict):
-        data = {}
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
-    state = _first_present(data, "state", "status", "phase") or "admitted"
-    return {
-        "session_id": _first_present(data, "sessionID", "sessionId", "session_id")
-        or _first_present(info, "sessionID", "sessionId", "session_id")
-        or session_id,
-        "message_id": _first_present(data, "messageID", "messageId", "promptID", "promptId", "id")
-        or _first_present(info, "messageID", "messageId", "promptID", "promptId", "id")
-        or message_id,
-        "delivery": _first_present(data, "delivery", "deliveryMode", "mode") or delivery,
-        "state": state,
-        "raw_state": state,
-        "status": short_status(state),
-        "terminal_state": None,
-        "api_path": capabilities["route_availability"]["v2_prompt"]["path"],
-        "fallback": {
-            "available": capabilities["legacy_fallback_available"],
-            "strategy": "legacy_run_reply",
-            "used": False,
-        },
-        "admitted_sequence": _first_present(data, "admittedSeq", "admittedSequence", "admitted_sequence", "sequence"),
-        "promoted_sequence": _first_present(data, "promotedSeq", "promotedSequence", "promoted_sequence"),
-    }
+    return normalize_admission_record(session_id, delivery, message_id, data, capabilities=capabilities)
 
 
 def prompt_admission_payload(message_id, text, delivery, prompt_path):

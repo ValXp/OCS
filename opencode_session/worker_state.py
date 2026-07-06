@@ -1,4 +1,3 @@
-from opencode_session.status import short_status
 from opencode_session.status_policy import (
     EX_ABORTED,
     EX_BLOCKED,
@@ -10,80 +9,57 @@ from opencode_session.status_policy import (
     exit_code_for_status,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_status import is_blocked_status
-
-
-WORKER_LIST_FIELDS = (
-    "dependencies",
-    "prompt_ids",
-    "retryable_failures",
-    "blockers",
-    "output_refs",
+from opencode_session.worker_domain import (
+    UNSET_TRANSITION_FIELD,
+    WORKER_ACTION_NONE,
+    WORKER_STATUS_ABORTED,
+    WORKER_STATUS_BLOCKED,
+    WORKER_STATUS_DONE,
+    WORKER_STATUS_FAILED,
+    WORKER_STATUS_TIMEOUT,
+    WorkerTransition,
+    WorkerRecord,
+    deserialize_worker_record,
+    latest_prompt_ids_are_retry_marker,
+    serialize_worker_snapshot,
+    worker_retry_available,
 )
 
 
 def default_worker(worker_id):
-    return {
-        "id": worker_id,
-        "role": None,
-        "session_id": None,
-        "agent": None,
-        "model": None,
-        "dependencies": [],
-        "prompt_ids": [],
-        "status": "queued",
-        "retry_count": 0,
-        "retry_limit": 0,
-        "retryable_failures": [],
-        "timeout_seconds": None,
-        "timeout_policy": "timeout",
-        "timeout_started_at": None,
-        "timed_out_at": None,
-        "failure_category": None,
-        "failure_reason": None,
-        "last_failure_category": None,
-        "last_failure_reason": None,
-        "next_eligible_action": "start",
-        "blockers": [],
-        "output_refs": [],
-    }
+    return deserialize_worker_record({}, worker_id)
 
 
 def normalize_worker(worker, worker_id):
-    normalized = default_worker(worker_id)
-    if isinstance(worker, dict):
-        normalized.update(worker)
-    normalized["id"] = normalized.get("id") or worker_id
-    for key in WORKER_LIST_FIELDS:
-        value = normalized.get(key)
-        normalized[key] = value if isinstance(value, list) else []
-    if normalized.get("retry_count") is None:
-        normalized["retry_count"] = 0
-    if normalized.get("retry_limit") is None:
-        normalized["retry_limit"] = 0
-    if not normalized.get("timeout_policy"):
-        normalized["timeout_policy"] = "timeout"
-    if not normalized.get("status"):
-        normalized["status"] = "queued"
-    else:
-        normalized["status"] = short_status(normalized["status"])
-    normalized["next_eligible_action"] = next_eligible_action(normalized)
-    return normalized
+    return deserialize_worker_record(worker, worker_id)
+
+
+def normalize_worker_snapshot(worker, worker_id):
+    return serialize_worker_snapshot(worker, worker_id)
+
+
+def _apply_worker_transition_to_record(worker, transition):
+    return WorkerRecord.from_worker(worker, transition.worker_id).apply_transition_spec(transition.spec)
+
+
+def apply_worker_transition_to_worker(worker, transition):
+    merged = _apply_worker_transition_to_record(worker, transition)
+    worker.clear()
+    worker.update(merged)
+    return worker
+
+
+def apply_worker_transition(latest_workers, transition):
+    latest_worker = latest_workers.get(transition.worker_id)
+    merged = _apply_worker_transition_to_record(latest_worker, transition)
+    latest_workers[transition.worker_id] = merged
+    return merged
 
 
 def next_eligible_action(worker):
-    status = worker.get("status")
-    if status == "queued":
-        return "start"
-    if status == "active":
-        return "retry" if worker.get("next_eligible_action") == "retry" else "wait"
-    if is_blocked_status(status):
-        return "resolve_blocker"
-    if status == "done":
-        return "collect"
-    if status == "failed" and worker_retry_available(worker):
-        return "retry"
-    return "none"
+    if not isinstance(worker, dict):
+        return WORKER_ACTION_NONE
+    return WorkerRecord.from_worker(worker).next_eligible_action
 
 
 def ensure_worker(run, worker_id, *, role):
@@ -97,114 +73,92 @@ def ensure_worker(run, worker_id, *, role):
 
 
 def mark_worker_active(worker, *, now=None):
-    worker["status"] = "active"
-    _clear_current_status_metadata(worker)
-    worker["next_eligible_action"] = "wait"
+    timeout_started_at = UNSET_TRANSITION_FIELD
     if now is not None:
-        worker["timeout_started_at"] = now() if worker.get("timeout_seconds") else None
+        timeout_started_at = now() if worker.get("timeout_seconds") else None
+    transition = WorkerTransition.active(
+        _worker_id(worker),
+        timeout_started_at=timeout_started_at,
+        clear_prompt_ids=latest_prompt_ids_are_retry_marker(worker),
+    )
+    return transition
 
 
-def _clear_current_status_metadata(worker):
-    worker["blockers"] = []
-    worker.pop("error", None)
-    worker["failure_category"] = None
-    worker["failure_reason"] = None
-    worker.pop("failure_retryable", None)
-
-
-def mark_worker_failed(worker, category, reason, *, retryable=True):
-    worker["status"] = "failed"
-    worker["error"] = reason
-    worker["failure_category"] = category
-    worker["failure_reason"] = reason
-    worker["last_failure_category"] = category
-    worker["last_failure_reason"] = reason
-    if retryable:
-        worker.pop("failure_retryable", None)
-    else:
-        worker["failure_retryable"] = False
-    worker["next_eligible_action"] = "retry" if retryable and worker_retry_available(worker, category) else "none"
+def mark_worker_failed(worker, category, reason, *, retryable=True, prompt_ids=()):
+    transition = WorkerTransition.failed(
+        _worker_id(worker),
+        category,
+        reason,
+        retryable=retryable,
+        retry_available=worker_retry_available(worker, category),
+        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+        prompt_ids=prompt_ids,
+    )
+    return transition
 
 
 def mark_dependency_blocked(worker, blockers):
-    worker["status"] = "blocked"
-    worker["blockers"] = list(blockers)
-    worker["next_eligible_action"] = "resolve_blocker"
+    transition = WorkerTransition.dependency_blocked(_worker_id(worker), blockers)
+    return transition
 
 
 def mark_worker_aborted(worker, abort):
-    worker["abort"] = abort
-    if isinstance(abort, dict) and abort.get("accepted"):
-        worker["status"] = "aborted"
-        worker["next_eligible_action"] = "none"
+    transition = WorkerTransition.aborted(_worker_id(worker), abort)
+    return transition
 
 
-def schedule_worker_retry(worker, category, reason):
+def schedule_worker_retry(worker, category, reason, *, prompt_ids=()):
     if not worker_retry_available(worker, category):
         return False
-    worker["retry_count"] = int(worker.get("retry_count") or 0) + 1
-    worker["status"] = "active"
-    _clear_current_status_metadata(worker)
-    worker["last_failure_category"] = category
-    worker["last_failure_reason"] = reason
-    worker["next_eligible_action"] = "retry"
-    return True
-
-
-def worker_retry_available(worker, category=None):
-    if worker.get("failure_retryable") is False:
-        return False
-    retryable = set(worker.get("retryable_failures") or [])
-    if not retryable:
-        return False
-    if category is None:
-        category = worker.get("failure_category") or worker.get("last_failure_category")
-    if category and category not in retryable and "all" not in retryable:
-        return False
-    try:
-        retry_count = int(worker.get("retry_count") or 0)
-        retry_limit = int(worker.get("retry_limit") or 0)
-    except (TypeError, ValueError):
-        return False
-    return retry_count < retry_limit
+    transition = WorkerTransition.retry_scheduled(
+        _worker_id(worker),
+        category,
+        reason,
+        retry_count=int(worker.get("retry_count") or 0) + 1,
+        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+        prompt_ids=prompt_ids,
+    )
+    return transition
 
 
 def worker_timeout_reason(worker):
     return f"worker timed out after {format_timeout(worker.get('timeout_seconds'))}s"
 
 
-def mark_worker_timeout(worker, reason, now):
-    status = worker.get("timeout_policy") or "timeout"
-    worker["status"] = status
-    worker["error"] = reason
-    worker["failure_category"] = "timeout"
-    worker["failure_reason"] = reason
-    worker["last_failure_category"] = "timeout"
-    worker["last_failure_reason"] = reason
-    worker["timed_out_at"] = now()
-    worker["output_refs"] = []
-    if status == "blocked":
-        worker["blockers"] = ["timeout"]
-        worker["next_eligible_action"] = "resolve_blocker"
-    else:
-        worker["next_eligible_action"] = "none"
+def mark_worker_timeout(worker, reason, now, *, manual_retry_required=False):
+    status = worker.get("timeout_policy") or WORKER_STATUS_TIMEOUT
+    transition = WorkerTransition.timed_out(
+        _worker_id(worker),
+        reason,
+        status=status,
+        timed_out_at=now(),
+        retry_available=worker_retry_available(worker, WORKER_STATUS_TIMEOUT),
+        manual_retry_required=manual_retry_required,
+        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+    )
+    return transition
 
 
 def format_timeout(timeout):
     return str(timeout)
 
 
-def apply_worker_result(worker, result):
-    worker["result"] = result
-    worker["status"] = result["status"]
-    if result["status"] == "done":
-        _clear_current_status_metadata(worker)
-    else:
-        worker["failure_category"] = None
-        worker["failure_reason"] = None
-    worker["next_eligible_action"] = "collect" if result["status"] == "done" else "none"
-    assistant_message_id = result["message_ids"].get("assistant")
-    worker["output_refs"] = [f"assistant:{assistant_message_id}"] if result["status"] == "done" and assistant_message_id else []
+def apply_worker_result(worker, result, *, prompt_ids=()):
+    transition = WorkerTransition.result_applied(
+        _worker_id(worker),
+        result,
+        prompt_ids=prompt_ids,
+        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+    )
+    return transition
+
+
+def _worker_id(worker):
+    return worker["id"]
+
+
+def _existing_or_unset(worker, field_name):
+    return worker[field_name] if field_name in worker else UNSET_TRANSITION_FIELD
 
 
 def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):
@@ -223,14 +177,14 @@ def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False
     status_workers = prompted_workers
     if include_unprompted_when_no_prompts:
         status_workers = prompted_workers or [worker for worker in workers.values() if isinstance(worker, dict)]
-    return aggregate_run_status(worker.get("status") for worker in status_workers)
+    return aggregate_run_status(_worker_status(worker) for worker in status_workers)
 
 
 def worker_output_refs_in_dependency_order(workers):
     ordered = []
     for worker in workers_in_dependency_order(workers):
         worker_id = worker.get("id")
-        if worker.get("status") != "done":
+        if _worker_status(worker) != WORKER_STATUS_DONE:
             continue
         for output_ref in worker.get("output_refs", []):
             if isinstance(output_ref, str) and output_ref.startswith("assistant:"):
@@ -253,8 +207,11 @@ def has_partial_worker_success(run):
     workers = [worker for worker in (run.get("workers") or {}).values() if isinstance(worker, dict) and worker_prompt(worker)]
     if not workers:
         return False
-    statuses = {worker.get("status") for worker in workers}
-    return "done" in statuses and any(status in {"failed", "blocked", "aborted", "timeout"} for status in statuses)
+    statuses = {_worker_status(worker) for worker in workers}
+    return WORKER_STATUS_DONE in statuses and any(
+        status in {WORKER_STATUS_FAILED, WORKER_STATUS_BLOCKED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT}
+        for status in statuses
+    )
 
 
 def worker_prompt(worker):
@@ -262,3 +219,7 @@ def worker_prompt(worker):
     if prompt is None:
         return None
     return str(prompt)
+
+
+def _worker_status(worker):
+    return WorkerRecord.from_worker(worker).status if isinstance(worker, dict) else None
