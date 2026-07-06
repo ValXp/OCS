@@ -125,6 +125,17 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(legacy_session["schema_status"], "known")
         self.assertEqual(legacy_session["id"], "ses_legacy")
 
+    def test_unknown_session_route_does_not_fall_back_to_legacy(self):
+        payload = {"sessions": [{"sessionID": "ses_legacy", "name": "Legacy"}]}
+
+        normalized = normalize_session_payload(payload, route_path="/custom/session")
+        planned = normalize_session_payload(payload, route_plan={"session_collection": "/custom/session"})
+
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["raw"], payload)
+        self.assertEqual(planned["schema_status"], "unknown")
+        self.assertEqual(planned["raw"], payload)
+
     def test_api_session_route_normalizes_explicit_api_shape(self):
         payload = {
             "data": [
@@ -412,6 +423,15 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertIsNone(message_value(message, "id", route=SESSION_MESSAGE_ROUTE))
         self.assertEqual(message_value(message, "id"), "msg_legacy")
 
+    def test_unknown_message_route_does_not_fall_back_to_legacy(self):
+        message = {"messageID": "msg_legacy", "author": "assistant", "state": "completed"}
+
+        normalized = normalize_message_record(message, route="custom_message_route")
+
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["raw"], message)
+        self.assertIsNone(message_value(message, "id", route="custom_message_route"))
+
     def test_message_token_only_shape_is_unknown(self):
         message = {"tokenUsage": {"input": 1, "output": 2}}
 
@@ -457,6 +477,19 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(legacy_event["session_id"], "ses_1")
         self.assertEqual(legacy_event["status"], "done")
 
+    def test_unknown_event_route_does_not_try_known_event_shapes(self):
+        event = {
+            "type": "session.status",
+            "properties": {"sessionID": "ses_1", "status": "completed"},
+        }
+
+        normalized = normalize_event_record(event, "ses_1", route_path="/custom/event")
+
+        self.assertEqual(normalized["kind"], "unknown")
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["raw"], event)
+        self.assertNotIn("status", normalized)
+
     def test_legacy_event_route_rejects_api_event_envelope(self):
         event = {
             "type": "session.status",
@@ -496,6 +529,21 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(normalized["type"], "session.custom.statusish")
         self.assertEqual(normalized["raw"], event)
         self.assertNotIn("status", normalized)
+
+    def test_unknown_event_type_with_error_details_is_not_a_known_error_event(self):
+        event = {
+            "type": "session.custom.error",
+            "properties": {"sessionID": "ses_target", "error": "provider overloaded"},
+        }
+
+        normalized = normalize_event_record(event, "ses_target", route_path="/api/event")
+
+        self.assertEqual(normalized["kind"], "unknown")
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["session_id"], "ses_target")
+        self.assertEqual(normalized["type"], "session.custom.error")
+        self.assertEqual(normalized["raw"], event)
+        self.assertNotIn("error", normalized)
 
 
 if __name__ == "__main__":

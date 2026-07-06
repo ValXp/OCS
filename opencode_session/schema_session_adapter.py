@@ -1,16 +1,9 @@
 from copy import deepcopy
+from dataclasses import dataclass
+from typing import Callable
 
 from opencode_session.schema_common import (
-    AGENT_ID_ALIASES,
-    API_CREATED_AT_ALIASES,
-    API_TOKEN_ALIASES,
-    API_UPDATED_AT_ALIASES,
-    CREATED_AT_ALIASES,
-    MODEL_ID_ALIASES,
     NormalizedSessionRecord,
-    SESSION_ID_ALIASES,
-    TOKEN_ALIASES,
-    UPDATED_AT_ALIASES,
     child_value,
     collection_records,
     first_not_none,
@@ -21,24 +14,53 @@ from opencode_session.schema_common import (
 
 
 SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "tokens", "createdAt", "updatedAt")
+API_SESSION_ROUTE = "/api/session"
+LEGACY_SESSION_ROUTE = "/session"
+
+LEGACY_SESSION_ID_FIELDS = ("id", "sessionID", "sessionId", "session_id")
+LEGACY_SESSION_DIRECTORY_FIELDS = ("directory", "cwd")
+LEGACY_SESSION_TITLE_FIELDS = ("title", "name")
+LEGACY_SESSION_AGENT_FIELDS = ("agent", "agentID", "agentId", "agent_id")
+LEGACY_SESSION_MODEL_FIELDS = ("model", "modelID", "modelId", "model_id")
+LEGACY_SESSION_TOKEN_FIELDS = ("tokens", "token", "tokenUsage", "token_usage", "usage")
+LEGACY_SESSION_CREATED_AT_FIELDS = ("createdAt", "created_at", "created")
+LEGACY_SESSION_UPDATED_AT_FIELDS = ("updatedAt", "updated_at", "updated")
+
+API_SESSION_ID_FIELDS = ("id",)
+API_SESSION_DIRECTORY_FIELDS = ("directory", "cwd")
+API_SESSION_TITLE_FIELDS = ("title",)
+API_SESSION_AGENT_FIELDS = ("agent",)
+API_SESSION_MODEL_FIELDS = ("model",)
+API_SESSION_TOKEN_FIELDS = ("tokens", "tokenUsage", "usage")
+API_SESSION_CREATED_AT_FIELDS = ("createdAt", "created")
+API_SESSION_UPDATED_AT_FIELDS = ("updatedAt", "updated")
+
 SESSION_VALUE_ALIASES = (
-    ("id", ("id", *SESSION_ID_ALIASES)),
-    ("directory", ("directory", "cwd")),
-    ("title", ("title", "name")),
-    ("agent", ("agent", *AGENT_ID_ALIASES)),
-    ("model", ("model", *MODEL_ID_ALIASES)),
-    ("tokens", TOKEN_ALIASES),
-    ("createdAt", CREATED_AT_ALIASES),
-    ("updatedAt", UPDATED_AT_ALIASES),
+    ("id", LEGACY_SESSION_ID_FIELDS),
+    ("directory", LEGACY_SESSION_DIRECTORY_FIELDS),
+    ("title", LEGACY_SESSION_TITLE_FIELDS),
+    ("agent", LEGACY_SESSION_AGENT_FIELDS),
+    ("model", LEGACY_SESSION_MODEL_FIELDS),
+    ("tokens", LEGACY_SESSION_TOKEN_FIELDS),
+    ("createdAt", LEGACY_SESSION_CREATED_AT_FIELDS),
+    ("updatedAt", LEGACY_SESSION_UPDATED_AT_FIELDS),
 )
 
 
+@dataclass(frozen=True)
+class SessionRouteAdapter:
+    route: str
+    version: str
+    normalize_payload: Callable
+    normalize_record: Callable
+
+
 def normalize_session_payload(payload, *, route_path=None, route_plan=None):
-    return _session_payload_normalizer(route_path, route_plan)(payload)
+    return session_adapter_for_route(route_path, route_plan).normalize_payload(payload)
 
 
 def normalize_session_record(record, *, route_path=None, route_plan=None):
-    return _session_record_normalizer(route_path, route_plan)(record)
+    return session_adapter_for_route(route_path, route_plan).normalize_record(record)
 
 
 def _normalize_api_session_payload(payload):
@@ -68,28 +90,24 @@ def _normalize_session_payload(payload, normalize_record, collection_names):
     return normalize_record(normalized)
 
 
-def _session_payload_normalizer(route_path=None, route_plan=None):
+def _normalize_unknown_session_payload(payload):
+    return unknown_session_record(payload)
+
+
+def session_adapter_for_route(route_path=None, route_plan=None):
+    route_key = _session_route_key(route_path, route_plan)
+    if route_key is None:
+        return DEFAULT_SESSION_ADAPTER
+    return SESSION_ROUTE_ADAPTERS.get(route_key, UNKNOWN_SESSION_ADAPTER)
+
+
+def _session_route_key(route_path=None, route_plan=None):
     path = route_path
     if path is None and isinstance(route_plan, dict):
         path = route_plan.get("session_collection")
-    normalized_path = str(path or "").split("?", 1)[0].rstrip("/")
-    if normalized_path == "/api/session":
-        return _normalize_api_session_payload
-    if normalized_path == "/session":
-        return _normalize_legacy_session_payload
-    return _normalize_legacy_session_payload
-
-
-def _session_record_normalizer(route_path=None, route_plan=None):
-    path = route_path
-    if path is None and isinstance(route_plan, dict):
-        path = route_plan.get("session_collection")
-    normalized_path = str(path or "").split("?", 1)[0].rstrip("/")
-    if normalized_path == "/api/session":
-        return _normalize_api_session_record
-    if normalized_path == "/session":
-        return _normalize_legacy_session_record
-    return _normalize_legacy_session_record
+    if path is None:
+        return None
+    return str(path).split("?", 1)[0].rstrip("/")
 
 
 def _normalize_legacy_session_record(record) -> NormalizedSessionRecord:
@@ -142,21 +160,21 @@ def _apply_session_fields(normalized, fields):
 
 def _legacy_session_fields(record):
     return {
-        "id": root_or_info_value(record, "id", *SESSION_ID_ALIASES),
+        "id": root_or_info_value(record, *LEGACY_SESSION_ID_FIELDS),
         "directory": first_not_none(
-            root_or_info_value(record, "directory", "cwd"),
+            root_or_info_value(record, *LEGACY_SESSION_DIRECTORY_FIELDS),
             child_value(record, "location", "directory"),
         ),
-        "title": root_or_info_value(record, "title", "name"),
-        "agent": root_or_info_value(record, "agent", *AGENT_ID_ALIASES),
-        "model": root_or_info_value(record, "model", *MODEL_ID_ALIASES),
-        "tokens": root_or_info_value(record, *TOKEN_ALIASES),
+        "title": root_or_info_value(record, *LEGACY_SESSION_TITLE_FIELDS),
+        "agent": root_or_info_value(record, *LEGACY_SESSION_AGENT_FIELDS),
+        "model": root_or_info_value(record, *LEGACY_SESSION_MODEL_FIELDS),
+        "tokens": root_or_info_value(record, *LEGACY_SESSION_TOKEN_FIELDS),
         "createdAt": first_not_none(
-            root_or_info_value(record, *CREATED_AT_ALIASES),
+            root_or_info_value(record, *LEGACY_SESSION_CREATED_AT_FIELDS),
             child_value(record, "time", "created"),
         ),
         "updatedAt": first_not_none(
-            root_or_info_value(record, *UPDATED_AT_ALIASES),
+            root_or_info_value(record, *LEGACY_SESSION_UPDATED_AT_FIELDS),
             child_value(record, "time", "updated"),
         ),
     }
@@ -164,21 +182,21 @@ def _legacy_session_fields(record):
 
 def _api_session_fields(record):
     return {
-        "id": root_or_info_value(record, "id"),
+        "id": root_or_info_value(record, *API_SESSION_ID_FIELDS),
         "directory": first_not_none(
-            root_or_info_value(record, "directory", "cwd"),
+            root_or_info_value(record, *API_SESSION_DIRECTORY_FIELDS),
             child_value(record, "location", "directory"),
         ),
-        "title": root_or_info_value(record, "title"),
-        "agent": root_or_info_value(record, "agent"),
-        "model": root_or_info_value(record, "model"),
-        "tokens": root_or_info_value(record, *API_TOKEN_ALIASES),
+        "title": root_or_info_value(record, *API_SESSION_TITLE_FIELDS),
+        "agent": root_or_info_value(record, *API_SESSION_AGENT_FIELDS),
+        "model": root_or_info_value(record, *API_SESSION_MODEL_FIELDS),
+        "tokens": root_or_info_value(record, *API_SESSION_TOKEN_FIELDS),
         "createdAt": first_not_none(
-            root_or_info_value(record, *API_CREATED_AT_ALIASES),
+            root_or_info_value(record, *API_SESSION_CREATED_AT_FIELDS),
             child_value(record, "time", "created"),
         ),
         "updatedAt": first_not_none(
-            root_or_info_value(record, *API_UPDATED_AT_ALIASES),
+            root_or_info_value(record, *API_SESSION_UPDATED_AT_FIELDS),
             child_value(record, "time", "updated"),
         ),
     }
@@ -222,3 +240,28 @@ def session_value(session, *names, route_path=None, route_plan=None):
 
 def _requested(requested_names, *aliases):
     return any(name in aliases for name in requested_names)
+
+
+API_SESSION_ADAPTER = SessionRouteAdapter(
+    route="session_collection",
+    version="api-v1",
+    normalize_payload=_normalize_api_session_payload,
+    normalize_record=_normalize_api_session_record,
+)
+LEGACY_SESSION_ADAPTER = SessionRouteAdapter(
+    route="session_collection",
+    version="legacy",
+    normalize_payload=_normalize_legacy_session_payload,
+    normalize_record=_normalize_legacy_session_record,
+)
+UNKNOWN_SESSION_ADAPTER = SessionRouteAdapter(
+    route="session_collection",
+    version="unknown",
+    normalize_payload=_normalize_unknown_session_payload,
+    normalize_record=unknown_session_record,
+)
+SESSION_ROUTE_ADAPTERS = {
+    API_SESSION_ROUTE: API_SESSION_ADAPTER,
+    LEGACY_SESSION_ROUTE: LEGACY_SESSION_ADAPTER,
+}
+DEFAULT_SESSION_ADAPTER = LEGACY_SESSION_ADAPTER

@@ -1,20 +1,9 @@
 import json
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from opencode_session.schema_common import (
-    DELIVERY_ALIASES,
-    BLOCKER_ID_ALIASES,
-    EVENT_STATUS_ALIASES,
-    EVENT_CALL_ID_ALIASES,
-    MESSAGE_ID_ALIASES,
-    PERMISSION_ID_ALIASES,
-    PROMPT_ID_ALIASES,
-    QUESTION_ID_ALIASES,
-    SESSION_ID_ALIASES,
-    STEP_ID_ALIASES,
-    TOOL_NAME_ALIASES,
     NormalizedEventRecord,
     first_present,
     set_if_present,
@@ -23,8 +12,21 @@ from opencode_session.schema_common import (
 from opencode_session.status import short_status
 
 
+API_EVENT_ROUTE = "/api/event"
+LEGACY_EVENT_ROUTES = frozenset({"/event", "/global/event"})
 SUCCESS_STATUSES = {"complete", "completed", "done", "idle", "success", "succeeded"}
 ABORT_STATUSES = {"abort", "aborted", "cancelled", "canceled"}
+
+EVENT_SESSION_ID_FIELDS = ("sessionID", "sessionId", "session_id")
+EVENT_MESSAGE_ID_FIELDS = ("messageID", "messageId", "message_id", "promptID", "promptId")
+EVENT_STATUS_FIELDS = ("status", "state")
+EVENT_DELIVERY_FIELDS = ("delivery", "deliveryMode", "mode")
+EVENT_CALL_ID_FIELDS = ("callID", "callId", "toolCallID", "toolCallId", "tool_call_id")
+EVENT_STEP_FIELDS = ("stepID", "stepId", "step_id")
+EVENT_TOOL_NAME_FIELDS = ("toolName", "tool_name")
+EVENT_PERMISSION_ID_FIELDS = ("permissionID", "permissionId", "permission_id")
+EVENT_QUESTION_ID_FIELDS = ("questionID", "questionId", "question_id")
+EVENT_BLOCKER_ID_FIELDS = ("blockerID", "blockerId", "blocker_id")
 
 BLOCKER_EVENT_TYPES = frozenset({"permission.requested", "question.requested", "blocker.requested"})
 ADMISSION_EVENT_TYPES = frozenset({"session.prompt.admitted", "session.prompt.promoted", "session.prompt.queued"})
@@ -52,6 +54,13 @@ class DecodedEvent:
     blocker_id: Optional[str] = None
     question: Optional[str] = None
     error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class EventKindContract:
+    kind: str
+    detail_fields: Tuple[str, ...]
+    requires_blocker: bool = False
 
 
 class ApiEventRouteDecoder:
@@ -107,6 +116,17 @@ class KnownEventRouteDecoder:
         return _normalize_decoded_event(event, self.decode(event), target_session_id)
 
 
+class UnknownEventRouteDecoder:
+    route = "event"
+    version = "unknown"
+
+    def decode(self, event):
+        return None
+
+    def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
+        return unknown_event_record(event)
+
+
 def _decoded_from_api_properties(event_type, fields):
     return _decoded_from_event_fields(event_type, fields)
 
@@ -121,14 +141,14 @@ def _decoded_from_event_fields(event_type, fields):
     blocker = _blocker_type(event_type, fields)
     return DecodedEvent(
         event_type=event_type,
-        session_id=_string_field(fields, *SESSION_ID_ALIASES),
-        message_id=_string_field(fields, *MESSAGE_ID_ALIASES, *PROMPT_ID_ALIASES),
+        session_id=_string_field(fields, *EVENT_SESSION_ID_FIELDS),
+        message_id=_string_field(fields, *EVENT_MESSAGE_ID_FIELDS),
         status=_status_value(fields),
-        delivery=_string_field(fields, *DELIVERY_ALIASES),
+        delivery=_string_field(fields, *EVENT_DELIVERY_FIELDS),
         text=_text_value(fields),
         tool=tool,
-        call_id=_string_field(fields, *EVENT_CALL_ID_ALIASES),
-        step=_string_field(fields, "step", *STEP_ID_ALIASES),
+        call_id=_string_field(fields, *EVENT_CALL_ID_FIELDS),
+        step=_string_field(fields, "step", *EVENT_STEP_FIELDS),
         title=_string_field(fields, "title", "description"),
         blocker=blocker,
         blocker_id=_blocker_id(fields) if blocker is not None else None,
@@ -170,36 +190,13 @@ def _normalize_decoded_event(raw_event, decoded, target_session_id):
 
 def _event_kind(decoded):
     normalized_type = str(decoded.event_type or "").lower()
-    if decoded.blocker is not None:
-        if _has_event_detail(decoded, "session_id", "message_id", "blocker_id", "question", "status"):
-            return "blocker"
+    contract = EVENT_KIND_CONTRACTS.get(normalized_type)
+    if contract is None:
         return "unknown"
-    if normalized_type in ERROR_EVENT_TYPES:
-        if _has_event_detail(decoded, "session_id", "message_id", "error"):
-            return "error"
+    if contract.requires_blocker and decoded.blocker is None:
         return "unknown"
-    if decoded.error is not None:
-        return "error"
-    if normalized_type in TEXT_EVENT_TYPES and decoded.text is not None:
-        return "text"
-    if normalized_type in TOOL_EVENT_TYPES and (decoded.tool is not None or decoded.call_id is not None):
-        return "tool"
-    if normalized_type in ADMISSION_EVENT_TYPES:
-        if _has_event_detail(decoded, "session_id", "message_id", "status", "delivery"):
-            return "admission"
-        return "unknown"
-    if normalized_type in PROMPT_EVENT_TYPES:
-        if _has_event_detail(decoded, "session_id", "message_id", "status", "delivery"):
-            return "prompt"
-        return "unknown"
-    if normalized_type in STEP_EVENT_TYPES:
-        if _has_event_detail(decoded, "session_id", "message_id", "step", "status", "title"):
-            return "step"
-        return "unknown"
-    if normalized_type in STATUS_EVENT_TYPES:
-        if _has_event_detail(decoded, "session_id", "status"):
-            return "status"
-        return "unknown"
+    if _has_event_detail(decoded, *contract.detail_fields):
+        return contract.kind
     return "unknown"
 
 
@@ -251,23 +248,23 @@ def _text_value(fields):
 
 
 def _status_value(fields):
-    value = _string_field(fields, *EVENT_STATUS_ALIASES)
+    value = _string_field(fields, *EVENT_STATUS_FIELDS)
     if value is not None:
         return value
     message = fields.get("message")
     if isinstance(message, dict):
-        return _string_field(message, *EVENT_STATUS_ALIASES)
+        return _string_field(message, *EVENT_STATUS_FIELDS)
     return None
 
 
 def _tool_name(fields):
     tool = fields.get("tool")
     if isinstance(tool, dict):
-        value = first_present(tool, "name", "tool", *TOOL_NAME_ALIASES)
+        value = first_present(tool, "name", "tool", *EVENT_TOOL_NAME_FIELDS)
         if value is not None:
             return str(value)
         return json.dumps(tool, sort_keys=True)
-    value = first_present(fields, "tool", *TOOL_NAME_ALIASES)
+    value = first_present(fields, "tool", *EVENT_TOOL_NAME_FIELDS)
     return string_value(value)
 
 
@@ -279,11 +276,11 @@ def _blocker_type(event_type, fields):
         return "question"
     if normalized_type in BLOCKER_EVENT_TYPES:
         return "blocker"
-    if first_present(fields, "permission", *PERMISSION_ID_ALIASES) is not None:
+    if first_present(fields, "permission", *EVENT_PERMISSION_ID_FIELDS) is not None:
         return "permission"
-    if first_present(fields, *QUESTION_ID_ALIASES) is not None:
+    if first_present(fields, *EVENT_QUESTION_ID_FIELDS) is not None:
         return "question"
-    if first_present(fields, "blocker", *BLOCKER_ID_ALIASES) is not None:
+    if first_present(fields, "blocker", *EVENT_BLOCKER_ID_FIELDS) is not None:
         return "blocker"
     return None
 
@@ -291,9 +288,9 @@ def _blocker_type(event_type, fields):
 def _blocker_id(fields):
     return _string_field(
         fields,
-        *PERMISSION_ID_ALIASES,
-        *QUESTION_ID_ALIASES,
-        *BLOCKER_ID_ALIASES,
+        *EVENT_PERMISSION_ID_FIELDS,
+        *EVENT_QUESTION_ID_FIELDS,
+        *EVENT_BLOCKER_ID_FIELDS,
     )
 
 
@@ -309,17 +306,44 @@ def _error_text(error):
 
 
 def event_adapter_for_route(route_path=None):
-    normalized_path = str(route_path or "").split("?", 1)[0].rstrip("/")
-    if normalized_path == "/api/event":
-        return API_EVENT_DECODER
-    if normalized_path in {"/event", "/global/event"}:
-        return LEGACY_EVENT_DECODER
-    return KNOWN_EVENT_DECODER
+    if route_path is None:
+        return KNOWN_EVENT_DECODER
+    normalized_path = str(route_path).split("?", 1)[0].rstrip("/")
+    return EVENT_ROUTE_DECODERS.get(normalized_path, UNKNOWN_EVENT_DECODER)
+
+
+def _event_kind_contracts():
+    contracts = {}
+    for event_type in BLOCKER_EVENT_TYPES:
+        contracts[event_type] = EventKindContract(
+            "blocker",
+            ("session_id", "message_id", "blocker_id", "question", "status"),
+            requires_blocker=True,
+        )
+    for event_type in ERROR_EVENT_TYPES:
+        contracts[event_type] = EventKindContract("error", ("session_id", "message_id", "error"))
+    for event_type in TEXT_EVENT_TYPES:
+        contracts[event_type] = EventKindContract("text", ("text",))
+    for event_type in TOOL_EVENT_TYPES:
+        contracts[event_type] = EventKindContract("tool", ("tool", "call_id"))
+    for event_type in ADMISSION_EVENT_TYPES:
+        contracts[event_type] = EventKindContract("admission", ("session_id", "message_id", "status", "delivery"))
+    for event_type in PROMPT_EVENT_TYPES:
+        contracts[event_type] = EventKindContract("prompt", ("session_id", "message_id", "status", "delivery"))
+    for event_type in STEP_EVENT_TYPES:
+        contracts[event_type] = EventKindContract("step", ("session_id", "message_id", "step", "status", "title"))
+    for event_type in STATUS_EVENT_TYPES:
+        contracts[event_type] = EventKindContract("status", ("session_id", "status"))
+    return contracts
 
 
 API_EVENT_DECODER = ApiEventRouteDecoder()
 LEGACY_EVENT_DECODER = LegacyEventRouteDecoder()
 KNOWN_EVENT_DECODER = KnownEventRouteDecoder((API_EVENT_DECODER, LEGACY_EVENT_DECODER))
+UNKNOWN_EVENT_DECODER = UnknownEventRouteDecoder()
+EVENT_ROUTE_DECODERS = {API_EVENT_ROUTE: API_EVENT_DECODER}
+EVENT_ROUTE_DECODERS.update({route: LEGACY_EVENT_DECODER for route in LEGACY_EVENT_ROUTES})
+EVENT_KIND_CONTRACTS = _event_kind_contracts()
 EVENT_ADAPTER = KNOWN_EVENT_DECODER
 OPENAPI_EVENT_ADAPTER = API_EVENT_DECODER
 LEGACY_EVENT_ADAPTER = LEGACY_EVENT_DECODER
