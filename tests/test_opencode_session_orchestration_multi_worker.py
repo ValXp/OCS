@@ -3,7 +3,13 @@ import unittest
 from opencode_session.multi_worker_orchestration import plan_dependency_ordered_serial_step
 from opencode_session.run_persistence import persist_worker_transitions
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_state import WorkerTransitionError, apply_worker_transition, mark_worker_active, worker_field
+from opencode_session.worker_state import (
+    WorkerTransitionError,
+    apply_worker_transition,
+    mark_worker_active,
+    normalize_worker,
+    worker_field,
+)
 
 try:
     from tests.multi_worker_orchestration_helpers import NOW, DependencyOrderedSerialServiceScenario
@@ -13,7 +19,7 @@ except ModuleNotFoundError:
 
 class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
     def test_ready_worker_ids_exclude_worker_blocked_by_partially_completed_cycle(self):
-        workers = {
+        workers = _hydrated_workers({
             "build": {
                 "id": "build",
                 "prompt": "Run the implementation",
@@ -28,7 +34,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
                 "status": "queued",
                 "dependencies": ["build"],
             },
-        }
+        })
 
         analysis = analyze_worker_dependencies(workers)
 
@@ -39,7 +45,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         )
 
     def test_dependency_blockers_propagate_through_failed_and_missing_chains(self):
-        workers = {
+        workers = _hydrated_workers({
             "deploy": {
                 "id": "deploy",
                 "prompt": "Deploy the reviewed implementation",
@@ -74,7 +80,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
                 "status": "queued",
                 "dependencies": ["missing"],
             },
-        }
+        })
 
         analysis = analyze_worker_dependencies(workers)
 
@@ -90,7 +96,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(analysis.blockers_by_worker_id, expected_blockers)
 
     def test_ready_worker_ids_use_next_eligible_action_for_active_workers(self):
-        workers = {
+        workers = _hydrated_workers({
             "retry": {
                 "id": "retry",
                 "prompt": "Retry transient failure",
@@ -111,14 +117,14 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
                 "status": "active",
                 "next_eligible_action": "retry",
             },
-        }
+        })
 
         analysis = analyze_worker_dependencies(workers)
 
         self.assertEqual(analysis.ready_worker_ids, ("retry", "start"))
 
     def test_dependency_ordered_serial_step_selects_one_ready_worker_and_blocks_without_mutation(self):
-        workers = {
+        workers = _hydrated_workers({
             "build": {"id": "build", "prompt": "Build", "lifecycle_state": "failed_terminal", "status": "failed"},
             "docs": {"id": "docs", "prompt": "Docs", "lifecycle_state": "queued", "status": "queued"},
             "lint": {"id": "lint", "prompt": "Lint", "lifecycle_state": "queued", "status": "queued"},
@@ -129,7 +135,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
                 "status": "queued",
                 "dependencies": ["build"],
             },
-        }
+        })
 
         analysis = analyze_worker_dependencies(workers)
         step = plan_dependency_ordered_serial_step(workers)
@@ -139,9 +145,9 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertFalse(hasattr(step, "ready_worker_ids"))
         self.assertFalse(hasattr(step, "eligible_worker_ids"))
         self.assertEqual([transition.worker_id for transition in step.dependency_blocked_transitions], ["review"])
-        self.assertEqual(workers["review"]["status"], "queued")
+        self.assertEqual(worker_field(workers["review"], "status"), "queued")
 
-        latest_workers = {"review": dict(workers["review"])}
+        latest_workers = {"review": normalize_worker(workers["review"].to_public_dict(), "review")}
         apply_worker_transition(latest_workers, step.dependency_blocked_transitions[0])
 
         self.assertEqual(worker_field(latest_workers["review"], "status"), "blocked")
@@ -167,7 +173,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(worker_field(persisted["workers"]["build"], "status"), "done")
 
     def test_dependency_ordered_serial_step_advances_one_worker_at_a_time_as_dependencies_finish(self):
-        workers = {
+        workers = _hydrated_workers({
             "build": {"id": "build", "prompt": "Build", "lifecycle_state": "queued", "status": "queued"},
             "review": {
                 "id": "review",
@@ -183,20 +189,24 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
                 "status": "queued",
                 "dependencies": ["review"],
             },
-        }
+        })
 
         first_step = plan_dependency_ordered_serial_step(workers)
-        workers["build"].update({"lifecycle_state": "done_collect", "status": "done"})
+        workers["build"].set_field("lifecycle_state", "done_collect")
         second_step = plan_dependency_ordered_serial_step(workers)
-        workers["review"].update({"lifecycle_state": "done_collect", "status": "done"})
+        workers["review"].set_field("lifecycle_state", "done_collect")
         third_step = plan_dependency_ordered_serial_step(workers)
-        workers["deploy"].update({"lifecycle_state": "done_collect", "status": "done"})
+        workers["deploy"].set_field("lifecycle_state", "done_collect")
         final_step = plan_dependency_ordered_serial_step(workers)
 
         self.assertEqual(first_step.worker_id, "build")
         self.assertEqual(second_step.worker_id, "review")
         self.assertEqual(third_step.worker_id, "deploy")
         self.assertIsNone(final_step.worker_id)
+
+
+def _hydrated_workers(workers):
+    return {worker_id: normalize_worker(worker, worker_id) for worker_id, worker in workers.items()}
 
 
 if __name__ == "__main__":

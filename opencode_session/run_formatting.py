@@ -4,7 +4,7 @@ from opencode_session.formatting import (
     format_table as _format_table,
 )
 from opencode_session.schema_common import tokens_total as _tokens_total
-from opencode_session.worker_state import is_worker_mapping, normalize_worker, worker_field
+from opencode_session.worker_state import normalize_worker, worker_field
 
 
 def format_run_compact(run):
@@ -99,7 +99,7 @@ def _format_worker_table(workers):
 def _worker_status_counts(workers):
     counts = {"queued": 0, "active": 0, "done": 0, "blocked": 0, "failed": 0, "aborted": 0, "timeout": 0}
     for worker_id, worker in workers.items():
-        status = worker_field(normalize_worker(worker, worker_id), "status") if is_worker_mapping(worker) else None
+        status = worker_field(normalize_worker(worker, worker_id), "status")
         if status in counts:
             counts[status] += 1
     return counts

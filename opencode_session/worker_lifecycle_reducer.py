@@ -17,7 +17,7 @@ from opencode_session.worker_state import (
 class WorkerLifecycleReducer:
     def __init__(self, record):
         self.record = record
-        self.latest_worker = record.to_snapshot()
+        self.latest_worker = record.to_worker()
 
     def apply(self, transition):
         if not isinstance(transition.name, WorkerTransitionName):
@@ -38,7 +38,7 @@ class WorkerLifecycleReducer:
         )
 
     def _copy_latest(self):
-        return deepcopy(self.latest_worker)
+        return deepcopy(self.latest_worker.to_snapshot())
 
     def _unchanged_worker(self, transition):
         return WorkerRecord.from_worker(self.latest_worker, self.record.worker_id or transition.worker_id).to_worker()
@@ -106,7 +106,10 @@ def _is_stale_snapshot_recovery(transition):
 def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
     merged_values = []
     for source in (latest_worker, worker_record):
-        values = source.get(field_name) if isinstance(source, Mapping) else None
+        if isinstance(source, WorkerRecord):
+            values = source.field(field_name)
+        else:
+            values = source.get(field_name) if isinstance(source, Mapping) else None
         if not isinstance(values, list):
             continue
         for value in values:

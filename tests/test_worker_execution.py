@@ -24,7 +24,14 @@ from opencode_session.worker_session_provisioning import (
     ensure_worker_session,
     provision_worker_session,
 )
-from opencode_session.worker_state import WorkerRecord, apply_worker_transition, ensure_worker, worker_field, worker_has_field
+from opencode_session.worker_state import (
+    WorkerRecord,
+    apply_worker_transition,
+    ensure_worker,
+    normalize_worker,
+    worker_field,
+    worker_has_field,
+)
 
 
 CAPABILITIES = {
@@ -225,7 +232,11 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
 
     def test_worker_session_journal_records_cleanup_failure_when_discard_fails(self):
-        run = {"name": "demo", "directory": "/workspace", "workers": {"worker": {"id": "worker"}}}
+        run = {
+            "name": "demo",
+            "directory": "/workspace",
+            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+        }
         worker = run["workers"]["worker"]
         calls = []
 
@@ -263,7 +274,11 @@ class WorkerExecutionTest(unittest.TestCase):
         )
 
     def test_worker_session_provisioner_records_created_session_before_finalize(self):
-        run = {"name": "demo", "directory": "/workspace", "workers": {"worker": {"id": "worker"}}}
+        run = {
+            "name": "demo",
+            "directory": "/workspace",
+            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+        }
         worker = run["workers"]["worker"]
         journals = []
 
@@ -314,18 +329,26 @@ class WorkerExecutionTest(unittest.TestCase):
     def test_recoverable_created_worker_sessions_merges_cleanup_and_journal_transactions(self):
         run = {
             "workers": {
-                "worker": {
-                    "cleanup": {
-                        "deleted": False,
-                        "sessions": ["ses_worker_cleanup", "ses_duplicate"],
-                    }
-                },
-                "deleted": {
-                    "cleanup": {
-                        "deleted": True,
-                        "sessions": ["ses_deleted"],
-                    }
-                },
+                "worker": normalize_worker(
+                    {
+                        "id": "worker",
+                        "cleanup": {
+                            "deleted": False,
+                            "sessions": ["ses_worker_cleanup", "ses_duplicate"],
+                        },
+                    },
+                    "worker",
+                ),
+                "deleted": normalize_worker(
+                    {
+                        "id": "deleted",
+                        "cleanup": {
+                            "deleted": True,
+                            "sessions": ["ses_deleted"],
+                        },
+                    },
+                    "deleted",
+                ),
             },
             WORKER_SESSION_JOURNAL_FIELD: [
                 {

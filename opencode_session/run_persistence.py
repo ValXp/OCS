@@ -1,9 +1,10 @@
 from dataclasses import dataclass
+from collections.abc import Mapping
 
 from opencode_session.worker_state import (
     WorkerTransition,
+    WorkerRecord,
     apply_worker_transition,
-    is_worker_mapping,
     normalize_worker_snapshot,
     worker_field,
 )
@@ -30,12 +31,21 @@ def persist_worker_snapshot_update(store, run, worker, *, refresh_run_summary, n
 
 
 def persist_worker_snapshot_updates(store, run, workers, *, refresh_run_summary, now):
-    updates = [
-        WorkerTransition.snapshot_applied(normalize_worker_snapshot(worker, worker_field(worker, "id")))
-        for worker in workers
-        if is_worker_mapping(worker) and worker_field(worker, "id")
-    ]
+    updates = [_snapshot_update_transition(worker) for worker in workers]
+    updates = [transition for transition in updates if transition is not None]
     return persist_worker_transitions(store, run, updates, refresh_run_summary=refresh_run_summary, now=now)
+
+
+def _snapshot_update_transition(worker):
+    if isinstance(worker, WorkerRecord):
+        worker_id = worker_field(worker, "id")
+    elif isinstance(worker, Mapping):
+        worker_id = worker.get("id")
+    else:
+        return None
+    if not worker_id:
+        return None
+    return WorkerTransition.snapshot_applied(normalize_worker_snapshot(worker, worker_id))
 
 
 def persist_worker_transitions(store, run, transitions, *, refresh_run_summary, now):

@@ -22,6 +22,7 @@ from opencode_session.worker_state import (
     canonicalize_legacy_worker_record,
     deserialize_worker_record,
     is_executable_worker,
+    is_worker_mapping,
     mark_worker_active,
     next_eligible_action,
     next_eligible_worker_action,
@@ -177,16 +178,19 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker.next_eligible_action, "retry")
 
     def test_worker_execution_eligibility_derives_canonical_action(self):
-        queued = {"id": "build", "prompt": "Build", "lifecycle_state": "queued"}
-        waiting = {"id": "review", "prompt": "Review", "lifecycle_state": "active_wait"}
-        retrying = {"id": "test", "prompt": "Test", "lifecycle_state": "active_retry"}
-        stale_action = {
-            "id": "docs",
-            "prompt": "Docs",
-            "lifecycle_state": "active_wait",
-            "status": "active",
-            "next_eligible_action": "retry",
-        }
+        queued = normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "queued"}, "build")
+        waiting = normalize_worker({"id": "review", "prompt": "Review", "lifecycle_state": "active_wait"}, "review")
+        retrying = normalize_worker({"id": "test", "prompt": "Test", "lifecycle_state": "active_retry"}, "test")
+        stale_action = normalize_worker(
+            {
+                "id": "docs",
+                "prompt": "Docs",
+                "lifecycle_state": "active_wait",
+                "status": "active",
+                "next_eligible_action": "retry",
+            },
+            "docs",
+        )
 
         self.assertTrue(is_executable_worker(queued))
         self.assertFalse(is_executable_worker(waiting))
@@ -196,7 +200,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker_field(stale_action, "next_eligible_action"), "wait")
         self.assertEqual(next_eligible_worker_action(stale_action), "wait")
 
-    def test_raw_legacy_worker_mappings_canonicalize_for_field_access_and_scheduling(self):
+    def test_legacy_worker_mappings_canonicalize_at_hydration_boundary(self):
         cases = (
             (
                 "done worker is not executable",
@@ -256,15 +260,32 @@ class WorkerStateContractTest(unittest.TestCase):
         for name, worker, expected_lifecycle, expected_status, expected_action, executable in cases:
             with self.subTest(name=name):
                 canonical = canonicalize_legacy_worker_record(worker)
+                record = normalize_worker(worker, worker["id"])
 
                 self.assertEqual(canonical["lifecycle_state"], expected_lifecycle)
-                self.assertEqual(worker_lifecycle_state(worker), expected_lifecycle)
-                self.assertEqual(worker_field(worker, "lifecycle_state"), expected_lifecycle)
-                self.assertEqual(worker_field(worker, "status"), expected_status)
-                self.assertEqual(worker_field(worker, "next_eligible_action"), expected_action)
-                self.assertEqual(next_eligible_worker_action(worker), expected_action)
-                self.assertEqual(next_eligible_action(worker), expected_action)
-                self.assertEqual(is_executable_worker(worker), executable)
+                self.assertIsInstance(record, WorkerRecord)
+                self.assertEqual(worker_lifecycle_state(record), expected_lifecycle)
+                self.assertEqual(worker_field(record, "lifecycle_state"), expected_lifecycle)
+                self.assertEqual(worker_field(record, "status"), expected_status)
+                self.assertEqual(worker_field(record, "next_eligible_action"), expected_action)
+                self.assertEqual(next_eligible_worker_action(record), expected_action)
+                self.assertEqual(next_eligible_action(record), expected_action)
+                self.assertEqual(is_executable_worker(record), executable)
+
+    def test_core_worker_helpers_reject_raw_mappings(self):
+        worker = {"id": "review", "prompt": "Review", "lifecycle_state": "queued"}
+
+        self.assertFalse(is_worker_mapping(worker))
+        self.assertTrue(is_worker_mapping(normalize_worker(worker, "review")))
+        for helper in (
+            lambda: worker_field(worker, "id"),
+            lambda: worker_lifecycle_state(worker),
+            lambda: next_eligible_worker_action(worker),
+            lambda: is_executable_worker(worker),
+            lambda: worker_record_for_mutation(worker, "review"),
+        ):
+            with self.assertRaisesRegex(TypeError, "WorkerRecord"):
+                helper()
 
     def test_deserialize_worker_derives_public_state_from_lifecycle(self):
         worker = deserialize_worker_record(
@@ -287,7 +308,7 @@ class WorkerStateContractTest(unittest.TestCase):
             "lifecycle_state": "active_wait",
         }
 
-        record = worker_record_for_mutation(snapshot, "review")
+        record = worker_record_for_mutation(normalize_worker(snapshot, "review"), "review")
         record.remember_prompt_id("msg_new")
 
         self.assertIsInstance(record, WorkerRecord)
@@ -382,7 +403,7 @@ class WorkerStateContractTest(unittest.TestCase):
 
         snapshot = serialize_worker_snapshot(worker, "review")
 
-        self.assertEqual(worker_lifecycle_state(worker), "active_wait")
+        self.assertEqual(worker_lifecycle_state(normalize_worker(worker, "review")), "active_wait")
         self.assertEqual(snapshot["lifecycle_state"], "active_wait")
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
@@ -423,9 +444,9 @@ class WorkerStateContractTest(unittest.TestCase):
     def test_refresh_run_summary_uses_failed_precedence_for_mixed_terminal_workers(self):
         run = {
             "workers": {
-                "build": {"id": "build", "prompt": "Build", "lifecycle_state": "timeout_terminal"},
-                "review": {"id": "review", "prompt": "Review", "lifecycle_state": "aborted"},
-                "test": {"id": "test", "prompt": "Test", "lifecycle_state": "failed_terminal"},
+                "build": normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "timeout_terminal"}, "build"),
+                "review": normalize_worker({"id": "review", "prompt": "Review", "lifecycle_state": "aborted"}, "review"),
+                "test": normalize_worker({"id": "test", "prompt": "Test", "lifecycle_state": "failed_terminal"}, "test"),
             }
         }
 

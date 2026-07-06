@@ -13,7 +13,7 @@ from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
-from opencode_session.worker_state import worker_field
+from opencode_session.worker_state import normalize_worker, worker_field
 
 try:
     from tests.multi_worker_orchestration_helpers import (
@@ -43,12 +43,15 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
     def test_next_eligible_worker_executor_delegates_to_core_direct_execution(self):
         run = {
             "workers": {
-                "worker": {
-                    "id": "worker",
-                    "prompt": "Finish the worker task",
-                    "agent": "build",
-                    "model": "openai/gpt-5.5",
-                }
+                "worker": normalize_worker(
+                    {
+                        "id": "worker",
+                        "prompt": "Finish the worker task",
+                        "agent": "build",
+                        "model": "openai/gpt-5.5",
+                    },
+                    "worker",
+                )
             }
         }
         client = object()
@@ -86,7 +89,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                     }
                 )
                 updated_run = deepcopy(run)
-                updated_run["workers"][worker["id"]]["status"] = "done"
+                updated_run["workers"][worker_field(worker, "id")].set_field("lifecycle_state", "done_collect")
                 return WorkerExecutionOutcome("completed", run=updated_run)
 
         class RecordingSessionTracker:
@@ -108,7 +111,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             execution_policy=EXECUTION_POLICY_FAIL_FAST,
         )
 
-        self.assertEqual(outcome.run["workers"]["worker"]["status"], "done")
+        self.assertEqual(worker_field(outcome.run["workers"]["worker"], "status"), "done")
         self.assertEqual(len(core.calls), 1)
         self.assertIs(core.calls[0]["client"], client)
         self.assertIs(core.calls[0]["run"], run)
@@ -120,7 +123,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(core.calls[0]["model"], "openai/gpt-5.5")
         self.assertFalse(core.calls[0]["cleanup_requested"])
         self.assertTrue(core.calls[0]["stop_after_retry"])
-        self.assertEqual(session_tracker.remembered[0][1]["status"], "done")
+        self.assertEqual(worker_field(session_tracker.remembered[0][1], "status"), "done")
         self.assertEqual(session_tracker.remembered[0][2], "completed")
 
     def test_start_persists_active_attempt_before_provider_call(self):

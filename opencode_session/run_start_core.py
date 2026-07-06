@@ -17,7 +17,6 @@ from opencode_session.worker_execution import (
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
 from opencode_session.worker_state import (
     WorkerTransition,
-    WorkerRecord,
     is_worker_mapping,
     worker_field,
     worker_record_for_mutation,
@@ -167,10 +166,7 @@ class RunStartCore:
 def remember_created_worker_sessions(created_session_ids_by_worker, worker, session_ids):
     if not session_ids:
         return
-    if isinstance(worker, WorkerRecord):
-        worker.ensure_cleanup()
-    else:
-        worker.setdefault("cleanup", {"requested": True, "deleted": False})
+    worker.ensure_cleanup()
     remembered_session_ids = created_session_ids_by_worker.setdefault(worker_field(worker, "id"), [])
     for session_id in session_ids:
         if session_id not in remembered_session_ids:

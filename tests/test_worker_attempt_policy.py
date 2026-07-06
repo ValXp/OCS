@@ -11,7 +11,7 @@ from opencode_session.worker_attempt_policy import (
     classify_worker_attempt_exception,
     classify_worker_attempt_result,
 )
-from opencode_session.worker_state import WorkerTransitionName
+from opencode_session.worker_state import WorkerTransitionName, normalize_worker
 
 
 def worker_record(**fields):
@@ -22,7 +22,7 @@ def worker_record(**fields):
         "retryable_failures": [],
     }
     worker.update(fields)
-    return worker
+    return normalize_worker(worker, worker["id"])
 
 
 class WorkerAttemptPolicyTest(unittest.TestCase):

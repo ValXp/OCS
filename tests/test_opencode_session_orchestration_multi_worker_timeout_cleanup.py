@@ -10,7 +10,7 @@ from opencode_session.run_start_core import RunStartCore
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
-from opencode_session.worker_state import apply_worker_transition, worker_field, worker_has_field
+from opencode_session.worker_state import apply_worker_transition, normalize_worker, worker_field, worker_has_field
 
 try:
     from tests.multi_worker_orchestration_helpers import CAPABILITIES, FakeClient
@@ -68,8 +68,8 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         run = {
             "status": "done",
             "workers": {
-                "alpha": {"id": "alpha", "lifecycle_state": "done_collect", "status": "done"},
-                "beta": {"id": "beta", "lifecycle_state": "done_collect", "status": "done"},
+                "alpha": normalize_worker({"id": "alpha", "lifecycle_state": "done_collect", "status": "done"}, "alpha"),
+                "beta": normalize_worker({"id": "beta", "lifecycle_state": "done_collect", "status": "done"}, "beta"),
             },
         }
         persisted_worker_ids = []
