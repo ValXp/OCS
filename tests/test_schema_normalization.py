@@ -1,20 +1,83 @@
 import unittest
 
 from opencode_session.events import normalize_event
-from opencode_session.schema_common import DomainRecord, NormalizedEventRecord
-from opencode_session.schema_normalization import (
-    iter_normalized_message_records,
-    normalize_admission_record,
-    normalize_event_record,
-    normalize_message_record,
-    normalize_session_payload,
+from opencode_session.schema_admission_adapter import normalize_admission_record
+from opencode_session.schema_common import NormalizedEventRecord, PersistedRunRecord, WorkerSnapshotRecord
+from opencode_session.schema_event_adapter import normalize_event_record
+from opencode_session.schema_message_adapter import iter_normalized_message_records, normalize_message_record
+from opencode_session.schema_session_adapter import normalize_session_payload
+
+
+KNOWN_EVENT_ROUTE_FIXTURES = (
+    (
+        "/api/event",
+        {
+            "type": "permission.requested",
+            "properties": {
+                "sessionID": "ses_1",
+                "messageID": "msg_1",
+                "permissionID": "perm_1",
+                "question": "Allow bash?",
+                "status": "pending",
+            },
+        },
+        {
+            "kind": "blocker",
+            "schema_status": "known",
+            "session_id": "ses_1",
+            "type": "permission.requested",
+            "message_id": "msg_1",
+            "status": "queued",
+            "raw_status": "pending",
+            "blocker": "permission",
+            "blocker_id": "perm_1",
+            "question": "Allow bash?",
+        },
+    ),
+    (
+        "/event",
+        {
+            "event": "session.status",
+            "payload": {"sessionID": "ses_1", "status": "completed"},
+        },
+        {
+            "kind": "status",
+            "schema_status": "known",
+            "session_id": "ses_1",
+            "type": "session.status",
+            "status": "done",
+            "raw_status": "completed",
+        },
+    ),
+    (
+        "/api/event",
+        {
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "messageID": "msg_assistant",
+                "message": {"role": "assistant", "status": "completed", "text": "PONG"},
+            },
+        },
+        {
+            "kind": "text",
+            "schema_status": "known",
+            "session_id": "ses_1",
+            "type": "message.part.updated",
+            "message_id": "msg_assistant",
+            "status": "done",
+            "raw_status": "completed",
+            "text": "PONG",
+        },
+    ),
 )
 
 
 class SchemaNormalizationTest(unittest.TestCase):
     def test_sparse_schema_boundaries_are_marked_total_false(self):
         self.assertFalse(NormalizedEventRecord.__total__)
-        self.assertFalse(DomainRecord.__total__)
+        self.assertFalse(PersistedRunRecord.__total__)
+        self.assertFalse(WorkerSnapshotRecord.__total__)
 
     def test_normalizes_session_aliases_in_wrapped_collections(self):
         payload = {
@@ -124,6 +187,11 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(event["blocker_id"], "perm_1")
         self.assertEqual(event["status"], "queued")
 
+    def test_known_event_route_fixtures_decode_explicit_shapes(self):
+        for route_path, raw_event, expected in KNOWN_EVENT_ROUTE_FIXTURES:
+            with self.subTest(route_path=route_path):
+                self.assertEqual(normalize_event_record(raw_event, "ses_1", route_path=route_path), expected)
+
     def test_unknown_session_shapes_are_explicit_records(self):
         self.assertEqual(
             normalize_session_payload("not-a-session-record"),
@@ -202,7 +270,9 @@ class SchemaNormalizationTest(unittest.TestCase):
         api_event = normalize_event_record(event, "ses_1", route_path="/api/event")
         legacy_event = normalize_event_record(event, "ses_1", route_path="/event")
 
-        self.assertEqual(api_event["kind"], "ignored")
+        self.assertEqual(api_event["kind"], "unknown")
+        self.assertEqual(api_event["schema_status"], "unknown")
+        self.assertEqual(api_event["raw"], event)
         self.assertEqual(legacy_event["kind"], "status")
         self.assertEqual(legacy_event["session_id"], "ses_1")
         self.assertEqual(legacy_event["status"], "done")

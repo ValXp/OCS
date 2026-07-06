@@ -2,16 +2,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 
-from opencode_session.schema_common import (
-    NormalizedEventRecord,
-    first_present,
-    first_present_in,
-    first_mapping_at_paths,
-    mapping_at_path,
-    mapping_value,
-    set_if_present,
-    string_value,
-)
+from opencode_session.schema_common import NormalizedEventRecord, first_present, set_if_present, string_value
 from opencode_session.status import short_status
 
 
@@ -29,205 +20,146 @@ ERROR_EVENT_TYPES = frozenset({"message.error", "session.error", "tool.execute.e
 
 
 @dataclass(frozen=True)
-class EventMappingSource:
-    root: str
-    path: tuple = ()
+class DecodedEvent:
+    event_type: str | None
+    session_id: str | None
+    message_id: str | None = None
+    status: str | None = None
+    delivery: str | None = None
+    text: str | None = None
+    tool: str | None = None
+    call_id: str | None = None
+    step: str | None = None
+    title: str | None = None
+    blocker: str | None = None
+    blocker_id: str | None = None
+    question: str | None = None
+    error: str | None = None
 
 
-@dataclass(frozen=True)
-class EventRouteSchema:
-    payload_paths: tuple
-    source_paths: tuple
-    tool_paths: tuple
-    error_paths: tuple
-    field_aliases: dict
-    kind_event_types: dict
+class ApiEventRouteDecoder:
+    route = "event"
+    version = "api-v1"
 
-
-EVENT_ROOT = "event"
-PAYLOAD_ROOT = "payload"
-
-EVENT_FIELD_ALIASES = {
-    "session_id": ("sessionID", "sessionId", "session_id"),
-    "nested_session_id": ("id", "sessionID", "sessionId", "session_id"),
-    "event_type": ("type", "event", "name", "kind"),
-    "status": ("status", "state", "phase"),
-    "error_text": ("error", "reason"),
-    "tool_name": ("toolName", "tool_name", "tool"),
-    "call_id": ("callID", "callId", "toolCallID", "toolCallId", "tool_call_id"),
-    "message_id": ("messageID", "messageId", "message_id", "promptID", "promptId", "id"),
-    "text": ("delta", "text", "content"),
-    "delivery": ("delivery", "deliveryMode", "mode"),
-    "step": ("step", "stepID", "stepId", "step_id"),
-    "title": ("title", "description"),
-    "question": ("question", "prompt", "title"),
-    "blocker_permission": ("permission", "permissionID", "permissionId"),
-    "blocker_question": ("question", "questionID", "questionId"),
-    "blocker": ("blocker", "blockerID", "blockerId"),
-    "blocker_id": (
-        "permissionID",
-        "permissionId",
-        "permission_id",
-        "questionID",
-        "questionId",
-        "question_id",
-        "blockerID",
-        "blockerId",
-        "blocker_id",
-    ),
-}
-
-EVENT_KIND_CRITERIA = {
-    "blocker": BLOCKER_EVENT_TYPES,
-    "error": ERROR_EVENT_TYPES,
-    "text": TEXT_EVENT_TYPES,
-    "tool": TOOL_EVENT_TYPES,
-    "admission": ADMISSION_EVENT_TYPES,
-    "prompt": PROMPT_EVENT_TYPES,
-    "step": STEP_EVENT_TYPES,
-    "status": STATUS_EVENT_TYPES,
-}
-
-COMPATIBLE_EVENT_SOURCE_PATHS = (
-    EventMappingSource(EVENT_ROOT),
-    EventMappingSource(PAYLOAD_ROOT),
-    EventMappingSource(EVENT_ROOT, ("info",)),
-    EventMappingSource(PAYLOAD_ROOT, ("info",)),
-    EventMappingSource(EVENT_ROOT, ("part",)),
-    EventMappingSource(PAYLOAD_ROOT, ("part",)),
-    EventMappingSource(EVENT_ROOT, ("message",)),
-    EventMappingSource(PAYLOAD_ROOT, ("message",)),
-    EventMappingSource(EVENT_ROOT, ("tool",)),
-    EventMappingSource(PAYLOAD_ROOT, ("tool",)),
-)
-
-OPENAPI_EVENT_SOURCE_PATHS = tuple(
-    source
-    for source in COMPATIBLE_EVENT_SOURCE_PATHS
-    if source.path != ("info",)
-)
-
-TOOL_SOURCE_PATHS = (
-    EventMappingSource(EVENT_ROOT, ("tool",)),
-    EventMappingSource(PAYLOAD_ROOT, ("tool",)),
-)
-ERROR_SOURCE_PATHS = (
-    EventMappingSource(EVENT_ROOT, ("error",)),
-    EventMappingSource(PAYLOAD_ROOT, ("error",)),
-)
-
-COMPATIBLE_EVENT_SCHEMA = EventRouteSchema(
-    payload_paths=(("properties",), ("payload",), ("data",)),
-    source_paths=COMPATIBLE_EVENT_SOURCE_PATHS,
-    tool_paths=TOOL_SOURCE_PATHS,
-    error_paths=ERROR_SOURCE_PATHS,
-    field_aliases=EVENT_FIELD_ALIASES,
-    kind_event_types=EVENT_KIND_CRITERIA,
-)
-OPENAPI_EVENT_SCHEMA = EventRouteSchema(
-    payload_paths=(("properties",),),
-    source_paths=OPENAPI_EVENT_SOURCE_PATHS,
-    tool_paths=TOOL_SOURCE_PATHS,
-    error_paths=ERROR_SOURCE_PATHS,
-    field_aliases=EVENT_FIELD_ALIASES,
-    kind_event_types=EVENT_KIND_CRITERIA,
-)
-LEGACY_EVENT_SCHEMA = EventRouteSchema(
-    payload_paths=(("payload",), ("data",), ("properties",)),
-    source_paths=COMPATIBLE_EVENT_SOURCE_PATHS,
-    tool_paths=TOOL_SOURCE_PATHS,
-    error_paths=ERROR_SOURCE_PATHS,
-    field_aliases=EVENT_FIELD_ALIASES,
-    kind_event_types=EVENT_KIND_CRITERIA,
-)
-
-
-@dataclass(frozen=True)
-class EventRouteAdapter:
-    schema: EventRouteSchema
-    route: str = "event"
-    version: str = "compatible"
+    def decode(self, event):
+        if not isinstance(event, dict) or not isinstance(event.get("properties"), dict):
+            return None
+        event_type = string_value(event.get("type"))
+        if event_type is None:
+            return None
+        return _decoded_from_fields(event_type, event["properties"])
 
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
+        return _normalize_decoded_event(event, self.decode(event), target_session_id)
+
+
+class LegacyEventRouteDecoder:
+    route = "event"
+    version = "legacy"
+
+    def decode(self, event):
         if not isinstance(event, dict):
-            return unknown_event_record(event)
-        payload = first_mapping_at_paths(event, self.schema.payload_paths)
-        sources = _event_sources(event, payload, self.schema.source_paths)
-        tool = _first_mapping_from_sources(event, payload, self.schema.tool_paths)
-        error = _first_mapping_from_sources(event, payload, self.schema.error_paths)
+            return None
+        event_type = string_value(event.get("event"))
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = event.get("data")
+        if event_type is None or not isinstance(payload, dict):
+            return None
+        return _decoded_from_fields(event_type, payload)
 
-        session_id = _event_session_id(sources, self.schema.field_aliases)
-        event_type = self.value(sources, "event_type")
-        event_type_text = string_value(event_type)
-        if target_session_id is not None and session_id != target_session_id:
-            return ignored_event_record(session_id, target_session_id, event_type_text)
-
-        status = self.value(sources, "status")
-        raw_status = string_value(status)
-        text = _event_text_value(sources, self.schema.field_aliases)
-        error_text = _error_text(error) or string_value(self.value(sources, "error_text"))
-        tool_name = _tool_name(tool) or string_value(self.value([event, payload], "tool_name"))
-        call_id = string_value(self.value(sources, "call_id"))
-        kind = _event_kind(event_type_text, text, tool_name, call_id, error_text, sources, self.schema)
-
-        if kind == "unknown":
-            return unknown_event_record(event, event_type=event_type_text, session_id=session_id)
-
-        normalized = {"kind": kind, "schema_status": "known"}
-        set_if_present(normalized, "session_id", session_id)
-        set_if_present(normalized, "type", event_type_text)
-        set_if_present(normalized, "message_id", _event_message_id(sources, self.schema.field_aliases))
-        set_if_present(normalized, "status", short_status(raw_status))
-        if raw_status is not None and short_status(raw_status) != raw_status:
-            normalized["raw_status"] = raw_status
-        set_if_present(normalized, "delivery", string_value(self.value(sources, "delivery")))
-        set_if_present(normalized, "text", text)
-        set_if_present(normalized, "tool", tool_name)
-        set_if_present(normalized, "call_id", call_id)
-        set_if_present(normalized, "step", string_value(self.value(sources, "step")))
-        set_if_present(normalized, "title", string_value(self.value(sources, "title")))
-        blocker = _blocker_type(event_type, sources, self.schema.field_aliases, self.schema.kind_event_types)
-        set_if_present(normalized, "blocker", blocker)
-        if blocker is not None:
-            set_if_present(normalized, "blocker_id", _blocker_id(sources, self.schema.field_aliases))
-            set_if_present(normalized, "question", string_value(self.value(sources, "question")))
-        set_if_present(normalized, "error", error_text)
-        return normalized
-
-    def value(self, sources, field_name):
-        return first_present_in(sources, *self.schema.field_aliases[field_name])
+    def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
+        return _normalize_decoded_event(event, self.decode(event), target_session_id)
 
 
-@dataclass(frozen=True)
-class OpenApiEventRouteAdapter(EventRouteAdapter):
-    schema: EventRouteSchema = OPENAPI_EVENT_SCHEMA
-    version: str = "api-v1"
+class KnownEventRouteDecoder:
+    route = "event"
+    version = "known-shapes"
+
+    def __init__(self, decoders=None):
+        self.decoders = tuple(decoders or (API_EVENT_DECODER, LEGACY_EVENT_DECODER))
+
+    def decode(self, event):
+        for decoder in self.decoders:
+            decoded = decoder.decode(event)
+            if decoded is not None:
+                return decoded
+        return None
+
+    def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
+        return _normalize_decoded_event(event, self.decode(event), target_session_id)
 
 
-@dataclass(frozen=True)
-class LegacyEventRouteAdapter(EventRouteAdapter):
-    schema: EventRouteSchema = LEGACY_EVENT_SCHEMA
-    version: str = "legacy"
+def _decoded_from_fields(event_type, fields):
+    tool = _tool_name(fields)
+    error = _error_text(fields.get("error")) or string_value(first_present(fields, "reason"))
+    blocker = _blocker_type(event_type, fields)
+    return DecodedEvent(
+        event_type=event_type,
+        session_id=_string_field(fields, "sessionID", "sessionId", "session_id"),
+        message_id=_string_field(fields, "messageID", "messageId", "message_id", "promptID", "promptId"),
+        status=_status_value(fields),
+        delivery=_string_field(fields, "delivery", "deliveryMode", "mode"),
+        text=_text_value(fields),
+        tool=tool,
+        call_id=_string_field(fields, "callID", "callId", "toolCallID", "toolCallId", "tool_call_id"),
+        step=_string_field(fields, "step", "stepID", "stepId", "step_id"),
+        title=_string_field(fields, "title", "description"),
+        blocker=blocker,
+        blocker_id=_blocker_id(fields) if blocker is not None else None,
+        question=_string_field(fields, "question", "prompt", "title") if blocker is not None else None,
+        error=error,
+    )
 
 
-def _event_kind(event_type, text, tool_name, call_id, error_text, sources, schema):
-    normalized_type = str(event_type or "").lower()
-    criteria = schema.kind_event_types
-    if _blocker_type(event_type, sources, schema.field_aliases, criteria):
+def _normalize_decoded_event(raw_event, decoded, target_session_id):
+    if decoded is None:
+        return unknown_event_record(raw_event)
+    if target_session_id is not None and decoded.session_id is not None and decoded.session_id != target_session_id:
+        return ignored_event_record(decoded.session_id, target_session_id, decoded.event_type)
+
+    kind = _event_kind(decoded)
+    if kind == "unknown":
+        return unknown_event_record(raw_event, event_type=decoded.event_type, session_id=decoded.session_id)
+
+    normalized = {"kind": kind, "schema_status": "known"}
+    set_if_present(normalized, "session_id", decoded.session_id)
+    set_if_present(normalized, "type", decoded.event_type)
+    set_if_present(normalized, "message_id", decoded.message_id)
+    set_if_present(normalized, "delivery", decoded.delivery)
+    set_if_present(normalized, "text", decoded.text)
+    set_if_present(normalized, "tool", decoded.tool)
+    set_if_present(normalized, "call_id", decoded.call_id)
+    set_if_present(normalized, "step", decoded.step)
+    set_if_present(normalized, "title", decoded.title)
+    set_if_present(normalized, "blocker", decoded.blocker)
+    set_if_present(normalized, "blocker_id", decoded.blocker_id)
+    set_if_present(normalized, "question", decoded.question)
+    set_if_present(normalized, "error", decoded.error)
+    if decoded.status is not None:
+        normalized["status"] = short_status(decoded.status)
+        if normalized["status"] != decoded.status:
+            normalized["raw_status"] = decoded.status
+    return normalized
+
+
+def _event_kind(decoded):
+    normalized_type = str(decoded.event_type or "").lower()
+    if decoded.blocker is not None:
         return "blocker"
-    if normalized_type in criteria["error"] or error_text is not None:
+    if normalized_type in ERROR_EVENT_TYPES or decoded.error is not None:
         return "error"
-    if normalized_type in criteria["text"] and text is not None:
+    if normalized_type in TEXT_EVENT_TYPES and decoded.text is not None:
         return "text"
-    if normalized_type in criteria["tool"] and (tool_name is not None or call_id is not None):
+    if normalized_type in TOOL_EVENT_TYPES and (decoded.tool is not None or decoded.call_id is not None):
         return "tool"
-    if normalized_type in criteria["admission"]:
+    if normalized_type in ADMISSION_EVENT_TYPES:
         return "admission"
-    if normalized_type in criteria["prompt"]:
+    if normalized_type in PROMPT_EVENT_TYPES:
         return "prompt"
-    if normalized_type in criteria["step"]:
+    if normalized_type in STEP_EVENT_TYPES:
         return "step"
-    if normalized_type in criteria["status"]:
+    if normalized_type in STATUS_EVENT_TYPES:
         return "status"
     return "unknown"
 
@@ -256,86 +188,76 @@ def unknown_event_record(raw, *, event_type=None, session_id=None) -> Normalized
     return normalized
 
 
-def _event_sources(event, payload, source_paths):
-    return [_mapping_from_source(event, payload, source) for source in source_paths]
+def _string_field(fields, *names):
+    return string_value(first_present(fields, *names))
 
 
-def _first_mapping_from_sources(event, payload, source_paths):
-    for source in source_paths:
-        value = _mapping_from_source(event, payload, source)
-        if value is not None:
-            return value
-    return None
-
-
-def _mapping_from_source(event, payload, source):
-    root = event if source.root == EVENT_ROOT else payload
-    return mapping_at_path(root, source.path)
-
-
-def _event_session_id(sources, aliases):
-    value = first_present_in(sources, *aliases["session_id"])
-    if value is not None:
-        return str(value)
-    for source in sources:
-        session = mapping_value(source, "session")
-        value = first_present(session, *aliases["nested_session_id"])
-        if value is not None:
-            return str(value)
-    return None
-
-
-def _event_message_id(sources, aliases):
-    value = first_present_in(sources, *aliases["message_id"])
-    if value is not None:
-        return str(value)
-    return None
-
-
-def _event_text_value(sources, aliases):
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        if source.get("type") == "text" and source.get("text") is not None:
-            return str(source["text"])
-        value = first_present(source, *aliases["text"])
+def _text_value(fields):
+    value = first_present(fields, "delta", "text", "content")
+    if isinstance(value, str):
+        return value
+    part = fields.get("part")
+    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+        return part["text"]
+    message = fields.get("message")
+    if isinstance(message, dict):
+        value = first_present(message, "text", "content")
         if isinstance(value, str):
             return value
     return None
 
 
-def _tool_name(tool):
+def _status_value(fields):
+    value = _string_field(fields, "status", "state")
+    if value is not None:
+        return value
+    message = fields.get("message")
+    if isinstance(message, dict):
+        return _string_field(message, "status", "state")
+    return None
+
+
+def _tool_name(fields):
+    tool = fields.get("tool")
     if isinstance(tool, dict):
         value = first_present(tool, "name", "tool", "toolName", "tool_name")
         if value is not None:
             return str(value)
-    elif tool is not None:
-        return str(tool)
-    return None
+        return json.dumps(tool, sort_keys=True)
+    value = first_present(fields, "tool", "toolName", "tool_name")
+    return string_value(value)
 
 
-def _blocker_type(event_type, sources, aliases, kind_event_types):
+def _blocker_type(event_type, fields):
     normalized_type = str(event_type or "").lower()
     if normalized_type == "permission.requested":
         return "permission"
     if normalized_type == "question.requested":
         return "question"
-    if normalized_type in kind_event_types["blocker"]:
+    if normalized_type in BLOCKER_EVENT_TYPES:
         return "blocker"
-    if first_present_in(sources, *aliases["blocker_permission"]) is not None:
+    if first_present(fields, "permission", "permissionID", "permissionId", "permission_id") is not None:
         return "permission"
-    if first_present_in(sources, *aliases["blocker_question"]) is not None:
+    if first_present(fields, "questionID", "questionId", "question_id") is not None:
         return "question"
-    if first_present_in(sources, *aliases["blocker"]) is not None:
+    if first_present(fields, "blocker", "blockerID", "blockerId", "blocker_id") is not None:
         return "blocker"
     return None
 
 
-def _blocker_id(sources, aliases):
-    value = first_present_in(sources, *aliases["blocker_id"])
-    if value is not None:
-        return str(value)
-    return None
+def _blocker_id(fields):
+    return _string_field(
+        fields,
+        "permissionID",
+        "permissionId",
+        "permission_id",
+        "questionID",
+        "questionId",
+        "question_id",
+        "blockerID",
+        "blockerId",
+        "blocker_id",
+    )
 
 
 def _error_text(error):
@@ -352,15 +274,19 @@ def _error_text(error):
 def event_adapter_for_route(route_path=None):
     normalized_path = str(route_path or "").split("?", 1)[0].rstrip("/")
     if normalized_path == "/api/event":
-        return OPENAPI_EVENT_ADAPTER
+        return API_EVENT_DECODER
     if normalized_path in {"/event", "/global/event"}:
-        return LEGACY_EVENT_ADAPTER
-    return EVENT_ADAPTER
+        return LEGACY_EVENT_DECODER
+    return KNOWN_EVENT_DECODER
 
 
-EVENT_ADAPTER = EventRouteAdapter(COMPATIBLE_EVENT_SCHEMA)
-OPENAPI_EVENT_ADAPTER = OpenApiEventRouteAdapter()
-LEGACY_EVENT_ADAPTER = LegacyEventRouteAdapter()
+API_EVENT_DECODER = ApiEventRouteDecoder()
+LEGACY_EVENT_DECODER = LegacyEventRouteDecoder()
+KNOWN_EVENT_DECODER = KnownEventRouteDecoder((API_EVENT_DECODER, LEGACY_EVENT_DECODER))
+EVENT_ADAPTER = KNOWN_EVENT_DECODER
+OPENAPI_EVENT_ADAPTER = API_EVENT_DECODER
+LEGACY_EVENT_ADAPTER = LEGACY_EVENT_DECODER
+
 
 def normalize_event_record(event, target_session_id=None, *, route_path=None):
     return event_adapter_for_route(route_path).normalize_record(event, target_session_id)

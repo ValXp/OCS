@@ -11,7 +11,7 @@ from opencode_session.events import is_terminal_event
 from opencode_session.formatting import compact_bool, compact_value
 from opencode_session.prompt_admission import admit_prompt
 from opencode_session.schema_common import first_present
-from opencode_session.schema_normalization import iter_normalized_message_records
+from opencode_session.schema_message_adapter import iter_normalized_message_records
 from opencode_session.schema_session_adapter import session_value
 from opencode_session.status import short_status
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired

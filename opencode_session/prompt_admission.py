@@ -2,8 +2,8 @@ import uuid
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.formatting import compact_value
-from opencode_session.schema_normalization import first_present as _first_present
-from opencode_session.schema_normalization import normalize_admission_record
+from opencode_session.schema_admission_adapter import normalize_admission_record
+from opencode_session.schema_common import first_present as _first_present
 
 
 UNSUPPORTED_BEHAVIOR_STATUSES = {400, 404, 405, 415, 422}

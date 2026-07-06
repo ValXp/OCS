@@ -4,7 +4,7 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from opencode_session.events import EventStreamError, iter_event_stream
-from opencode_session.schema_normalization import normalize_session_payload
+from opencode_session.schema_session_adapter import normalize_session_payload
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.urllib_compat import set_response_socket_timeout
 

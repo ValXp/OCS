@@ -75,7 +75,7 @@ class NormalizedEventRecord(TypedDict, total=False):
     raw: JsonValue
 
 
-class WorkerRecordShape(TypedDict, total=False):
+class WorkerSnapshotRecord(TypedDict, total=False):
     id: str
     name: str
     title: str
@@ -84,9 +84,7 @@ class WorkerRecordShape(TypedDict, total=False):
     agent: Optional[str]
     model: Optional[str]
     prompt: str
-    status: str
     lifecycle_state: str
-    next_eligible_action: str
     dependencies: List[str]
     prompt_ids: List[str]
     retryable_failures: List[str]
@@ -107,6 +105,26 @@ class WorkerRecordShape(TypedDict, total=False):
     manual_retry_required: bool
     cleanup: JsonObject
     abort: JsonObject
+
+
+class WorkerRecordShape(WorkerSnapshotRecord, total=False):
+    status: str
+    next_eligible_action: str
+
+
+class PersistedRunRecord(TypedDict, total=False):
+    name: str
+    run_id: str
+    directory: str
+    server_url: str
+    status: str
+    retry_count: int
+    timeout_seconds: Optional[float]
+    blockers: List[str]
+    output_refs: List[str]
+    workers: Dict[str, WorkerSnapshotRecord]
+    created_at: JsonValue
+    updated_at: JsonValue
 
 
 class RunRecord(TypedDict, total=False):
@@ -133,7 +151,7 @@ class CapabilitiesRecord(TypedDict, total=False):
     prompt_route: JsonObject
 
 
-class BlockingExecutionResult(TypedDict, total=False):
+class ExecutionResultRecord(TypedDict, total=False):
     session_id: str
     message_ids: JsonObject
     status: str
@@ -145,12 +163,6 @@ class BlockingExecutionResult(TypedDict, total=False):
     cost: JsonValue
     tokens: JsonValue
     text: str
-
-
-class DomainRecord(RunRecord, WorkerRecordShape, CapabilitiesRecord, BlockingExecutionResult, total=False):
-    metadata: JsonObject
-    result: BlockingExecutionResult
-    raw: JsonValue
 
 
 def collection_records(collection, *names):

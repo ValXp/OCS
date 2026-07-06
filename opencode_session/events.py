@@ -1,7 +1,7 @@
 import json
 
 from opencode_session.formatting import compact_value as _compact_value
-from opencode_session.schema_normalization import normalize_event_record
+from opencode_session.schema_event_adapter import normalize_event_record
 from opencode_session.status import short_status
 
 
