@@ -14,6 +14,7 @@ from opencode_session.worker_state import (
     WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS,
     WORKER_LIFECYCLE_STATES,
     WORKER_STATUS_PRIORITY_BY_STATUS,
+    WORKER_TRANSITION_METADATA,
     WorkerRecord,
     WorkerTransition,
     WorkerTransitionName,
@@ -86,7 +87,6 @@ class WorkerStateContractTest(unittest.TestCase):
 
     def test_lifecycle_metadata_feeds_status_helpers_and_reducer_legality(self):
         from opencode_session.commands.runs import _lifecycle_state_from_status_alias
-        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS
 
         for status, lifecycle_state in WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS.items():
             with self.subTest(status=status):
@@ -96,10 +96,26 @@ class WorkerStateContractTest(unittest.TestCase):
                 if status in WORKER_EXIT_CODE_BY_STATUS:
                     self.assertEqual(exit_code_for_status(status), WORKER_EXIT_CODE_BY_STATUS[status])
 
-        for transition_name, definition in _WORKER_TRANSITION_DEFINITIONS.items():
+        for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
             with self.subTest(transition=transition_name):
-                self.assertEqual(definition.source_states, worker_lifecycle_source_states(transition_name))
-                self.assertEqual(definition.target_states, worker_lifecycle_target_states(transition_name))
+                self.assertEqual(worker_lifecycle_source_states(transition_name), metadata.source_states)
+                self.assertEqual(worker_lifecycle_target_states(transition_name), metadata.target_states)
+
+    def test_lifecycle_transition_views_are_derived_from_transition_metadata(self):
+        source_transitions_by_state = {lifecycle_state: set() for lifecycle_state in WORKER_LIFECYCLE_METADATA}
+        target_transitions_by_state = {lifecycle_state: set() for lifecycle_state in WORKER_LIFECYCLE_METADATA}
+        for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
+            if not metadata.public_lifecycle_transition:
+                continue
+            for lifecycle_state in metadata.source_states:
+                source_transitions_by_state[lifecycle_state].add(transition_name)
+            for lifecycle_state in metadata.target_states:
+                target_transitions_by_state[lifecycle_state].add(transition_name)
+
+        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items():
+            with self.subTest(lifecycle_state=lifecycle_state):
+                self.assertEqual(metadata.source_transitions, frozenset(source_transitions_by_state[lifecycle_state]))
+                self.assertEqual(metadata.target_transitions, frozenset(target_transitions_by_state[lifecycle_state]))
 
     def test_normalize_worker_applies_defaults_and_derives_next_action(self):
         worker = normalize_worker(
@@ -506,14 +522,19 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(result_worker["output_refs"], ["assistant:msg_assistant"])
 
     def test_worker_transition_definitions_are_complete_and_cohesive(self):
-        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS
+        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS, WorkerLifecycleReducer
 
+        self.assertEqual(set(WorkerTransitionName), set(WORKER_TRANSITION_METADATA))
         self.assertEqual(set(WorkerTransitionName), set(_WORKER_TRANSITION_DEFINITIONS))
         for transition_name, definition in _WORKER_TRANSITION_DEFINITIONS.items():
             with self.subTest(transition=transition_name):
+                metadata = WORKER_TRANSITION_METADATA[transition_name]
+                self.assertIs(definition.metadata, metadata)
                 self.assertIs(definition.name, transition_name)
-                self.assertIsInstance(definition.source_states, frozenset)
-                self.assertIsInstance(definition.target_states, frozenset)
+                self.assertEqual(definition.source_states, metadata.source_states)
+                self.assertEqual(definition.target_states, metadata.target_states)
+                self.assertEqual(definition.target_lifecycle, metadata.target_lifecycle)
+                self.assertIs(definition.apply_transition, getattr(WorkerLifecycleReducer, metadata.apply_method))
                 self.assertTrue(callable(definition.apply_transition))
 
     def test_retry_transition_definition_carries_legality_target_and_behavior(self):

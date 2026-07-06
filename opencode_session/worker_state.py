@@ -1,5 +1,5 @@
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional
 
@@ -77,6 +77,17 @@ class WorkerLifecycleMetadata:
     target_transitions: frozenset = frozenset()
 
 
+@dataclass(frozen=True)
+class WorkerTransitionMetadata:
+    name: WorkerTransitionName
+    source_states: frozenset
+    target_states: frozenset
+    apply_method: str
+    target_lifecycle: object = None
+    is_legal_transition: object = None
+    public_lifecycle_transition: bool = True
+
+
 def _lifecycle_metadata(
     status,
     next_eligible_action,
@@ -106,6 +117,27 @@ def _lifecycle_metadata(
     )
 
 
+def _transition_metadata(
+    name,
+    *,
+    source_states=(),
+    target_states=(),
+    apply_method=None,
+    target_lifecycle=None,
+    is_legal_transition=None,
+    public_lifecycle_transition=True,
+):
+    return WorkerTransitionMetadata(
+        name,
+        frozenset(source_states),
+        frozenset(target_states),
+        apply_method or name.value,
+        target_lifecycle=target_lifecycle,
+        is_legal_transition=is_legal_transition,
+        public_lifecycle_transition=public_lifecycle_transition,
+    )
+
+
 WORKER_LIFECYCLE_METADATA = {
     WORKER_LIFECYCLE_QUEUED: _lifecycle_metadata(
         WORKER_STATUS_QUEUED,
@@ -113,45 +145,18 @@ WORKER_LIFECYCLE_METADATA = {
         status_alias=True,
         executable=True,
         status_priority=0,
-        source_transitions=(
-            WorkerTransitionName.PROVISIONED,
-            WorkerTransitionName.ACTIVE,
-            WorkerTransitionName.FAILED,
-            WorkerTransitionName.DEPENDENCY_BLOCKED,
-            WorkerTransitionName.ABORTED,
-        ),
     ),
     WORKER_LIFECYCLE_ACTIVE_WAIT: _lifecycle_metadata(
         WORKER_STATUS_ACTIVE,
         WORKER_ACTION_WAIT,
         status_alias=True,
         status_priority=1,
-        source_transitions=(
-            WorkerTransitionName.PROVISIONED,
-            WorkerTransitionName.ACTIVE,
-            WorkerTransitionName.ATTEMPT_STARTED,
-            WorkerTransitionName.FAILED,
-            WorkerTransitionName.DEPENDENCY_BLOCKED,
-            WorkerTransitionName.ABORTED,
-            WorkerTransitionName.RETRY_SCHEDULED,
-            WorkerTransitionName.TIMED_OUT,
-            WorkerTransitionName.RESULT_APPLIED,
-        ),
-        target_transitions=(WorkerTransitionName.ACTIVE,),
     ),
     WORKER_LIFECYCLE_ACTIVE_RETRY: _lifecycle_metadata(
         WORKER_STATUS_ACTIVE,
         WORKER_ACTION_RETRY,
         executable=True,
         status_priority=1,
-        source_transitions=(
-            WorkerTransitionName.PROVISIONED,
-            WorkerTransitionName.ACTIVE,
-            WorkerTransitionName.FAILED,
-            WorkerTransitionName.DEPENDENCY_BLOCKED,
-            WorkerTransitionName.ABORTED,
-        ),
-        target_transitions=(WorkerTransitionName.RETRY_SCHEDULED,),
     ),
     WORKER_LIFECYCLE_BLOCKED_DEPENDENCY: _lifecycle_metadata(
         WORKER_STATUS_BLOCKED,
@@ -160,8 +165,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         status_priority=2,
         exit_code=EX_BLOCKED,
-        source_transitions=(WorkerTransitionName.ACTIVE, WorkerTransitionName.ABORTED),
-        target_transitions=(WorkerTransitionName.DEPENDENCY_BLOCKED, WorkerTransitionName.RESULT_APPLIED),
     ),
     WORKER_LIFECYCLE_BLOCKED_TIMEOUT: _lifecycle_metadata(
         WORKER_STATUS_BLOCKED,
@@ -170,8 +173,6 @@ WORKER_LIFECYCLE_METADATA = {
         timeout_origin=True,
         status_priority=2,
         exit_code=EX_BLOCKED,
-        source_transitions=(WorkerTransitionName.ACTIVE, WorkerTransitionName.ABORTED),
-        target_transitions=(WorkerTransitionName.TIMED_OUT,),
     ),
     WORKER_LIFECYCLE_DONE_COLLECT: _lifecycle_metadata(
         WORKER_STATUS_DONE,
@@ -180,7 +181,6 @@ WORKER_LIFECYCLE_METADATA = {
         terminal_status=True,
         status_priority=3,
         exit_code=0,
-        target_transitions=(WorkerTransitionName.RESULT_APPLIED,),
     ),
     WORKER_LIFECYCLE_FAILED_RETRY: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -190,14 +190,6 @@ WORKER_LIFECYCLE_METADATA = {
         executable=True,
         status_priority=6,
         exit_code=EX_UNAVAILABLE,
-        source_transitions=(
-            WorkerTransitionName.PROVISIONED,
-            WorkerTransitionName.ACTIVE,
-            WorkerTransitionName.FAILED,
-            WorkerTransitionName.ABORTED,
-            WorkerTransitionName.RETRY_SCHEDULED,
-        ),
-        target_transitions=(WorkerTransitionName.FAILED,),
     ),
     WORKER_LIFECYCLE_FAILED_TERMINAL: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -207,7 +199,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         status_priority=6,
         exit_code=EX_UNAVAILABLE,
-        target_transitions=(WorkerTransitionName.FAILED, WorkerTransitionName.RESULT_APPLIED),
     ),
     WORKER_LIFECYCLE_TIMEOUT_RETRY: _lifecycle_metadata(
         WORKER_STATUS_TIMEOUT,
@@ -218,14 +209,6 @@ WORKER_LIFECYCLE_METADATA = {
         timeout_origin=True,
         status_priority=4,
         exit_code=EX_TIMEOUT,
-        source_transitions=(
-            WorkerTransitionName.PROVISIONED,
-            WorkerTransitionName.ACTIVE,
-            WorkerTransitionName.FAILED,
-            WorkerTransitionName.ABORTED,
-            WorkerTransitionName.RETRY_SCHEDULED,
-        ),
-        target_transitions=(WorkerTransitionName.TIMED_OUT,),
     ),
     WORKER_LIFECYCLE_TIMEOUT_TERMINAL: _lifecycle_metadata(
         WORKER_STATUS_TIMEOUT,
@@ -236,7 +219,6 @@ WORKER_LIFECYCLE_METADATA = {
         timeout_origin=True,
         status_priority=4,
         exit_code=EX_TIMEOUT,
-        target_transitions=(WorkerTransitionName.TIMED_OUT, WorkerTransitionName.RESULT_APPLIED),
     ),
     WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -247,14 +229,6 @@ WORKER_LIFECYCLE_METADATA = {
         timeout_origin=True,
         status_priority=6,
         exit_code=EX_UNAVAILABLE,
-        source_transitions=(
-            WorkerTransitionName.PROVISIONED,
-            WorkerTransitionName.ACTIVE,
-            WorkerTransitionName.FAILED,
-            WorkerTransitionName.ABORTED,
-            WorkerTransitionName.RETRY_SCHEDULED,
-        ),
-        target_transitions=(WorkerTransitionName.TIMED_OUT,),
     ),
     WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL: _lifecycle_metadata(
         WORKER_STATUS_FAILED,
@@ -264,7 +238,6 @@ WORKER_LIFECYCLE_METADATA = {
         timeout_origin=True,
         status_priority=6,
         exit_code=EX_UNAVAILABLE,
-        target_transitions=(WorkerTransitionName.TIMED_OUT,),
     ),
     WORKER_LIFECYCLE_TIMEOUT_ABORTED: _lifecycle_metadata(
         WORKER_STATUS_ABORTED,
@@ -274,8 +247,6 @@ WORKER_LIFECYCLE_METADATA = {
         timeout_origin=True,
         status_priority=5,
         exit_code=EX_ABORTED,
-        source_transitions=(WorkerTransitionName.ABORTED,),
-        target_transitions=(WorkerTransitionName.TIMED_OUT,),
     ),
     WORKER_LIFECYCLE_ABORTED: _lifecycle_metadata(
         WORKER_STATUS_ABORTED,
@@ -285,8 +256,6 @@ WORKER_LIFECYCLE_METADATA = {
         failed_dependency_status=True,
         status_priority=5,
         exit_code=EX_ABORTED,
-        source_transitions=(WorkerTransitionName.ABORTED,),
-        target_transitions=(WorkerTransitionName.ABORTED, WorkerTransitionName.RESULT_APPLIED),
     ),
 }
 
@@ -413,21 +382,11 @@ def public_worker_state_fields(lifecycle_state):
 
 
 def worker_lifecycle_source_states(transition_name):
-    if transition_name in {WorkerTransitionName.CLEANUP_UPDATED, WorkerTransitionName.SNAPSHOT_APPLIED}:
-        return WORKER_LIFECYCLE_STATES
-    return frozenset(
-        lifecycle_state
-        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
-        if transition_name in metadata.source_transitions
-    )
+    return _worker_transition_metadata(transition_name).source_states
 
 
 def worker_lifecycle_target_states(transition_name):
-    return frozenset(
-        lifecycle_state
-        for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
-        if transition_name in metadata.target_transitions
-    )
+    return _worker_transition_metadata(transition_name).target_states
 
 
 def worker_lifecycle_state_for_status_alias(status):
@@ -495,6 +454,229 @@ def worker_result_lifecycle_state(status):
     }:
         status = WORKER_STATUS_FAILED
     return worker_lifecycle_state_for_status_alias(status) or WORKER_LIFECYCLE_FAILED_TERMINAL
+
+
+def _failed_transition_lifecycle_state(transition):
+    payload = transition.payload
+    return worker_failed_lifecycle_state(retryable=payload.retryable, retry_available=payload.retry_available)
+
+
+def _timed_out_transition_lifecycle_state(transition):
+    payload = transition.payload
+    return worker_timeout_lifecycle_state(payload.status, payload.retry_available)
+
+
+def _result_applied_transition_lifecycle_state(transition):
+    return worker_result_lifecycle_state(transition.payload.result["status"])
+
+
+def _snapshot_transition_is_legal(latest_worker, transition):
+    source_state = worker_lifecycle_state(latest_worker)
+    target_state = _snapshot_transition_lifecycle_state(transition)
+    if target_state is None:
+        return True
+    return target_state in _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE.get(source_state, frozenset())
+
+
+def _snapshot_transition_lifecycle_state(transition):
+    payload = transition.payload
+    if "lifecycle_state" not in payload.state_fields or "lifecycle_state" not in payload.worker:
+        return None
+    lifecycle_state = payload.worker.get("lifecycle_state")
+    if lifecycle_state in WORKER_LIFECYCLE_STATES:
+        return lifecycle_state
+    return WORKER_LIFECYCLE_QUEUED
+
+
+WORKER_TRANSITION_METADATA = {
+    metadata.name: metadata
+    for metadata in (
+        _transition_metadata(
+            WorkerTransitionName.PROVISIONED,
+            source_states=(
+                WORKER_LIFECYCLE_QUEUED,
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_ACTIVE_RETRY,
+                WORKER_LIFECYCLE_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+            ),
+        ),
+        _transition_metadata(
+            WorkerTransitionName.ACTIVE,
+            source_states=(
+                WORKER_LIFECYCLE_QUEUED,
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_ACTIVE_RETRY,
+                WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+                WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+                WORKER_LIFECYCLE_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+            ),
+            target_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
+            target_lifecycle=worker_lifecycle_state_for_status_alias(WORKER_STATUS_ACTIVE),
+        ),
+        _transition_metadata(
+            WorkerTransitionName.ATTEMPT_STARTED,
+            source_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
+        ),
+        _transition_metadata(
+            WorkerTransitionName.FAILED,
+            source_states=(
+                WORKER_LIFECYCLE_QUEUED,
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_ACTIVE_RETRY,
+                WORKER_LIFECYCLE_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+            ),
+            target_states=(WORKER_LIFECYCLE_FAILED_RETRY, WORKER_LIFECYCLE_FAILED_TERMINAL),
+            target_lifecycle=_failed_transition_lifecycle_state,
+        ),
+        _transition_metadata(
+            WorkerTransitionName.DEPENDENCY_BLOCKED,
+            source_states=(
+                WORKER_LIFECYCLE_QUEUED,
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_ACTIVE_RETRY,
+            ),
+            target_states=(WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,),
+            target_lifecycle=worker_lifecycle_state_for_status_alias(WORKER_STATUS_BLOCKED),
+        ),
+        _transition_metadata(
+            WorkerTransitionName.ABORTED,
+            source_states=(
+                WORKER_LIFECYCLE_QUEUED,
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_ACTIVE_RETRY,
+                WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+                WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+                WORKER_LIFECYCLE_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_ABORTED,
+                WORKER_LIFECYCLE_ABORTED,
+            ),
+            target_states=(WORKER_LIFECYCLE_ABORTED,),
+            target_lifecycle=worker_lifecycle_state_for_status_alias(WORKER_STATUS_ABORTED),
+        ),
+        _transition_metadata(
+            WorkerTransitionName.RETRY_SCHEDULED,
+            source_states=(
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+            ),
+            target_states=(WORKER_LIFECYCLE_ACTIVE_RETRY,),
+            target_lifecycle=worker_lifecycle_state_for_public_state(WORKER_STATUS_ACTIVE, WORKER_ACTION_RETRY),
+        ),
+        _transition_metadata(
+            WorkerTransitionName.TIMED_OUT,
+            source_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
+            target_states=(
+                WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL,
+                WORKER_LIFECYCLE_TIMEOUT_ABORTED,
+            ),
+            target_lifecycle=_timed_out_transition_lifecycle_state,
+        ),
+        _transition_metadata(
+            WorkerTransitionName.RESULT_APPLIED,
+            source_states=(WORKER_LIFECYCLE_ACTIVE_WAIT,),
+            target_states=(
+                WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+                WORKER_LIFECYCLE_DONE_COLLECT,
+                WORKER_LIFECYCLE_FAILED_TERMINAL,
+                WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+                WORKER_LIFECYCLE_ABORTED,
+            ),
+            target_lifecycle=_result_applied_transition_lifecycle_state,
+        ),
+        _transition_metadata(
+            WorkerTransitionName.CLEANUP_UPDATED,
+            source_states=WORKER_LIFECYCLE_STATES,
+            public_lifecycle_transition=False,
+        ),
+        _transition_metadata(
+            WorkerTransitionName.SNAPSHOT_APPLIED,
+            source_states=WORKER_LIFECYCLE_STATES,
+            is_legal_transition=_snapshot_transition_is_legal,
+            public_lifecycle_transition=False,
+        ),
+    )
+}
+
+
+_WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
+    source_state: frozenset(
+        {
+            source_state,
+            *(
+                target_state
+                for metadata in WORKER_TRANSITION_METADATA.values()
+                if source_state in metadata.source_states
+                for target_state in metadata.target_states
+            ),
+        }
+    )
+    for source_state in WORKER_LIFECYCLE_STATES
+}
+
+
+def _worker_transition_metadata(name):
+    metadata = WORKER_TRANSITION_METADATA.get(name)
+    if metadata is None:
+        raise ValueError(f"unknown worker transition: {name}")
+    return metadata
+
+
+def worker_transition_target_lifecycle_state(transition):
+    target_lifecycle = _worker_transition_metadata(transition.name).target_lifecycle
+    if callable(target_lifecycle):
+        return target_lifecycle(transition)
+    return target_lifecycle
+
+
+def worker_transition_is_legal(latest_worker, transition):
+    metadata = _worker_transition_metadata(transition.name)
+    if metadata.is_legal_transition is not None:
+        return metadata.is_legal_transition(latest_worker, transition)
+    return worker_lifecycle_state(latest_worker) in metadata.source_states
+
+
+def _lifecycle_metadata_with_transition_views(lifecycle_metadata, transition_metadata):
+    source_transitions_by_state = {lifecycle_state: set() for lifecycle_state in lifecycle_metadata}
+    target_transitions_by_state = {lifecycle_state: set() for lifecycle_state in lifecycle_metadata}
+    for metadata in transition_metadata.values():
+        if not metadata.public_lifecycle_transition:
+            continue
+        for lifecycle_state in metadata.source_states:
+            if lifecycle_state not in source_transitions_by_state:
+                raise ValueError(f"unknown worker transition source lifecycle state: {lifecycle_state}")
+            source_transitions_by_state[lifecycle_state].add(metadata.name)
+        for lifecycle_state in metadata.target_states:
+            if lifecycle_state not in target_transitions_by_state:
+                raise ValueError(f"unknown worker transition target lifecycle state: {lifecycle_state}")
+            target_transitions_by_state[lifecycle_state].add(metadata.name)
+    return {
+        lifecycle_state: replace(
+            metadata,
+            source_transitions=frozenset(source_transitions_by_state[lifecycle_state]),
+            target_transitions=frozenset(target_transitions_by_state[lifecycle_state]),
+        )
+        for lifecycle_state, metadata in lifecycle_metadata.items()
+    }
+
+
+WORKER_LIFECYCLE_METADATA = _lifecycle_metadata_with_transition_views(
+    WORKER_LIFECYCLE_METADATA,
+    WORKER_TRANSITION_METADATA,
+)
 
 
 def worker_lifecycle_set_fields(worker_id, lifecycle_state):

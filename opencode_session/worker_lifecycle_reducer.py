@@ -6,52 +6,52 @@ from opencode_session.worker_attempt_log import _append_attempt, _finalize_attem
 from opencode_session.worker_state import (
     REMOVABLE_WORKER_TRANSITION_FIELDS,
     UNSET_TRANSITION_FIELD,
-    WORKER_LIFECYCLE_QUEUED,
-    WORKER_LIFECYCLE_STATES,
-    WORKER_ACTION_RETRY,
     WORKER_STATUS_ABORTED,
-    WORKER_STATUS_ACTIVE,
     WORKER_STATUS_BLOCKED,
     WORKER_STATUS_DONE,
     WORKER_STATUS_TIMEOUT,
+    WORKER_TRANSITION_METADATA,
     WorkerRecord,
     WorkerTransition,
     WorkerTransitionName,
     latest_prompt_ids_are_retry_marker,
     public_worker_state,
-    worker_failed_lifecycle_state,
-    worker_lifecycle_source_states,
     worker_lifecycle_set_fields,
     worker_lifecycle_state,
-    worker_lifecycle_state_for_public_state,
-    worker_lifecycle_state_for_status_alias,
-    worker_lifecycle_target_states,
-    worker_result_lifecycle_state,
-    worker_timeout_lifecycle_state,
+    worker_transition_is_legal,
+    worker_transition_target_lifecycle_state,
 )
 
 
 @dataclass(frozen=True)
 class WorkerTransitionDefinition:
-    name: WorkerTransitionName
-    source_states: frozenset
-    target_states: frozenset
+    metadata: object
     apply_transition: object
-    target_lifecycle: object = None
-    is_legal_transition: object = None
+
+    @property
+    def name(self):
+        return self.metadata.name
+
+    @property
+    def source_states(self):
+        return self.metadata.source_states
+
+    @property
+    def target_states(self):
+        return self.metadata.target_states
+
+    @property
+    def target_lifecycle(self):
+        return self.metadata.target_lifecycle
 
     def is_legal(self, latest_worker, transition):
-        if self.is_legal_transition is not None:
-            return self.is_legal_transition(latest_worker, transition)
-        return worker_lifecycle_state(latest_worker) in self.source_states
+        return worker_transition_is_legal(latest_worker, transition)
 
     def apply(self, reducer, transition):
         return self.apply_transition(reducer, transition)
 
     def target_lifecycle_state(self, transition):
-        if callable(self.target_lifecycle):
-            return self.target_lifecycle(transition)
-        return self.target_lifecycle
+        return worker_transition_target_lifecycle_state(transition)
 
 
 class WorkerLifecycleReducer:
@@ -261,113 +261,12 @@ def apply_worker_transition_to_record(record, transition):
     return WorkerLifecycleReducer(record).apply(transition)
 
 
-def _snapshot_transition_is_legal(latest_worker, transition):
-    source_state = worker_lifecycle_state(latest_worker)
-    target_state = _snapshot_transition_lifecycle_state(transition)
-    if target_state is None:
-        return True
-    return target_state in _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE.get(source_state, frozenset())
-
-
-def _snapshot_transition_lifecycle_state(transition):
-    payload = transition.payload
-    if "lifecycle_state" not in payload.state_fields or "lifecycle_state" not in payload.worker:
-        return None
-    lifecycle_state = payload.worker.get("lifecycle_state")
-    if lifecycle_state in WORKER_LIFECYCLE_STATES:
-        return lifecycle_state
-    return WORKER_LIFECYCLE_QUEUED
-
-
-def _failed_lifecycle_state(transition):
-    payload = transition.payload
-    return worker_failed_lifecycle_state(retryable=payload.retryable, retry_available=payload.retry_available)
-
-
-def _timed_out_lifecycle_state(transition):
-    payload = transition.payload
-    return worker_timeout_lifecycle_state(payload.status, payload.retry_available)
-
-
-def _result_applied_lifecycle_state(transition):
-    return worker_result_lifecycle_state(transition.payload.result["status"])
-
-
 _WORKER_TRANSITION_DEFINITIONS = {
-    WorkerTransitionName.PROVISIONED: WorkerTransitionDefinition(
-        WorkerTransitionName.PROVISIONED,
-        worker_lifecycle_source_states(WorkerTransitionName.PROVISIONED),
-        worker_lifecycle_target_states(WorkerTransitionName.PROVISIONED),
-        WorkerLifecycleReducer.provisioned,
-    ),
-    WorkerTransitionName.ACTIVE: WorkerTransitionDefinition(
-        WorkerTransitionName.ACTIVE,
-        worker_lifecycle_source_states(WorkerTransitionName.ACTIVE),
-        worker_lifecycle_target_states(WorkerTransitionName.ACTIVE),
-        WorkerLifecycleReducer.active,
-        target_lifecycle=worker_lifecycle_state_for_status_alias(WORKER_STATUS_ACTIVE),
-    ),
-    WorkerTransitionName.ATTEMPT_STARTED: WorkerTransitionDefinition(
-        WorkerTransitionName.ATTEMPT_STARTED,
-        worker_lifecycle_source_states(WorkerTransitionName.ATTEMPT_STARTED),
-        worker_lifecycle_target_states(WorkerTransitionName.ATTEMPT_STARTED),
-        WorkerLifecycleReducer.attempt_started,
-    ),
-    WorkerTransitionName.FAILED: WorkerTransitionDefinition(
-        WorkerTransitionName.FAILED,
-        worker_lifecycle_source_states(WorkerTransitionName.FAILED),
-        worker_lifecycle_target_states(WorkerTransitionName.FAILED),
-        WorkerLifecycleReducer.failed,
-        target_lifecycle=_failed_lifecycle_state,
-    ),
-    WorkerTransitionName.DEPENDENCY_BLOCKED: WorkerTransitionDefinition(
-        WorkerTransitionName.DEPENDENCY_BLOCKED,
-        worker_lifecycle_source_states(WorkerTransitionName.DEPENDENCY_BLOCKED),
-        worker_lifecycle_target_states(WorkerTransitionName.DEPENDENCY_BLOCKED),
-        WorkerLifecycleReducer.dependency_blocked,
-        target_lifecycle=worker_lifecycle_state_for_status_alias(WORKER_STATUS_BLOCKED),
-    ),
-    WorkerTransitionName.ABORTED: WorkerTransitionDefinition(
-        WorkerTransitionName.ABORTED,
-        worker_lifecycle_source_states(WorkerTransitionName.ABORTED),
-        worker_lifecycle_target_states(WorkerTransitionName.ABORTED),
-        WorkerLifecycleReducer.aborted,
-        target_lifecycle=worker_lifecycle_state_for_status_alias(WORKER_STATUS_ABORTED),
-    ),
-    WorkerTransitionName.RETRY_SCHEDULED: WorkerTransitionDefinition(
-        WorkerTransitionName.RETRY_SCHEDULED,
-        worker_lifecycle_source_states(WorkerTransitionName.RETRY_SCHEDULED),
-        worker_lifecycle_target_states(WorkerTransitionName.RETRY_SCHEDULED),
-        WorkerLifecycleReducer.retry_scheduled,
-        target_lifecycle=worker_lifecycle_state_for_public_state(WORKER_STATUS_ACTIVE, WORKER_ACTION_RETRY),
-    ),
-    WorkerTransitionName.TIMED_OUT: WorkerTransitionDefinition(
-        WorkerTransitionName.TIMED_OUT,
-        worker_lifecycle_source_states(WorkerTransitionName.TIMED_OUT),
-        worker_lifecycle_target_states(WorkerTransitionName.TIMED_OUT),
-        WorkerLifecycleReducer.timed_out,
-        target_lifecycle=_timed_out_lifecycle_state,
-    ),
-    WorkerTransitionName.RESULT_APPLIED: WorkerTransitionDefinition(
-        WorkerTransitionName.RESULT_APPLIED,
-        worker_lifecycle_source_states(WorkerTransitionName.RESULT_APPLIED),
-        worker_lifecycle_target_states(WorkerTransitionName.RESULT_APPLIED),
-        WorkerLifecycleReducer.result_applied,
-        target_lifecycle=_result_applied_lifecycle_state,
-    ),
-    WorkerTransitionName.CLEANUP_UPDATED: WorkerTransitionDefinition(
-        WorkerTransitionName.CLEANUP_UPDATED,
-        worker_lifecycle_source_states(WorkerTransitionName.CLEANUP_UPDATED),
-        worker_lifecycle_target_states(WorkerTransitionName.CLEANUP_UPDATED),
-        WorkerLifecycleReducer.cleanup_updated,
-    ),
-    WorkerTransitionName.SNAPSHOT_APPLIED: WorkerTransitionDefinition(
-        WorkerTransitionName.SNAPSHOT_APPLIED,
-        worker_lifecycle_source_states(WorkerTransitionName.SNAPSHOT_APPLIED),
-        worker_lifecycle_target_states(WorkerTransitionName.SNAPSHOT_APPLIED),
-        WorkerLifecycleReducer.snapshot_applied,
-        is_legal_transition=_snapshot_transition_is_legal,
-    ),
+    name: WorkerTransitionDefinition(
+        metadata,
+        getattr(WorkerLifecycleReducer, metadata.apply_method),
+    )
+    for name, metadata in WORKER_TRANSITION_METADATA.items()
 }
 
 
@@ -379,22 +278,7 @@ def _worker_transition_definition(name):
 
 
 def _transition_target_lifecycle_state(transition):
-    return _worker_transition_definition(transition.name).target_lifecycle_state(transition)
-
-_WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
-    source_state: frozenset(
-        {
-            source_state,
-            *(
-                target_state
-                for definition in _WORKER_TRANSITION_DEFINITIONS.values()
-                if source_state in definition.source_states
-                for target_state in definition.target_states
-            ),
-        }
-    )
-    for source_state in WORKER_LIFECYCLE_STATES
-}
+    return worker_transition_target_lifecycle_state(transition)
 
 
 def _snapshot_transition_fields(transition):
