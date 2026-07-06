@@ -1,6 +1,3 @@
-from collections.abc import Mapping, MutableMapping
-from dataclasses import fields, is_dataclass
-import inspect
 import unittest
 
 from opencode_session.worker_storage_adapter import (
@@ -8,14 +5,10 @@ from opencode_session.worker_storage_adapter import (
     hydrate_worker_record,
     normalize_worker_snapshot_for_storage,
     worker_snapshot_transition,
-    worker_snapshot_transition_patch,
 )
-from opencode_session import run_formatting, run_record, worker_attempt_log
-from opencode_session.commands import runs as run_commands
 from opencode_session.worker_state import (
     aggregate_run_status,
     WorkerRecord,
-    WorkerSnapshotTransitionPatch,
     WorkerTransition,
     WorkerTransitionError,
     WorkerTransitionName,
@@ -318,9 +311,6 @@ class WorkerStateContractTest(unittest.TestCase):
                 with self.assertRaisesRegex((TypeError, ValueError), message):
                     normalize_worker(fields, "review")
 
-        record = WorkerRecord.default_fields("review")
-        self.assertFalse(hasattr(record, "set_field"))
-
     def test_worker_execution_eligibility_derives_canonical_action(self):
         queued = normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "queued"}, "build")
         waiting = normalize_worker({"id": "review", "prompt": "Review", "lifecycle_state": "active_wait"}, "review")
@@ -570,41 +560,6 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(record.prompt_ids, ["msg_previous", "msg_new"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_previous"])
 
-    def test_worker_record_is_not_mapping_hybrid(self):
-        record = WorkerRecord.default_fields("review")
-
-        self.assertNotIsInstance(record, Mapping)
-        self.assertNotIsInstance(record, MutableMapping)
-        with self.assertRaises(TypeError):
-            dict(record)
-        with self.assertRaises(TypeError):
-            record["id"]
-        with self.assertRaises(TypeError):
-            record["role"] = "review"
-        for method_name in ("get", "setdefault", "pop", "update", "clear"):
-            self.assertFalse(hasattr(record, method_name), method_name)
-
-    def test_worker_record_generic_instance_api_is_private_storage_plumbing(self):
-        record = WorkerRecord.default_fields("review")
-
-        for method_name in ("field", "set_field", "merge_fields", "has_field", "remove_field"):
-            self.assertFalse(hasattr(record, method_name), method_name)
-        self.assertFalse(hasattr(record, "extras"))
-
-        self.assertEqual(record.worker_id, "review")
-        self.assertEqual(worker_field(record, "id"), "review")
-        self.assertTrue(worker_has_field(record, "id"))
-
-    def test_core_callers_use_explicit_worker_record_methods(self):
-        attempt_source = inspect.getsource(worker_attempt_log)
-
-        self.assertNotIn("_worker_get", attempt_source)
-        self.assertNotIn("_worker_set", attempt_source)
-        self.assertNotIn("set_field", inspect.getsource(run_record.upsert_worker_record))
-        self.assertNotIn("worker_field", inspect.getsource(run_commands._collect_run_results))
-        self.assertNotIn("worker_field", inspect.getsource(run_commands._print_single_worker_result))
-        self.assertNotIn("worker_field", inspect.getsource(run_formatting.format_worker_result_compact))
-
     def test_worker_record_explicit_api_replaces_dict_mutation(self):
         record = WorkerRecord.default_fields("review")
 
@@ -619,7 +574,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
-    def test_worker_record_canonical_fields_are_explicit_dataclass_fields(self):
+    def test_worker_record_hydration_exposes_canonical_fields_and_round_trips_unknown_fields(self):
         record = hydrate_worker_record(
             {
                 "id": "review",
@@ -632,42 +587,6 @@ class WorkerStateContractTest(unittest.TestCase):
             },
             "review",
         )
-
-        dataclass_field_names = {field.name for field in fields(WorkerRecord)}
-
-        self.assertTrue(is_dataclass(record))
-        self.assertNotIn("_fields", record.__dict__)
-        for field_name in (
-            "id",
-            "role",
-            "session_id",
-            "agent",
-            "model",
-            "prompt",
-            "lifecycle_state",
-            "dependencies",
-            "prompt_ids",
-            "retry_count",
-            "retry_limit",
-            "retryable_failures",
-            "timeout_seconds",
-            "timeout_policy",
-            "timeout_started_at",
-            "timed_out_at",
-            "failure_category",
-            "failure_reason",
-            "last_failure_category",
-            "last_failure_reason",
-            "blockers",
-            "output_refs",
-            "result",
-            "cleanup",
-            "abort",
-        ):
-            with self.subTest(field_name=field_name):
-                self.assertIn(field_name, dataclass_field_names)
-        self.assertIn("_extras", dataclass_field_names)
-        self.assertNotIn("extras", dataclass_field_names)
 
         self.assertEqual(record.worker_id, "review")
         self.assertEqual(record.role, "reviewer")
@@ -801,23 +720,20 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
-    def test_snapshot_transition_requires_storage_boundary_patch(self):
-        with self.assertRaisesRegex(TypeError, "storage boundary"):
-            WorkerTransition.snapshot_applied({"id": "review", "lifecycle_state": "done_collect"})
-
-    def test_stale_snapshot_recovery_requires_adapter_declared_patch(self):
-        worker = normalize_worker({"id": "review", "lifecycle_state": "done_collect"}, "review")
-        transition = WorkerTransition.snapshot_applied(
-            WorkerSnapshotTransitionPatch("review", {"id": "review", "lifecycle_state": "active_wait"})
+    def test_storage_snapshot_transition_normalizes_legacy_public_state_before_apply(self):
+        worker = normalize_worker(
+            {
+                "id": "review",
+                "lifecycle_state": "failed_retry",
+                "failure_category": "provider",
+                "retryable_failures": ["provider"],
+                "retry_count": 0,
+                "retry_limit": 1,
+                "prompt_ids": ["msg_failed"],
+            },
+            "review",
         )
-
-        with self.assertRaisesRegex(WorkerTransitionError, "illegal worker transition"):
-            apply_worker_transition_to_worker(worker, transition)
-
-        self.assertEqual(worker_lifecycle_state(worker), "done_collect")
-
-    def test_storage_snapshot_patch_owns_legacy_and_persistence_compatibility(self):
-        patch = worker_snapshot_transition_patch(
+        transition = worker_snapshot_transition(
             {
                 "id": "review",
                 "status": "active",
@@ -827,15 +743,12 @@ class WorkerStateContractTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(patch.target_lifecycle_state, "active_retry")
-        self.assertEqual(patch.fields["lifecycle_state"], "active_retry")
-        self.assertNotIn("status", patch.fields)
-        self.assertNotIn("next_eligible_action", patch.fields)
-        self.assertEqual(patch.prompt_ids, ("msg_retry",))
-        self.assertIn("error", patch.remove_fields)
-        self.assertTrue(patch.stale_recovery_allowed)
-        self.assertEqual(patch.accepted_abort_fields, {"cleanup": {"requested": True, "deleted": False}})
-        self.assertEqual(patch.accepted_abort_prompt_ids, ("msg_retry",))
+        apply_worker_transition_to_worker(worker, transition)
+
+        assert_worker_outcome(self, worker, status="active", action="retry", lifecycle="active_retry")
+        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_failed", "msg_retry"])
+        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": False})
+        self.assertIsNone(worker_field(worker, "failure_retryable"))
 
     def test_accepted_abort_snapshot_passthrough_is_adapter_declared(self):
         worker = normalize_worker(

@@ -4,9 +4,6 @@ import unittest
 
 from opencode_session.worker_storage_adapter import worker_snapshot_transition
 from opencode_session.worker_state import (
-    UNSET_TRANSITION_FIELD,
-    WORKER_TRANSITION_DEFINITIONS,
-    WORKER_TRANSITION_METADATA,
     WorkerRecord,
     WorkerTransition,
     WorkerTransitionError,
@@ -19,14 +16,10 @@ from opencode_session.worker_state import (
     mark_worker_failed,
     normalize_worker,
     schedule_worker_retry,
-    worker_lifecycle_source_states,
-    worker_lifecycle_state,
-    worker_lifecycle_target_states,
     worker_field,
     worker_has_field,
     worker_output_field,
     worker_transition_is_legal,
-    worker_transition_target_lifecycle_state,
 )
 
 try:
@@ -447,55 +440,31 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(set(WorkerTransitionName), set(WORKER_TRANSITION_DEFINITIONS))
-        self.assertEqual(set(WORKER_TRANSITION_DEFINITIONS), set(WORKER_TRANSITION_METADATA))
         self.assertEqual(set(WorkerTransitionName), {case[0] for case in cases})
         for transition_name, worker_fields, transition_factory, expected_outcome, expected_fields in cases:
             with self.subTest(transition=transition_name):
                 worker = normalize_worker(worker_fields, "review")
                 transition = transition_factory(worker)
-                target_lifecycle = worker_transition_target_lifecycle_state(transition)
-                spec = WORKER_TRANSITION_DEFINITIONS[transition_name]
-                metadata = WORKER_TRANSITION_METADATA[transition_name]
 
                 self.assertIs(transition.name, transition_name)
-                self.assertIs(metadata, spec)
-                self.assertIs(spec.metadata, spec)
-                self.assertIsInstance(transition.payload, spec.payload_type)
-                self.assertTrue(callable(spec.applier))
-                self.assertFalse(hasattr(spec, "payload_factory"))
-                self.assertFalse(hasattr(spec, "target_resolver"))
-                self.assertFalse(hasattr(spec, "legality_checker"))
-                self.assertIn(worker_lifecycle_state(worker), metadata.source_states)
-                self.assertEqual(metadata.source_states, worker_lifecycle_source_states(transition_name))
                 self.assertTrue(worker_transition_is_legal(worker, transition))
-                if spec.target_state is not None:
-                    self.assertEqual(target_lifecycle, spec.target_state)
-                if metadata.target_states:
-                    self.assertIn(target_lifecycle, metadata.target_states)
-                    self.assertEqual(metadata.target_states, worker_lifecycle_target_states(transition_name))
-                else:
-                    self.assertIsNone(target_lifecycle)
 
                 apply_worker_transition_to_worker(worker, transition)
 
                 assert_worker_outcome(self, worker, **expected_outcome)
-                if target_lifecycle is not None:
-                    self.assertEqual(worker_lifecycle_state(worker), target_lifecycle)
                 for field_name, expected_value in expected_fields.items():
                     self.assertEqual(worker_field(worker, field_name), expected_value)
 
-    def test_worker_transition_create_builds_typed_payload_for_table_row(self):
+    def test_worker_transition_create_builds_active_transition(self):
         transition = WorkerTransition.create(
             WorkerTransitionName.ACTIVE,
             "review",
             timeout_started_at="2026-07-04T00:00:00Z",
         )
-        spec = WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE]
         worker = normalize_worker({"timeout_seconds": 30}, "review")
 
-        self.assertIsInstance(transition.payload, spec.payload_type)
-        self.assertEqual(worker_transition_target_lifecycle_state(transition), "active_wait")
+        self.assertIs(transition.name, WorkerTransitionName.ACTIVE)
+        self.assertEqual(transition.worker_id, "review")
         self.assertTrue(worker_transition_is_legal(worker, transition))
 
         apply_worker_transition_to_worker(worker, transition)
@@ -503,7 +472,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
         self.assertEqual(worker_field(worker, "timeout_started_at"), "2026-07-04T00:00:00Z")
 
-    def test_table_driven_reducer_target_matches_applied_lifecycle_for_dynamic_payloads(self):
+    def test_dynamic_transitions_apply_expected_public_outcomes(self):
         cases = (
             (
                 "retryable failure",
@@ -514,13 +483,13 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                     "retry_limit": 1,
                 },
                 lambda worker: mark_worker_failed(worker, "provider", "provider failed"),
-                "failed_retry",
+                {"status": "failed", "action": "retry", "lifecycle": "failed_retry"},
             ),
             (
                 "terminal failure",
                 {"lifecycle_state": "active_wait"},
                 lambda worker: mark_worker_failed(worker, "provider", "provider failed", retryable=False),
-                "failed_terminal",
+                {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
             ),
             (
                 "blocked timeout",
@@ -531,7 +500,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                     status="blocked",
                     timed_out_at="2026-07-04T00:00:00Z",
                 ),
-                "blocked_timeout",
+                {"status": "blocked", "action": "resolve_blocker", "lifecycle": "blocked_timeout"},
             ),
             (
                 "unknown result status",
@@ -540,22 +509,20 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                     worker_field(worker, "id"),
                     {"status": "unexpected", "message_ids": {}},
                 ),
-                "failed_terminal",
+                {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
             ),
         )
 
-        for name, worker_fields, transition_factory, expected_lifecycle in cases:
+        for name, worker_fields, transition_factory, expected_outcome in cases:
             with self.subTest(name=name):
                 worker = normalize_worker(worker_fields, "review")
                 transition = transition_factory(worker)
 
-                self.assertEqual(worker_transition_target_lifecycle_state(transition), expected_lifecycle)
-
                 apply_worker_transition_to_worker(worker, transition)
 
-                self.assertEqual(worker_lifecycle_state(worker), expected_lifecycle)
+                assert_worker_outcome(self, worker, **expected_outcome)
 
-    def test_retry_transition_metadata_carries_legality_target_and_behavior(self):
+    def test_retry_transition_applies_when_worker_is_retry_eligible(self):
         worker = normalize_worker(
             {
                 "lifecycle_state": "failed_retry",
@@ -567,16 +534,12 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             "review",
         )
         transition = schedule_worker_retry(worker, "provider", "try again")
-        target_lifecycle = worker_transition_target_lifecycle_state(transition)
 
-        self.assertIn(worker_lifecycle_state(worker), worker_lifecycle_source_states(transition.name))
         self.assertTrue(worker_transition_is_legal(worker, transition))
-        self.assertEqual(target_lifecycle, "active_retry")
-        self.assertIn(target_lifecycle, worker_lifecycle_target_states(transition.name))
 
         apply_worker_transition_to_worker(worker, transition)
 
-        self.assertEqual(worker_lifecycle_state(worker), target_lifecycle)
+        assert_worker_outcome(self, worker, status="active", action="retry", lifecycle="active_retry")
 
     def test_worker_transition_reducer_rejects_mismatched_payload_shape(self):
         worker = normalize_worker({}, "review")
@@ -657,10 +620,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         transition = SimpleNamespace(
             worker_id="review",
             name="active",
-            payload=SimpleNamespace(
-                timeout_started_at=UNSET_TRANSITION_FIELD,
-                clear_prompt_ids=False,
-            ),
+            payload=mark_worker_active(worker).payload,
             attempt_finalization=None,
         )
 

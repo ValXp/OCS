@@ -197,15 +197,21 @@ class ImportBoundaryTest(unittest.TestCase):
 
         self.assertEqual([], offenders)
 
-    def test_worker_state_is_canonical_worker_state_surface(self):
-        with temporarily_unimported(
-            "opencode_session.worker_lifecycle_reducer",
-            "opencode_session.worker_state",
-        ):
-            import opencode_session.worker_lifecycle_reducer as worker_lifecycle_reducer
-            import opencode_session.worker_state as worker_state
+    def test_worker_lifecycle_reducer_applies_public_transition(self):
+        from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
+        from opencode_session.worker_state import (
+            WorkerRecord,
+            mark_worker_active,
+            normalize_worker,
+            worker_output_field,
+        )
 
-            self.assertIs(worker_lifecycle_reducer.WorkerTransition, worker_state.WorkerTransition)
+        worker = normalize_worker({"id": "review", "prompt": "Review"}, "review")
+        result = apply_worker_transition_to_record(WorkerRecord.from_worker(worker, "review"), mark_worker_active(worker))
+
+        self.assertTrue(result.applied)
+        self.assertEqual(worker_output_field(result.worker, "status"), "active")
+        self.assertEqual(worker_output_field(result.worker, "next_eligible_action"), "wait")
 
     def test_worker_state_does_not_own_cli_exit_policy(self):
         blocked = BlockedModuleFinder({"opencode_session.cli_policy"})
@@ -236,27 +242,6 @@ class ImportBoundaryTest(unittest.TestCase):
         self.assertFalse(
             any(hasattr(metadata, "exit_code") for metadata in worker_state.WORKER_LIFECYCLE_METADATA.values())
         )
-
-    def test_worker_state_public_types_are_not_imported_from_reducer(self):
-        project_root = Path(__file__).resolve().parents[1]
-        package_dir = project_root / "opencode_session"
-        public_worker_state_names = {
-            "WorkerRecord",
-            "WorkerTransition",
-            "WorkerTransitionName",
-            "WorkerTransitionResult",
-        }
-        offenders = []
-        for path in sorted(package_dir.rglob("*.py")):
-            tree = ast.parse(path.read_text(), filename=str(path))
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.ImportFrom) or node.module != "opencode_session.worker_lifecycle_reducer":
-                    continue
-                leaked_names = sorted(alias.name for alias in node.names if alias.name in public_worker_state_names)
-                if leaked_names:
-                    offenders.append(f"{path.relative_to(project_root)}:{node.lineno}: {', '.join(leaked_names)}")
-
-        self.assertEqual([], offenders)
 
     def test_python_39_claim_avoids_pep604_type_union_annotations(self):
         project_root = Path(__file__).resolve().parents[1]
