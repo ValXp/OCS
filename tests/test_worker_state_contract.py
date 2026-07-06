@@ -135,11 +135,25 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
-    def test_normalize_worker_snapshot_converts_public_status_at_boundary(self):
+    def test_normalize_worker_snapshot_trusts_lifecycle_over_stale_public_status(self):
         snapshot = normalize_worker_snapshot(
             {
                 "id": "review",
                 "lifecycle_state": "active_wait",
+                "status": "done",
+                "next_eligible_action": "collect",
+            },
+            "review",
+        )
+
+        self.assertEqual(snapshot["lifecycle_state"], "active_wait")
+        self.assertNotIn("status", snapshot)
+        self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_normalize_worker_snapshot_migrates_legacy_public_status_without_lifecycle(self):
+        snapshot = normalize_worker_snapshot(
+            {
+                "id": "review",
                 "status": "done",
                 "next_eligible_action": "collect",
             },
@@ -425,7 +439,7 @@ class WorkerStateContractTest(unittest.TestCase):
         snapshot = normalize_worker_snapshot(
             {
                 "id": "review",
-                "status": "done",
+                "lifecycle_state": "done_collect",
                 "prompt_ids": ["msg_done"],
                 "result": {
                     "status": "done",
@@ -458,7 +472,7 @@ class WorkerStateContractTest(unittest.TestCase):
         stale_snapshot = normalize_worker_snapshot(
             {
                 "id": "review",
-                "status": "active",
+                "lifecycle_state": "active_wait",
                 "prompt_ids": ["msg_stale"],
             },
             "review",

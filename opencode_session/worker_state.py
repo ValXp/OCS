@@ -197,7 +197,7 @@ def _canonical_lifecycle_state(worker):
     return WORKER_LIFECYCLE_QUEUED
 
 
-def lifecycle_state_from_public_worker_state(worker):
+def _lifecycle_state_from_legacy_public_worker_state(worker):
     """Compatibility boundary for legacy/public records that do not carry lifecycle_state."""
     worker = worker if isinstance(worker, dict) else {}
     status = short_status(worker.get("status"))
@@ -234,21 +234,10 @@ def lifecycle_state_from_public_worker_state(worker):
     return WORKER_LIFECYCLE_QUEUED
 
 
-def infer_worker_lifecycle_state(worker):
-    return lifecycle_state_from_public_worker_state(worker)
-
-
 def canonicalize_legacy_worker_record(worker):
     fields = dict(worker) if isinstance(worker, dict) else {}
     if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
-        fields["lifecycle_state"] = lifecycle_state_from_public_worker_state(fields)
-    return fields
-
-
-def canonicalize_public_worker_state_update(worker):
-    fields = deepcopy(worker) if isinstance(worker, dict) else {}
-    if "status" in fields or "next_eligible_action" in fields:
-        fields["lifecycle_state"] = lifecycle_state_from_public_worker_state(fields)
+        fields["lifecycle_state"] = _lifecycle_state_from_legacy_public_worker_state(fields)
     return fields
 
 
@@ -403,10 +392,6 @@ def deserialize_worker_record(worker, worker_id):
 
 def serialize_worker_snapshot(worker, worker_id):
     return WorkerRecord.from_worker(worker, worker_id).to_snapshot()
-
-
-def snapshot_state_source(worker):
-    return canonicalize_public_worker_state_update(worker)
 
 
 def require_internal_worker(worker):
@@ -713,7 +698,7 @@ def normalize_worker(worker, worker_id):
 
 
 def normalize_worker_snapshot(worker, worker_id):
-    return serialize_worker_snapshot(canonicalize_public_worker_state_update(worker), worker_id)
+    return serialize_worker_snapshot(canonicalize_legacy_worker_record(worker), worker_id)
 
 
 def _apply_worker_transition_to_record(worker, transition):

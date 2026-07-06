@@ -2,9 +2,9 @@ from pathlib import Path
 
 from opencode_session.status import short_status
 from opencode_session.worker_state import (
+    WORKER_LIFECYCLE_STATES,
     default_worker_record,
     deserialize_worker_record,
-    lifecycle_state_from_public_worker_state,
     serialize_worker_snapshot,
 )
 
@@ -48,14 +48,17 @@ def upsert_worker_record(run, worker_id, changes, *, now):
     else:
         worker = deserialize_worker_record(existing, worker_id)
 
-    status_changed = changes.get("status") is not None
+    for public_field_name in ("status", "next_eligible_action"):
+        if changes.get(public_field_name) is not None:
+            raise RunRecordError(
+                f"worker '{worker_id}' updates must use lifecycle_state, not {public_field_name}"
+            )
     for key in (
         "role",
         "session_id",
         "agent",
         "model",
         "prompt",
-        "status",
         "retry_count",
         "retry_limit",
         "timeout_seconds",
@@ -63,14 +66,15 @@ def upsert_worker_record(run, worker_id, changes, *, now):
     ):
         if changes.get(key) is not None:
             worker[key] = changes[key]
+    if changes.get("lifecycle_state") is not None:
+        lifecycle_state = changes["lifecycle_state"]
+        if lifecycle_state not in WORKER_LIFECYCLE_STATES:
+            raise RunRecordError(f"worker '{worker_id}' has invalid lifecycle_state: {lifecycle_state}")
+        worker["lifecycle_state"] = lifecycle_state
     for key in ("dependencies", "prompt_ids", "retryable_failures", "blockers", "output_refs"):
         if changes.get(key) is not None:
             worker[key] = changes[key]
 
-    if status_changed:
-        worker["lifecycle_state"] = lifecycle_state_from_public_worker_state(worker)
-        worker.pop("status", None)
-        worker.pop("next_eligible_action", None)
     workers[worker_id] = deserialize_worker_record(worker, worker_id)
     run["updated_at"] = now
 

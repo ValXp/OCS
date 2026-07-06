@@ -273,7 +273,14 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
 def _active_worker_store(store_root, directory):
     store = RunStore(store_root)
     store.create_run("demo", directory=directory, server_url="http://opencode.example")
-    store.upsert_worker("demo", "planner", role="plan", prompt="Plan", session_id="ses_plan", status="active")
+    store.upsert_worker(
+        "demo",
+        "planner",
+        role="plan",
+        prompt="Plan",
+        session_id="ses_plan",
+        lifecycle_state="active_wait",
+    )
     return store
 
 

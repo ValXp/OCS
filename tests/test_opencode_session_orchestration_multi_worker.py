@@ -59,6 +59,9 @@ class MultiWorkerServiceScenario:
 
     def add_worker(self, worker_id, **changes):
         changes.setdefault("role", worker_id)
+        status = changes.pop("status", None)
+        if status is not None:
+            changes["lifecycle_state"] = _LIFECYCLE_STATE_BY_STATUS[status]
         self.store.upsert_worker(RUN_NAME, worker_id, **changes)
 
     def request(self, worker_id, *, role=None, **changes):
@@ -836,6 +839,17 @@ def _has_created_session_journal(run):
         and entry.get("status") == "created"
         for entry in journal
     )
+
+
+_LIFECYCLE_STATE_BY_STATUS = {
+    "queued": "queued",
+    "active": "active_wait",
+    "blocked": "blocked_dependency",
+    "done": "done_collect",
+    "failed": "failed_terminal",
+    "aborted": "aborted",
+    "timeout": "timeout_terminal",
+}
 
 
 if __name__ == "__main__":

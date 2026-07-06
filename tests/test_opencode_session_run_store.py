@@ -6,7 +6,12 @@ from pathlib import Path
 
 from opencode_session.run_persistence import persist_worker_snapshot_update
 from opencode_session.run_store import RunStore, RunStoreError
-from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_aborted, refresh_run_summary
+from opencode_session.worker_state import (
+    apply_worker_result,
+    apply_worker_transition_to_worker,
+    mark_worker_aborted,
+    refresh_run_summary,
+)
 
 try:
     from tests.worker_state_scenarios import assert_worker_outcome
@@ -36,7 +41,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             first.create_run("demo", directory=directory, server_url="http://opencode.example")
             stale_run = first.load_run("demo")
 
-            RunStore(store).upsert_worker("demo", "planner", role="plan", status="active")
+            RunStore(store).upsert_worker("demo", "planner", role="plan", lifecycle_state="active_wait")
             stale_run["status"] = "active"
             run = RunStore(store).load_run("demo")
 
@@ -47,7 +52,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            run_store.upsert_worker("demo", "planner", role="plan", status="active")
+            run_store.upsert_worker("demo", "planner", role="plan", lifecycle_state="active_wait")
 
             loaded = run_store.load_run("demo")
             stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
@@ -63,7 +68,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertNotIn("status", stored["workers"]["planner"])
         self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
 
-    def test_worker_status_upsert_converts_status_to_lifecycle_at_boundary(self):
+    def test_worker_lifecycle_upsert_persists_canonical_lifecycle(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
@@ -71,7 +76,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 "demo",
                 "planner",
                 role="plan",
-                status="failed",
+                lifecycle_state="failed_retry",
                 retryable_failures=["provider"],
                 retry_count=0,
                 retry_limit=1,
@@ -91,13 +96,61 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertNotIn("status", stored["workers"]["planner"])
         self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
 
+    def test_worker_status_upsert_is_rejected_by_storage_api(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+
+            with self.assertRaisesRegex(RunStoreError, "must use lifecycle_state"):
+                run_store.upsert_worker("demo", "planner", role="plan", status="active")
+
+    def test_legacy_public_worker_status_loads_and_rewrites_as_lifecycle_snapshot(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_path = Path(store) / "demo.json"
+            run_path.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "directory": directory,
+                        "server_url": "http://opencode.example",
+                        "workers": {
+                            "planner": {
+                                "role": "plan",
+                                "status": "failed",
+                                "retryable_failures": ["provider"],
+                                "retry_count": 0,
+                                "retry_limit": 1,
+                                "last_failure_category": "provider",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_store = RunStore(store)
+
+            loaded = run_store.load_run("demo")
+            run_store.update_run("demo", lambda run: None)
+            stored = json.loads(run_path.read_text(encoding="utf-8"))
+
+        assert_worker_outcome(
+            self,
+            loaded["workers"]["planner"],
+            status="failed",
+            action="retry",
+            lifecycle="failed_retry",
+        )
+        self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "failed_retry")
+        self.assertNotIn("status", stored["workers"]["planner"])
+        self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
+
     def test_update_run_preserves_concurrent_worker_update_after_stale_load(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             first = RunStore(store)
             first.create_run("demo", directory=directory, server_url="http://opencode.example")
             first.load_run("demo")
 
-            RunStore(store).upsert_worker("demo", "planner", role="plan", status="active")
+            RunStore(store).upsert_worker("demo", "planner", role="plan", lifecycle_state="active_wait")
 
             def activate(latest_run):
                 latest_run["status"] = "active"
@@ -118,7 +171,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
             def upsert(worker_id, role):
                 try:
-                    run_store.upsert_worker("demo", worker_id, role=role, status="active")
+                    run_store.upsert_worker("demo", worker_id, role=role, lifecycle_state="active_wait")
                 except Exception as error:  # pragma: no cover - assertion reports the unexpected exception
                     errors.append(error)
 
@@ -140,16 +193,15 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
             build_worker = dict(run["workers"]["build"])
-            build_worker["status"] = "done"
-            build_worker["result"] = {
+            result = {
                 "session_id": "ses_build",
                 "status": "done",
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
-            build_worker["output_refs"] = ["assistant:msg_build"]
+            apply_worker_transition_to_worker(build_worker, apply_worker_result(build_worker, result, prompt_ids=("prompt-build",)))
 
             persisted = persist_worker_snapshot_update(
                 run_store,
@@ -172,8 +224,8 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)
             run = run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            run_store.upsert_worker("demo", "docs", role="write", prompt="Draft docs", status="active")
-            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active")
+            run_store.upsert_worker("demo", "docs", role="write", prompt="Draft docs", lifecycle_state="active_wait")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
 
             run_store.update_run(
@@ -181,14 +233,12 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 lambda latest_run: latest_run["workers"]["docs"]["prompt_ids"].append("prompt-docs"),
             )
             build_worker = run["workers"]["build"]
-            build_worker["status"] = "done"
-            build_worker["prompt_ids"] = ["prompt-build"]
-            build_worker["result"] = {
+            result = {
                 "session_id": "ses_build",
                 "status": "done",
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
-            build_worker["output_refs"] = ["assistant:msg_build"]
+            apply_worker_transition_to_worker(build_worker, apply_worker_result(build_worker, result, prompt_ids=("prompt-build",)))
             persist_worker_snapshot_update(
                 run_store,
                 run,
@@ -207,7 +257,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
 
             run_store.update_run(
@@ -215,14 +265,12 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 lambda latest_run: latest_run["workers"]["build"]["prompt_ids"].append("prompt-steer"),
             )
             build_worker = run["workers"]["build"]
-            build_worker["status"] = "done"
-            build_worker["prompt_ids"] = ["prompt-build"]
-            build_worker["result"] = {
+            result = {
                 "session_id": "ses_build",
                 "status": "done",
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
-            build_worker["output_refs"] = ["assistant:msg_build"]
+            apply_worker_transition_to_worker(build_worker, apply_worker_result(build_worker, result, prompt_ids=("prompt-build",)))
             persist_worker_snapshot_update(
                 run_store,
                 run,
@@ -240,7 +288,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
 
             run_store.upsert_worker(
@@ -258,15 +306,13 @@ class RunStoreConcurrencyTest(unittest.TestCase):
                 model="openai/gpt-5.5",
             )
             build_worker = run["workers"]["build"]
-            build_worker["status"] = "done"
             build_worker["session_id"] = "ses_created_from_stale_snapshot"
-            build_worker["prompt_ids"] = ["prompt-build"]
-            build_worker["result"] = {
+            result = {
                 "session_id": "ses_created_from_stale_snapshot",
                 "status": "done",
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
-            build_worker["output_refs"] = ["assistant:msg_build"]
+            apply_worker_transition_to_worker(build_worker, apply_worker_result(build_worker, result, prompt_ids=("prompt-build",)))
             persist_worker_snapshot_update(
                 run_store,
                 run,
@@ -296,7 +342,14 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            run_store.upsert_worker("demo", "build", role="build", prompt="Build", status="active", session_id="ses_build")
+            run_store.upsert_worker(
+                "demo",
+                "build",
+                role="build",
+                prompt="Build",
+                lifecycle_state="active_wait",
+                session_id="ses_build",
+            )
             run = run_store.load_run("demo")
 
             def abort_build(latest_run):
@@ -311,13 +364,12 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
             run_store.update_run("demo", abort_build)
             build_worker = run["workers"]["build"]
-            build_worker["status"] = "done"
-            build_worker["result"] = {
+            result = {
                 "session_id": "ses_build",
                 "status": "done",
                 "message_ids": {"user": "prompt-build", "assistant": "msg_build"},
             }
-            build_worker["output_refs"] = ["assistant:msg_build"]
+            apply_worker_transition_to_worker(build_worker, apply_worker_result(build_worker, result, prompt_ids=("prompt-build",)))
             persist_worker_snapshot_update(
                 run_store,
                 run,

@@ -7,5 +7,4 @@ from opencode_session.worker_state import (
     deserialize_worker_record,
     require_internal_worker,
     serialize_worker_snapshot,
-    snapshot_state_source,
 )

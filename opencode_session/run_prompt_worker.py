@@ -1,3 +1,5 @@
+from opencode_session.worker_state import WORKER_LIFECYCLE_QUEUED
+
 from opencode_session.cli_policy import server_default
 from opencode_session.run_store import RunStoreError
 
@@ -18,7 +20,7 @@ def ensure_prompt_worker(store, request):
         request.worker_id,
         role=request.role,
         prompt=request.prompt,
-        status="queued",
+        lifecycle_state=WORKER_LIFECYCLE_QUEUED,
         session_id=request.session_id,
         agent=request.agent,
         model=request.model,

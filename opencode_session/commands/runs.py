@@ -12,6 +12,17 @@ from opencode_session.run_formatting import format_run_compact, format_worker_re
 from opencode_session.run_services import RunCommandService, RunStartRequest, RunWorkerSessionNotFound
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root
 from opencode_session.session_lifecycle import format_abort_compact
+from opencode_session.status import short_status
+from opencode_session.worker_state import (
+    WORKER_LIFECYCLE_ABORTED,
+    WORKER_LIFECYCLE_ACTIVE_WAIT,
+    WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+    WORKER_LIFECYCLE_DONE_COLLECT,
+    WORKER_LIFECYCLE_FAILED_TERMINAL,
+    WORKER_LIFECYCLE_QUEUED,
+    WORKER_LIFECYCLE_STATES,
+    WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+)
 
 def add_run_parser(subparsers, *, add_server_argument, positive_float, handler):
     parser = subparsers.add_parser("run", help="manage local orchestration runs")
@@ -86,7 +97,12 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     run_worker_parser.add_argument("--prompt", help="prompt text to run for this worker")
     run_worker_parser.add_argument("--depends-on", dest="dependencies", action="append", help="worker dependency ID")
     run_worker_parser.add_argument("--prompt-id", dest="prompt_ids", action="append", help="prompt admission ID")
-    run_worker_parser.add_argument("--status", help="worker status")
+    run_worker_parser.add_argument("--status", help="worker status alias for simple lifecycle states")
+    run_worker_parser.add_argument(
+        "--lifecycle-state",
+        choices=sorted(WORKER_LIFECYCLE_STATES),
+        help="canonical worker lifecycle state",
+    )
     run_worker_parser.add_argument("--retry-count", type=int, help="worker retry count")
     run_worker_parser.add_argument("--retry-limit", type=int, help="maximum automatic retries for retryable failures")
     run_worker_parser.add_argument(
@@ -157,6 +173,7 @@ def _status_run(args, service, **_context):
 
 
 def _upsert_run_worker(args, service, **_context):
+    lifecycle_state = _worker_lifecycle_state_arg(args)
     run = service.upsert_worker(
         args.name,
         args.worker_id,
@@ -167,7 +184,7 @@ def _upsert_run_worker(args, service, **_context):
         prompt=args.prompt,
         dependencies=args.dependencies,
         prompt_ids=args.prompt_ids,
-        status=args.status,
+        lifecycle_state=lifecycle_state,
         retry_count=args.retry_count,
         retry_limit=args.retry_limit,
         retryable_failures=args.retryable_failures,
@@ -248,6 +265,24 @@ def _positive_timeout_seconds(value, positive_float):
     return timeout
 
 
+def _worker_lifecycle_state_arg(args):
+    status_lifecycle_state = _lifecycle_state_from_status_alias(args.status)
+    if args.lifecycle_state is not None and status_lifecycle_state is not None:
+        if args.lifecycle_state != status_lifecycle_state:
+            raise RunStoreError("--status and --lifecycle-state specify different lifecycle states")
+    return args.lifecycle_state or status_lifecycle_state
+
+
+def _lifecycle_state_from_status_alias(status):
+    if status is None:
+        return None
+    public_status = short_status(status)
+    lifecycle_state = _LIFECYCLE_STATE_BY_STATUS_ALIAS.get(public_status)
+    if lifecycle_state is None:
+        raise RunStoreError(f"unsupported worker status: {status}")
+    return lifecycle_state
+
+
 def _error_result(args, message, exit_code, print_error):
     return render_command_result(args, CommandResult(error=message, exit_code=exit_code), print_error=print_error)
 
@@ -260,4 +295,15 @@ _RUN_HANDLERS = {
     "worker": _upsert_run_worker,
     "steer": _steer_run_worker,
     "abort": _abort_run_worker,
+}
+
+
+_LIFECYCLE_STATE_BY_STATUS_ALIAS = {
+    "queued": WORKER_LIFECYCLE_QUEUED,
+    "active": WORKER_LIFECYCLE_ACTIVE_WAIT,
+    "blocked": WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+    "done": WORKER_LIFECYCLE_DONE_COLLECT,
+    "failed": WORKER_LIFECYCLE_FAILED_TERMINAL,
+    "aborted": WORKER_LIFECYCLE_ABORTED,
+    "timeout": WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
 }
