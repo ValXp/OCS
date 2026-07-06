@@ -51,7 +51,7 @@ class WorkerRecord:
         return cls(resolved_worker_id, fields, has_explicit_lifecycle)
 
     @classmethod
-    def default_fields(cls, worker_id):
+    def default_snapshot_fields(cls, worker_id):
         return {
             "id": worker_id,
             "role": None,
@@ -60,7 +60,6 @@ class WorkerRecord:
             "model": None,
             "dependencies": [],
             "prompt_ids": [],
-            "status": WORKER_STATUS_QUEUED,
             "retry_count": 0,
             "retry_limit": 0,
             "retryable_failures": [],
@@ -73,10 +72,15 @@ class WorkerRecord:
             "failure_reason": None,
             "last_failure_category": None,
             "last_failure_reason": None,
-            "next_eligible_action": WORKER_ACTION_START,
             "blockers": [],
             "output_refs": [],
         }
+
+    @classmethod
+    def default_fields(cls, worker_id):
+        fields = cls.default_snapshot_fields(worker_id)
+        fields.update(cls.public_state_fields(fields["lifecycle_state"]))
+        return fields
 
     @classmethod
     def public_state(cls, lifecycle_state):
@@ -115,9 +119,13 @@ class WorkerRecord:
             worker_has_prompt(self.fields),
         )
 
-    def to_worker(self):
-        normalized = self.default_fields(self.worker_id)
-        normalized.update(self.fields)
+    def to_snapshot(self):
+        normalized = self.default_snapshot_fields(self.worker_id)
+        fields = dict(self.fields)
+        legacy_state_source = dict(fields)
+        fields.pop("status", None)
+        fields.pop("next_eligible_action", None)
+        normalized.update(fields)
         normalized["id"] = normalized.get("id") or self.worker_id
         for key in WORKER_LIST_FIELDS:
             value = normalized.get(key)
@@ -128,22 +136,20 @@ class WorkerRecord:
             normalized["retry_limit"] = 0
         if not normalized.get("timeout_policy"):
             normalized["timeout_policy"] = WORKER_STATUS_TIMEOUT
-        if not normalized.get("status"):
-            normalized["status"] = WORKER_STATUS_QUEUED
-        else:
-            normalized["status"] = short_status(normalized["status"])
-        lifecycle_source = dict(normalized)
-        if not self.has_explicit_lifecycle:
-            lifecycle_source.pop("lifecycle_state", None)
-        lifecycle_record = WorkerRecord.from_worker(lifecycle_source, normalized["id"])
-        normalized.update(lifecycle_record.serialized_public_state())
+        if not self.has_explicit_lifecycle or normalized.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
+            normalized["lifecycle_state"] = self._infer_lifecycle_state(legacy_state_source)
+        return normalized
+
+    def to_worker(self):
+        normalized = self.to_snapshot()
+        normalized.update(self.public_state_fields(normalized["lifecycle_state"]))
         return normalized
 
     def serialized_public_state(self):
         return self.public_state_fields(self.lifecycle_state)
 
     def apply_transition_spec(self, spec):
-        latest_worker = self.to_worker()
+        latest_worker = self.to_snapshot()
         set_fields = deepcopy(spec.set_fields or {})
         set_if_missing_fields = deepcopy(spec.set_if_missing_fields or {})
         merge_unique_fields = deepcopy(spec.merge_unique_fields or {})
@@ -226,13 +232,14 @@ def latest_prompt_ids_are_retry_marker(latest_worker):
 
 def snapshot_state_source(worker):
     source = deepcopy(worker)
-    source.pop("lifecycle_state", None)
+    if "status" in source or "next_eligible_action" in source:
+        source.pop("lifecycle_state", None)
     return source
 
 
 def _accepted_abort(worker):
     abort = worker.get("abort") if isinstance(worker, dict) else None
-    return isinstance(abort, dict) and abort.get("accepted") and worker.get("status") == WORKER_STATUS_ABORTED
+    return isinstance(abort, dict) and abort.get("accepted") and WorkerRecord.from_worker(worker).status == WORKER_STATUS_ABORTED
 
 
 def _merge_unique_fields(target, latest_worker, merge_unique_fields):

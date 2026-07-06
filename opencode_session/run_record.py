@@ -4,6 +4,7 @@ from opencode_session.status import short_status
 from opencode_session.worker_state import (
     default_worker,
     normalize_worker,
+    normalize_worker_snapshot,
 )
 
 
@@ -95,4 +96,13 @@ def normalize_run(run, *, fallback_name):
     normalized["workers"] = {worker_id: normalize_worker(worker, worker_id) for worker_id, worker in workers.items()}
     normalized.setdefault("created_at", None)
     normalized.setdefault("updated_at", None)
+    return normalized
+
+
+def normalize_run_for_storage(run, *, fallback_name):
+    normalized = normalize_run(run, fallback_name=fallback_name)
+    normalized["workers"] = {
+        worker_id: normalize_worker_snapshot(worker, worker_id)
+        for worker_id, worker in normalized["workers"].items()
+    }
     return normalized

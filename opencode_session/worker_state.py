@@ -31,6 +31,10 @@ def normalize_worker(worker, worker_id):
     return WorkerRecord.from_worker(worker, worker_id).to_worker()
 
 
+def normalize_worker_snapshot(worker, worker_id):
+    return WorkerRecord.from_worker(worker, worker_id).to_snapshot()
+
+
 def next_eligible_action(worker):
     if not isinstance(worker, dict):
         return WORKER_ACTION_NONE
@@ -159,14 +163,14 @@ def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False
     status_workers = prompted_workers
     if include_unprompted_when_no_prompts:
         status_workers = prompted_workers or [worker for worker in workers.values() if isinstance(worker, dict)]
-    return aggregate_run_status(worker.get("status") for worker in status_workers)
+    return aggregate_run_status(_worker_status(worker) for worker in status_workers)
 
 
 def worker_output_refs_in_dependency_order(workers):
     ordered = []
     for worker in workers_in_dependency_order(workers):
         worker_id = worker.get("id")
-        if worker.get("status") != WORKER_STATUS_DONE:
+        if _worker_status(worker) != WORKER_STATUS_DONE:
             continue
         for output_ref in worker.get("output_refs", []):
             if isinstance(output_ref, str) and output_ref.startswith("assistant:"):
@@ -189,7 +193,7 @@ def has_partial_worker_success(run):
     workers = [worker for worker in (run.get("workers") or {}).values() if isinstance(worker, dict) and worker_prompt(worker)]
     if not workers:
         return False
-    statuses = {worker.get("status") for worker in workers}
+    statuses = {_worker_status(worker) for worker in workers}
     return WORKER_STATUS_DONE in statuses and any(
         status in {WORKER_STATUS_FAILED, WORKER_STATUS_BLOCKED, WORKER_STATUS_ABORTED, WORKER_STATUS_TIMEOUT}
         for status in statuses
@@ -201,3 +205,7 @@ def worker_prompt(worker):
     if prompt is None:
         return None
     return str(prompt)
+
+
+def _worker_status(worker):
+    return WorkerRecord.from_worker(worker).status if isinstance(worker, dict) else None

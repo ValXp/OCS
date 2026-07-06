@@ -166,17 +166,17 @@ class WorkerExecutionTest(unittest.TestCase):
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
             client = FakeClient(["ses_initial"])
-            persisted_statuses = []
+            persisted_lifecycle_states = []
 
             def persist_worker_transition(run, transition):
-                persisted_statuses.append(transition.set_fields.get("status"))
+                persisted_lifecycle_states.append(transition.set_fields.get("lifecycle_state"))
                 persisted_run = deepcopy(run)
                 updated = transition.apply_to(persisted_run.setdefault("workers", {}))
                 return PersistedWorkerTransitions(persisted_run, [updated])
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
-                self.assertIn("active", persisted_statuses)
+                self.assertIn("active_wait", persisted_lifecycle_states)
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
             core = RunStartCore(
@@ -194,7 +194,7 @@ class WorkerExecutionTest(unittest.TestCase):
             )
 
         self.assertEqual(outcome.kind, "completed")
-        self.assertEqual(persisted_statuses, [None, "active", "done"])
+        self.assertEqual(persisted_lifecycle_states, [None, "active_wait", "done_collect"])
 
     def test_execute_worker_attempts_does_not_start_retry_session_after_timeout(self):
         with tempfile.TemporaryDirectory() as directory:

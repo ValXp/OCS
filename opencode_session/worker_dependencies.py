@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from opencode_session.worker_scheduling import (
+    WorkerSchedulingState,
     is_dependency_blockable_worker,
     is_executable_worker,
     is_failed_dependency_status,
@@ -125,7 +126,7 @@ def _dependency_blocker_seeds(workers, dependency_graph):
         blockers = []
         for dependency in dependency_graph.get(worker_id, ()):
             dependency_worker = workers.get(dependency)
-            if not isinstance(dependency_worker, dict) or is_failed_dependency_status(dependency_worker.get("status")):
+            if not isinstance(dependency_worker, dict) or is_failed_dependency_status(_worker_status(dependency_worker)):
                 blockers.append(f"dependency:{dependency}")
         if blockers:
             blockers_by_worker_id[worker_id] = tuple(blockers)
@@ -177,7 +178,7 @@ def _merge_blocker_maps(*blocker_maps):
 def _dependencies_done(worker_id, workers, dependency_graph):
     for dependency in dependency_graph.get(worker_id, ()):
         dependency_worker = workers.get(dependency)
-        if not isinstance(dependency_worker, dict) or dependency_worker.get("status") != "done":
+        if not isinstance(dependency_worker, dict) or _worker_status(dependency_worker) != "done":
             return False
     return True
 
@@ -185,7 +186,7 @@ def _dependencies_done(worker_id, workers, dependency_graph):
 def _non_runnable_dependency(worker):
     if not isinstance(worker, dict):
         return False
-    if not is_runnable_status(worker.get("status")):
+    if not is_runnable_status(_worker_status(worker)):
         return False
     return not _worker_has_prompt(worker)
 
@@ -205,6 +206,10 @@ def _worker_has_prompt(worker):
 def _worker_dependencies(worker):
     dependencies = worker.get("dependencies", [])
     return dependencies if isinstance(dependencies, list) else []
+
+
+def _worker_status(worker):
+    return WorkerSchedulingState.from_worker(worker).status
 
 
 def _add_blocker(blockers_by_worker_id, worker_id, blocker):

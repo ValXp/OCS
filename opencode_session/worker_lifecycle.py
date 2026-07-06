@@ -72,7 +72,6 @@ WORKER_LIFECYCLE_STATES = frozenset(PUBLIC_WORKER_STATE_BY_LIFECYCLE)
 
 WORKER_SNAPSHOT_STATE_FIELDS = (
     "lifecycle_state",
-    "status",
     "retry_count",
     "timeout_started_at",
     "timed_out_at",
@@ -80,7 +79,6 @@ WORKER_SNAPSHOT_STATE_FIELDS = (
     "failure_reason",
     "last_failure_category",
     "last_failure_reason",
-    "next_eligible_action",
     "blockers",
     "output_refs",
     "error",
@@ -294,9 +292,7 @@ def public_worker_state_fields(lifecycle_state):
 
 
 def worker_lifecycle_set_fields(worker_id, lifecycle_state):
-    fields = {"id": worker_id}
-    fields.update(public_worker_state_fields(lifecycle_state))
-    return fields
+    return {"id": worker_id, "lifecycle_state": lifecycle_state}
 
 
 def worker_retry_available(worker, category=None):
@@ -425,7 +421,7 @@ def _dependency_blocked_transition_spec(worker_id, blockers):
 def _aborted_transition_spec(worker_id, abort):
     set_fields = {"id": worker_id, "abort": deepcopy(abort)}
     if isinstance(abort, dict) and abort.get("accepted"):
-        set_fields.update(public_worker_state_fields(WORKER_LIFECYCLE_ABORTED))
+        set_fields.update(worker_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_ABORTED))
     return _transition_spec(set_fields=set_fields)
 
 
@@ -530,7 +526,7 @@ def _snapshot_applied_transition_spec(
 ):
     from opencode_session.worker_normalization import WorkerRecord, snapshot_state_source
 
-    normalized = WorkerRecord.from_worker(snapshot_state_source(worker), worker_id).to_worker()
+    normalized = WorkerRecord.from_worker(snapshot_state_source(worker), worker_id).to_snapshot()
     set_fields = {"id": worker_id}
     selected_state_fields = state_fields or WORKER_SNAPSHOT_STATE_FIELDS
     for field_name in selected_state_fields:

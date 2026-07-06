@@ -1,6 +1,8 @@
+import json
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 from opencode_session.run_persistence import persist_worker_snapshot_update
 from opencode_session.run_store import RunStore, RunStoreError
@@ -35,6 +37,21 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
         self.assertEqual(run["status"], "queued")
         self.assertIn("planner", run["workers"])
+
+    def test_store_persists_canonical_worker_lifecycle_without_public_state(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker("demo", "planner", role="plan", status="active")
+
+            loaded = run_store.load_run("demo")
+            stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(loaded["workers"]["planner"]["status"], "active")
+        self.assertEqual(loaded["workers"]["planner"]["next_eligible_action"], "wait")
+        self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "active_wait")
+        self.assertNotIn("status", stored["workers"]["planner"])
+        self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
 
     def test_update_run_preserves_concurrent_worker_update_after_stale_load(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:

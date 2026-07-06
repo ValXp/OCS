@@ -77,12 +77,14 @@ class WorkerStateContractTest(unittest.TestCase):
     def test_mark_worker_active_sets_waiting_action_and_timeout_start(self):
         worker = normalize_worker({"timeout_seconds": 30}, "builder")
 
-        mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z")
+        transition = mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z")
 
         self.assertEqual(worker["status"], "active")
         self.assertEqual(worker["lifecycle_state"], "active_wait")
         self.assertEqual(worker["next_eligible_action"], "wait")
         self.assertEqual(worker["timeout_started_at"], "2026-07-04T00:00:00Z")
+        self.assertNotIn("status", transition.set_fields)
+        self.assertNotIn("next_eligible_action", transition.set_fields)
 
     def test_mark_worker_active_clears_stale_current_status_metadata(self):
         worker = normalize_worker(
