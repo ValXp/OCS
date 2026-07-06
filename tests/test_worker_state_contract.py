@@ -19,9 +19,11 @@ from opencode_session.worker_state import (
     WorkerLifecycleStatus,
     WorkerRecord,
     apply_worker_transition,
+    canonicalize_legacy_worker_record,
     deserialize_worker_record,
     is_executable_worker,
     mark_worker_active,
+    next_eligible_action,
     next_eligible_worker_action,
     normalize_worker,
     normalize_worker_snapshot,
@@ -191,7 +193,78 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(next_eligible_worker_action(waiting), "wait")
         self.assertTrue(is_executable_worker(retrying))
         self.assertFalse(is_executable_worker(stale_action))
+        self.assertEqual(worker_field(stale_action, "next_eligible_action"), "wait")
         self.assertEqual(next_eligible_worker_action(stale_action), "wait")
+
+    def test_raw_legacy_worker_mappings_canonicalize_for_field_access_and_scheduling(self):
+        cases = (
+            (
+                "done worker is not executable",
+                {"id": "done", "prompt": "Done", "status": "done"},
+                "done_collect",
+                "done",
+                "collect",
+                False,
+            ),
+            (
+                "active retry worker is executable",
+                {"id": "active_retry", "prompt": "Retry", "status": "active", "next_eligible_action": "retry"},
+                "active_retry",
+                "active",
+                "retry",
+                True,
+            ),
+            (
+                "failed retry worker is executable",
+                {
+                    "id": "failed_retry",
+                    "prompt": "Retry",
+                    "status": "failed",
+                    "failure_category": "provider",
+                    "retryable_failures": ["provider"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
+                },
+                "failed_retry",
+                "failed",
+                "retry",
+                True,
+            ),
+            (
+                "failed terminal worker is not executable",
+                {"id": "failed_terminal", "prompt": "Investigate", "status": "failed"},
+                "failed_terminal",
+                "failed",
+                "none",
+                False,
+            ),
+            (
+                "timeout blocker keeps timeout origin",
+                {
+                    "id": "blocked_timeout",
+                    "prompt": "Unblock",
+                    "status": "blocked",
+                    "failure_category": "timeout",
+                },
+                "blocked_timeout",
+                "blocked",
+                "resolve_blocker",
+                False,
+            ),
+        )
+
+        for name, worker, expected_lifecycle, expected_status, expected_action, executable in cases:
+            with self.subTest(name=name):
+                canonical = canonicalize_legacy_worker_record(worker)
+
+                self.assertEqual(canonical["lifecycle_state"], expected_lifecycle)
+                self.assertEqual(worker_lifecycle_state(worker), expected_lifecycle)
+                self.assertEqual(worker_field(worker, "lifecycle_state"), expected_lifecycle)
+                self.assertEqual(worker_field(worker, "status"), expected_status)
+                self.assertEqual(worker_field(worker, "next_eligible_action"), expected_action)
+                self.assertEqual(next_eligible_worker_action(worker), expected_action)
+                self.assertEqual(next_eligible_action(worker), expected_action)
+                self.assertEqual(is_executable_worker(worker), executable)
 
     def test_deserialize_worker_derives_public_state_from_lifecycle(self):
         worker = deserialize_worker_record(
