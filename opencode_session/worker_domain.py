@@ -48,8 +48,8 @@ WORKER_LIST_FIELDS = (
     "retryable_failures",
     "blockers",
     "output_refs",
-    "attempts",
 )
+WORKER_OPTIONAL_LIST_FIELDS = ("attempts",)
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
 
@@ -402,7 +402,6 @@ class WorkerRecord:
             "last_failure_reason": None,
             "blockers": [],
             "output_refs": [],
-            "attempts": [],
         }
 
     @classmethod
@@ -462,6 +461,10 @@ class WorkerRecord:
         for key in WORKER_LIST_FIELDS:
             value = normalized.get(key)
             normalized[key] = value if isinstance(value, list) else []
+        for key in WORKER_OPTIONAL_LIST_FIELDS:
+            if key in normalized:
+                value = normalized.get(key)
+                normalized[key] = value if isinstance(value, list) else []
         if normalized.get("retry_count") is None:
             normalized["retry_count"] = 0
         if normalized.get("retry_limit") is None:
