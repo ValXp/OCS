@@ -23,6 +23,75 @@ except ModuleNotFoundError:
     from multi_worker_orchestration_helpers import CAPABILITIES, FakeClient, UNSUPPORTED_CAPABILITIES
 
 
+RUN_NAME = "demo"
+SERVER_URL = "http://opencode.example"
+NOW = "2026-07-03T00:00:00Z"
+
+
+class MultiWorkerServiceScenario:
+    def __init__(
+        self,
+        test_case,
+        *,
+        client=None,
+        session_ids=None,
+        capabilities=CAPABILITIES,
+        capability_detector=None,
+        executor=None,
+    ):
+        self.test_case = test_case
+        self.client = client if client is not None else FakeClient([] if session_ids is None else session_ids)
+        self.capabilities = capabilities
+        self.capability_detector = capability_detector
+        self.executor = executor or self._unexpected_execute
+
+    def __enter__(self):
+        self._store_root = tempfile.TemporaryDirectory()
+        self._directory = tempfile.TemporaryDirectory()
+        self.directory = self._directory.name
+        self.store = RunStore(self._store_root.name)
+        self.store.create_run(RUN_NAME, directory=self.directory, server_url=SERVER_URL)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._directory.cleanup()
+        self._store_root.cleanup()
+
+    def add_worker(self, worker_id, **changes):
+        changes.setdefault("role", worker_id)
+        self.store.upsert_worker(RUN_NAME, worker_id, **changes)
+
+    def request(self, worker_id, *, role=None, **changes):
+        return DependencyOrderedSerialRunStartRequest(
+            name=RUN_NAME,
+            worker_id=worker_id,
+            role=role or worker_id,
+            **changes,
+        )
+
+    def service(self, *, store=None, client=None, capability_detector=None, executor=None):
+        selected_detector = capability_detector if capability_detector is not None else self.capability_detector
+        if selected_detector is None:
+            selected_detector = lambda client: self.capabilities
+        selected_client = client if client is not None else self.client
+        return DependencyOrderedSerialRunOrchestrationService(
+            store or self.store,
+            client_factory=lambda url: selected_client,
+            capability_detector=selected_detector,
+            executor=executor or self.executor,
+            now=lambda: NOW,
+        )
+
+    def start(self, worker_id, *, role=None, **request_changes):
+        return self.service().start(self.request(worker_id, role=role, **request_changes))
+
+    def load_run(self):
+        return self.store.load_run(RUN_NAME)
+
+    def _unexpected_execute(self, *args, **kwargs):
+        self.test_case.fail("worker should not execute")
+
+
 class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
     def test_ready_worker_ids_exclude_worker_blocked_by_partially_completed_cycle(self):
         workers = {
@@ -168,6 +237,12 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(attempt.get("status"), status)
         return attempt
 
+    def assert_blocked_worker(self, run, worker_id, blockers):
+        worker = run["workers"][worker_id]
+        self.assertEqual(worker["status"], "blocked")
+        self.assertEqual(worker["blockers"], blockers)
+        self.assertEqual(worker["next_eligible_action"], "resolve_blocker")
+
     def test_next_eligible_worker_executor_delegates_to_core_direct_execution(self):
         run = {
             "workers": {
@@ -252,16 +327,13 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(session_tracker.remembered[0][2], "completed")
 
     def test_start_persists_active_attempt_before_provider_call(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker("demo", "worker", role="worker", prompt="Finish the worker task")
-            client = FakeClient(["ses_initial"])
+        with MultiWorkerServiceScenario(self, session_ids=["ses_initial"]) as scenario:
+            scenario.add_worker("worker", prompt="Finish the worker task")
             observed_before_call = {}
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
-                persisted_worker = store.load_run("demo")["workers"]["worker"]
+                persisted_worker = scenario.store.load_run(RUN_NAME)["workers"]["worker"]
                 observed_before_call["worker"] = deepcopy(persisted_worker)
 
                 self.assertEqual(persisted_worker["session_id"], "ses_initial")
@@ -274,27 +346,19 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 )
                 self.assertEqual(attempt.get("id"), "attempt-1")
                 self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
-                self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+                self.assertEqual(attempt.get("started_at"), NOW)
                 self.assertIsNone(attempt.get("finished_at"))
                 self.assertNotIn("result_status", attempt)
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=lambda client: CAPABILITIES,
-                executor=execute_prompt,
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker"))
-            run = store.load_run("demo")
+            outcome = scenario.service(executor=execute_prompt).start(scenario.request("worker"))
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertIn("worker", observed_before_call)
         self.assertEqual(
-            client.requests,
-            [("create", directory, None, None), ("execute", "ses_initial", "Finish the worker task")],
+            scenario.client.requests,
+            [("create", scenario.directory, None, None), ("execute", "ses_initial", "Finish the worker task")],
         )
         worker = run["workers"]["worker"]
         self.assertEqual(worker["status"], "done")
@@ -302,20 +366,16 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         attempt = self.assert_single_worker_attempt(worker, status="completed", session_id="ses_initial")
         self.assertEqual(attempt.get("id"), "attempt-1")
         self.assertEqual(attempt.get("created_session_ids"), ["ses_initial"])
-        self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
-        self.assertEqual(attempt.get("finished_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("started_at"), NOW)
+        self.assertEqual(attempt.get("finished_at"), NOW)
         self.assertEqual(attempt.get("result_status"), "done")
         self.assertEqual(attempt.get("user_message_id"), "msg_user")
         self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
 
     def test_start_persists_worker_session_creation_intent_before_remote_create(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
+        with MultiWorkerServiceScenario(self) as scenario:
+            scenario.add_worker(
                 "worker",
-                role="worker",
                 prompt="Finish the worker task",
                 agent="build",
                 model="openai/gpt-5.5",
@@ -325,39 +385,31 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
 
             class InspectingCreateClient(FakeClient):
                 def create_session_response(self, directory, *, agent=None, model=None):
-                    persisted_run = store.load_run("demo")
+                    persisted_run = scenario.store.load_run(RUN_NAME)
                     journal = persisted_run[WORKER_SESSION_JOURNAL_FIELD]
                     test_case.assertEqual(len(journal), 1)
                     observed_intent["entry"] = deepcopy(journal[0])
                     return super().create_session_response(directory, agent=agent, model=model)
 
-            client = InspectingCreateClient(["ses_initial"])
+            scenario.client = InspectingCreateClient(["ses_initial"])
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=lambda client: CAPABILITIES,
-                executor=execute_prompt,
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker"))
-            run = store.load_run("demo")
+            outcome = scenario.service(executor=execute_prompt).start(scenario.request("worker"))
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertEqual(
-            client.requests,
-            [("create", directory, "build", "openai/gpt-5.5"), ("execute", "ses_initial", "Finish the worker task")],
+            scenario.client.requests,
+            [("create", scenario.directory, "build", "openai/gpt-5.5"), ("execute", "ses_initial", "Finish the worker task")],
         )
         entry = observed_intent["entry"]
         self.assertEqual(entry["kind"], "worker_session_create")
         self.assertEqual(entry["status"], "intent")
         self.assertEqual(entry["worker_id"], "worker")
-        self.assertEqual(entry["directory"], directory)
+        self.assertEqual(entry["directory"], scenario.directory)
         self.assertEqual(entry["agent"], "build")
         self.assertEqual(entry["model"], "openai/gpt-5.5")
         self.assertFalse(entry["cleanup_requested"])
@@ -367,8 +419,8 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
     def test_start_persistence_failure_after_session_creation_leaves_cleanup_metadata(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             inner_store = RunStore(store_root)
-            inner_store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            inner_store.upsert_worker("demo", "worker", role="worker", prompt="Finish the worker task")
+            inner_store.create_run(RUN_NAME, directory=directory, server_url=SERVER_URL)
+            inner_store.upsert_worker(RUN_NAME, "worker", role="worker", prompt="Finish the worker task")
             store = FailAfterCreatedSessionJournalStore(inner_store)
             client = FakeClient(["ses_initial"])
             service = DependencyOrderedSerialRunOrchestrationService(
@@ -376,19 +428,19 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 client_factory=lambda url: client,
                 capability_detector=lambda client: CAPABILITIES,
                 executor=lambda *args, **kwargs: self.fail("worker should not execute after persistence failure"),
-                now=lambda: "2026-07-03T00:00:00Z",
+                now=lambda: NOW,
             )
 
             with self.assertRaisesRegex(RunStoreError, "forced update failure after session creation"):
                 service.start(
                     DependencyOrderedSerialRunStartRequest(
-                        name="demo",
+                        name=RUN_NAME,
                         worker_id="worker",
                         role="worker",
                         cleanup=True,
                     )
                 )
-            run = inner_store.load_run("demo")
+            run = inner_store.load_run(RUN_NAME)
 
         self.assertEqual(client.requests, [("create", directory, None, None)])
         self.assertTrue(store.failed)
@@ -406,11 +458,8 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(worker["cleanup"], {"requested": True, "deleted": False, "sessions": ["ses_initial"]})
 
     def test_command_service_start_passes_injected_dependencies_to_orchestration(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker("demo", "worker", role="worker", prompt="Finish the worker task")
-            client = FakeClient([])
+        with MultiWorkerServiceScenario(self, client=FakeClient([])) as scenario:
+            scenario.add_worker("worker", prompt="Finish the worker task")
             detected_clients = []
 
             def detect_capabilities(detected_client):
@@ -418,42 +467,29 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 return UNSUPPORTED_CAPABILITIES
 
             service = RunCommandService(
-                store,
-                client_factory=lambda url: client,
+                scenario.store,
+                client_factory=lambda url: scenario.client,
                 capability_detector=detect_capabilities,
-                now=lambda: "2026-07-03T00:00:00Z",
+                now=lambda: NOW,
             )
 
-            outcome = service.start_run(RunStartRequest(name="demo", worker_id="worker", role="worker"))
-            run = store.load_run("demo")
+            outcome = service.start_run(RunStartRequest(name=RUN_NAME, worker_id="worker", role="worker"))
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 70)
-        self.assertEqual(detected_clients, [client])
-        self.assertEqual(run["updated_at"], "2026-07-03T00:00:00Z")
+        self.assertEqual(detected_clients, [scenario.client])
+        self.assertEqual(run["updated_at"], NOW)
 
     def test_start_unsupported_blocking_execution_is_not_retryable(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
+        with MultiWorkerServiceScenario(self, capabilities=UNSUPPORTED_CAPABILITIES) as scenario:
+            scenario.add_worker(
                 "worker",
-                role="worker",
                 prompt="Finish the worker task",
                 retry_limit=1,
                 retryable_failures=["api"],
             )
-            client = FakeClient([])
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=lambda client: UNSUPPORTED_CAPABILITIES,
-                executor=lambda *args, **kwargs: self.fail("unsupported server should not execute worker"),
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker"))
-            run = store.load_run("demo")
+            outcome = scenario.start("worker")
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 70)
         self.assertIn("unsupported route behavior", outcome.error)
@@ -465,32 +501,18 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(worker["next_eligible_action"], "none")
 
     def test_start_api_setup_failure_is_not_retryable(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
+        def detect_capabilities(client):
+            raise OpenCodeApiError("capability probe failed")
+
+        with MultiWorkerServiceScenario(self, capability_detector=detect_capabilities) as scenario:
+            scenario.add_worker(
                 "worker",
-                role="worker",
                 prompt="Finish the worker task",
                 retry_limit=1,
                 retryable_failures=["api"],
             )
-            client = FakeClient([])
-
-            def detect_capabilities(client):
-                raise OpenCodeApiError("capability probe failed")
-
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=detect_capabilities,
-                executor=lambda *args, **kwargs: self.fail("failed setup should not execute worker"),
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="worker", role="worker"))
-            run = store.load_run("demo")
+            outcome = scenario.start("worker")
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 69)
         self.assertEqual(outcome.error, "api failure: capability probe failed")
@@ -501,288 +523,140 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(worker["retryable_failures"], ["api"])
         self.assertEqual(worker["next_eligible_action"], "none")
 
-    def test_start_keeps_failed_dependency_blocker_when_capability_probe_fails(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
-                "build",
-                role="build",
-                prompt="Run the implementation",
-                status="failed",
-            )
-            store.upsert_worker(
-                "demo",
-                "review",
-                role="review",
-                prompt="Review the implementation",
-                dependencies=["build"],
-            )
-            store.upsert_worker(
-                "demo",
-                "docs",
-                role="write",
-                prompt="Draft the release notes",
-            )
-            client = FakeClient([])
-            detector_calls = []
+    def test_start_keeps_dependency_blocker_when_capability_probe_fails(self):
+        cases = [
+            {
+                "name": "failed_dependency",
+                "workers": [
+                    ("build", {"role": "build", "prompt": "Run the implementation", "status": "failed"}),
+                    ("review", {"role": "review", "prompt": "Review the implementation", "dependencies": ["build"]}),
+                    ("docs", {"role": "write", "prompt": "Draft the release notes"}),
+                ],
+                "status_assertions": {"build": "failed", "docs": "failed"},
+            },
+            {
+                "name": "missing_dependency",
+                "workers": [
+                    ("review", {"role": "review", "prompt": "Review the implementation", "dependencies": ["build"]}),
+                    ("docs", {"role": "write", "prompt": "Draft the release notes"}),
+                ],
+                "status_assertions": {"docs": "failed"},
+            },
+        ]
 
-            def detect_capabilities(client):
-                detector_calls.append(client)
-                raise OpenCodeApiError("capability probe failed")
+        for case in cases:
+            with self.subTest(case["name"]):
+                detector_calls = []
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=detect_capabilities,
-                executor=lambda *args, **kwargs: self.fail("blocked worker should not execute"),
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
+                def detect_capabilities(client):
+                    detector_calls.append(client)
+                    raise OpenCodeApiError("capability probe failed")
 
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
-            run = store.load_run("demo")
+                with MultiWorkerServiceScenario(self, capability_detector=detect_capabilities) as scenario:
+                    for worker_id, worker_changes in case["workers"]:
+                        scenario.add_worker(worker_id, **worker_changes)
 
-        self.assertEqual(outcome.exit_code, 69)
-        self.assertEqual(outcome.error, "api failure: capability probe failed")
-        self.assertEqual(detector_calls, [client])
-        self.assertEqual(client.requests, [])
-        self.assertEqual(run["status"], "failed")
-        self.assertEqual(run["workers"]["build"]["status"], "failed")
-        self.assertEqual(run["workers"]["docs"]["status"], "failed")
-        self.assertEqual(run["workers"]["docs"]["failure_category"], "api")
-        review = run["workers"]["review"]
-        self.assertEqual(review["status"], "blocked")
-        self.assertEqual(review["blockers"], ["dependency:build"])
-        self.assertEqual(review["next_eligible_action"], "resolve_blocker")
-        self.assertIsNone(review.get("failure_category"))
-        self.assertIsNone(review.get("error"))
+                    outcome = scenario.start("review", role="review")
+                    run = scenario.load_run()
 
-    def test_start_keeps_missing_dependency_blocker_when_capability_probe_fails(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
-                "review",
-                role="review",
-                prompt="Review the implementation",
-                dependencies=["build"],
-            )
-            store.upsert_worker(
-                "demo",
-                "docs",
-                role="write",
-                prompt="Draft the release notes",
-            )
-            client = FakeClient([])
-            detector_calls = []
-
-            def detect_capabilities(client):
-                detector_calls.append(client)
-                raise OpenCodeApiError("capability probe failed")
-
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=detect_capabilities,
-                executor=lambda *args, **kwargs: self.fail("blocked worker should not execute"),
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
-            run = store.load_run("demo")
-
-        self.assertEqual(outcome.exit_code, 69)
-        self.assertEqual(outcome.error, "api failure: capability probe failed")
-        self.assertEqual(detector_calls, [client])
-        self.assertEqual(client.requests, [])
-        self.assertEqual(run["status"], "failed")
-        self.assertEqual(run["workers"]["docs"]["status"], "failed")
-        self.assertEqual(run["workers"]["docs"]["failure_category"], "api")
-        review = run["workers"]["review"]
-        self.assertEqual(review["status"], "blocked")
-        self.assertEqual(review["blockers"], ["dependency:build"])
-        self.assertEqual(review["next_eligible_action"], "resolve_blocker")
-        self.assertIsNone(review.get("failure_category"))
-        self.assertIsNone(review.get("error"))
+                self.assertEqual(outcome.exit_code, 69)
+                self.assertEqual(outcome.error, "api failure: capability probe failed")
+                self.assertEqual(detector_calls, [scenario.client])
+                self.assertEqual(scenario.client.requests, [])
+                self.assertEqual(run["status"], "failed")
+                for worker_id, status in case["status_assertions"].items():
+                    self.assertEqual(run["workers"][worker_id]["status"], status)
+                self.assertEqual(run["workers"]["docs"]["failure_category"], "api")
+                self.assert_blocked_worker(run, "review", ["dependency:build"])
+                self.assertIsNone(run["workers"]["review"].get("failure_category"))
+                self.assertIsNone(run["workers"]["review"].get("error"))
 
     def test_start_blocks_failed_and_missing_dependency_chains_before_probe(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
-                "build",
-                role="build",
-                prompt="Run the implementation",
-                status="failed",
-            )
-            store.upsert_worker(
-                "demo",
-                "review",
-                role="review",
-                prompt="Review the implementation",
-                dependencies=["build"],
-            )
-            store.upsert_worker(
-                "demo",
-                "deploy",
-                role="deploy",
-                prompt="Deploy the reviewed implementation",
-                dependencies=["review"],
-            )
-            store.upsert_worker(
-                "demo",
-                "docs",
-                role="write",
-                prompt="Draft the docs",
-                dependencies=["missing"],
-            )
-            store.upsert_worker(
-                "demo",
-                "publish",
-                role="publish",
-                prompt="Publish the docs",
-                dependencies=["docs"],
-            )
-            client = FakeClient([])
+        with MultiWorkerServiceScenario(self) as scenario:
+            scenario.add_worker("build", role="build", prompt="Run the implementation", status="failed")
+            scenario.add_worker("review", role="review", prompt="Review the implementation", dependencies=["build"])
+            scenario.add_worker("deploy", role="deploy", prompt="Deploy the reviewed implementation", dependencies=["review"])
+            scenario.add_worker("docs", role="write", prompt="Draft the docs", dependencies=["missing"])
+            scenario.add_worker("publish", role="publish", prompt="Publish the docs", dependencies=["docs"])
             detector_calls = []
 
             def detect_capabilities(client):
                 detector_calls.append(client)
                 return CAPABILITIES
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=detect_capabilities,
-                executor=lambda *args, **kwargs: self.fail("locally blocked run should not execute workers"),
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="deploy", role="deploy"))
-            run = store.load_run("demo")
+            outcome = scenario.service(capability_detector=detect_capabilities).start(scenario.request("deploy"))
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 69)
         self.assertIsNone(outcome.error)
         self.assertEqual(detector_calls, [])
-        self.assertEqual(client.requests, [])
+        self.assertEqual(scenario.client.requests, [])
         self.assertEqual(run["status"], "failed")
         self.assertEqual(run["workers"]["build"]["status"], "failed")
-        self.assertEqual(run["workers"]["review"]["status"], "blocked")
-        self.assertEqual(run["workers"]["review"]["blockers"], ["dependency:build"])
-        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
-        self.assertEqual(run["workers"]["deploy"]["status"], "blocked")
-        self.assertEqual(run["workers"]["deploy"]["blockers"], ["dependency:review"])
-        self.assertEqual(run["workers"]["deploy"]["next_eligible_action"], "resolve_blocker")
-        self.assertEqual(run["workers"]["docs"]["status"], "blocked")
-        self.assertEqual(run["workers"]["docs"]["blockers"], ["dependency:missing"])
-        self.assertEqual(run["workers"]["docs"]["next_eligible_action"], "resolve_blocker")
-        self.assertEqual(run["workers"]["publish"]["status"], "blocked")
-        self.assertEqual(run["workers"]["publish"]["blockers"], ["dependency:docs"])
-        self.assertEqual(run["workers"]["publish"]["next_eligible_action"], "resolve_blocker")
+        self.assert_blocked_worker(run, "review", ["dependency:build"])
+        self.assert_blocked_worker(run, "deploy", ["dependency:review"])
+        self.assert_blocked_worker(run, "docs", ["dependency:missing"])
+        self.assert_blocked_worker(run, "publish", ["dependency:docs"])
 
     def test_start_blocks_only_failed_dependency_when_another_dependency_is_done(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
+        with MultiWorkerServiceScenario(self) as scenario:
+            scenario.add_worker(
                 "docs",
                 role="write",
                 prompt="Draft the release notes",
                 status="done",
                 output_refs=["assistant:msg_docs_assistant"],
             )
-            store.upsert_worker(
-                "demo",
+            scenario.add_worker(
                 "build",
                 role="build",
                 prompt="Run the implementation",
                 status="failed",
             )
-            store.upsert_worker(
-                "demo",
+            scenario.add_worker(
                 "review",
                 role="review",
                 prompt="Review the implementation",
                 dependencies=["docs", "build"],
             )
-            client = FakeClient([])
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=lambda client: CAPABILITIES,
-                executor=lambda *args, **kwargs: self.fail("blocked worker should not execute"),
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
-            run = store.load_run("demo")
+            outcome = scenario.start("review", role="review")
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 1)
-        self.assertEqual(client.requests, [])
+        self.assertEqual(scenario.client.requests, [])
         self.assertEqual(run["status"], "failed")
         self.assertEqual(run["output_refs"], ["docs:msg_docs_assistant"])
         self.assertEqual(run["workers"]["docs"]["status"], "done")
         self.assertEqual(run["workers"]["build"]["status"], "failed")
-        self.assertEqual(run["workers"]["review"]["status"], "blocked")
-        self.assertEqual(run["workers"]["review"]["blockers"], ["dependency:build"])
-        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+        self.assert_blocked_worker(run, "review", ["dependency:build"])
 
     def test_continue_policy_runs_independent_ready_worker_after_failure(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker("demo", "alpha", role="build", prompt="Run alpha")
-            store.upsert_worker("demo", "beta", role="write", prompt="Run beta")
-            client = FakeClient(["ses_alpha", "ses_beta"])
+        with MultiWorkerServiceScenario(self, session_ids=["ses_alpha", "ses_beta"]) as scenario:
+            scenario.add_worker("alpha", role="build", prompt="Run alpha")
+            scenario.add_worker("beta", role="write", prompt="Run beta")
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
                 if session_id == "ses_alpha":
                     raise BlockingProviderFailure("alpha failed", prompt_id="msg_alpha_user")
                 return {
-                    "session_id": session_id,
                     "message_ids": {"user": "msg_beta_user", "assistant": "msg_beta_assistant"},
                     "status": "done",
-                    "raw_status": "completed",
-                    "terminal_state": "done",
-                    "api_path": {"run": "/session/{sessionID}/run", "reply": "/session/{sessionID}/reply"},
-                    "execution_strategy": "legacy_run_reply",
-                    "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
-                    "cost": 0.02,
-                    "tokens": {"total": 12},
-                    "text": "Beta finished.",
                 }
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=lambda client: CAPABILITIES,
-                executor=execute_prompt,
-                now=lambda: "2026-07-03T00:00:00Z",
+            outcome = scenario.service(executor=execute_prompt).start(
+                scenario.request("alpha", role="build", execution_policy="continue")
             )
-
-            outcome = service.start(
-                DependencyOrderedSerialRunStartRequest(
-                    name="demo",
-                    worker_id="alpha",
-                    role="build",
-                    execution_policy="continue",
-                )
-            )
-            run = store.load_run("demo")
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 1)
         self.assertEqual(outcome.error, "provider failure: alpha failed")
         self.assertEqual(
-            client.requests,
+            scenario.client.requests,
             [
-                ("create", directory, None, None),
+                ("create", scenario.directory, None, None),
                 ("execute", "ses_alpha", "Run alpha"),
-                ("create", directory, None, None),
+                ("create", scenario.directory, None, None),
                 ("execute", "ses_beta", "Run beta"),
             ],
         )
@@ -792,11 +666,8 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
         self.assertEqual(run["workers"]["beta"]["output_refs"], ["assistant:msg_beta_assistant"])
 
     def test_start_does_not_probe_capabilities_when_partially_completed_cycle_blocks_worker(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
+        with MultiWorkerServiceScenario(self) as scenario:
+            scenario.add_worker(
                 "build",
                 role="build",
                 prompt="Run the implementation",
@@ -804,14 +675,12 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 dependencies=["review"],
                 output_refs=["assistant:msg_build_assistant"],
             )
-            store.upsert_worker(
-                "demo",
+            scenario.add_worker(
                 "review",
                 role="review",
                 prompt="Review the implementation",
                 dependencies=["build"],
             )
-            client = FakeClient([])
             detector_calls = []
             executions = []
 
@@ -823,38 +692,22 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 executions.append((session_id, prompt))
                 self.fail("locally blocked run should not execute workers")
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=detect_capabilities,
-                executor=execute_prompt,
-                now=lambda: "2026-07-03T00:00:00Z",
+            outcome = scenario.service(capability_detector=detect_capabilities, executor=execute_prompt).start(
+                scenario.request("review", role="review")
             )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
-            run = store.load_run("demo")
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 75)
         self.assertEqual(detector_calls, [])
-        self.assertEqual(client.requests, [])
+        self.assertEqual(scenario.client.requests, [])
         self.assertEqual(executions, [])
         self.assertEqual(run["status"], "blocked")
         self.assertEqual(run["workers"]["build"]["status"], "done")
-        self.assertEqual(run["workers"]["review"]["status"], "blocked")
-        self.assertEqual(run["workers"]["review"]["blockers"], ["dependency-cycle:build->review->build"])
-        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+        self.assert_blocked_worker(run, "review", ["dependency-cycle:build->review->build"])
 
     def test_start_does_not_execute_blocked_worker_after_dependency_succeeds(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
-                "build",
-                role="build",
-                prompt="Run the implementation",
-            )
-            client = FakeClient(["ses_build"])
+        with MultiWorkerServiceScenario(self, session_ids=["ses_build"]) as scenario:
+            scenario.add_worker("build", role="build", prompt="Run the implementation")
             executions = []
 
             def execute_prompt(client, session_id, prompt, capabilities):
@@ -867,19 +720,11 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                     "status": "done",
                 }
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=lambda client: CAPABILITIES,
-                executor=execute_prompt,
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            first_outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="build", role="build"))
-            requests_after_first_start = list(client.requests)
+            service = scenario.service(executor=execute_prompt)
+            first_outcome = service.start(scenario.request("build", role="build"))
+            requests_after_first_start = list(scenario.client.requests)
             executions_after_first_start = list(executions)
-            store.upsert_worker(
-                "demo",
+            scenario.add_worker(
                 "review",
                 role="review",
                 prompt="Review the implementation",
@@ -889,36 +734,30 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 blockers=["manual:blocker"],
             )
 
-            second_outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
-            run = store.load_run("demo")
+            second_outcome = service.start(scenario.request("review", role="review"))
+            run = scenario.load_run()
 
         self.assertEqual(first_outcome.exit_code, 0)
         self.assertEqual(second_outcome.exit_code, 75)
-        self.assertEqual(requests_after_first_start, [("create", directory, None, None)])
+        self.assertEqual(requests_after_first_start, [("create", scenario.directory, None, None)])
         self.assertEqual(executions_after_first_start, [("ses_build", "Run the implementation")])
-        self.assertEqual(client.requests, requests_after_first_start)
+        self.assertEqual(scenario.client.requests, requests_after_first_start)
         self.assertEqual(executions, executions_after_first_start)
         self.assertEqual(run["status"], "blocked")
         self.assertEqual(run["output_refs"], ["build:msg_build_assistant"])
         self.assertEqual(run["workers"]["build"]["status"], "done")
-        self.assertEqual(run["workers"]["review"]["status"], "blocked")
-        self.assertEqual(run["workers"]["review"]["blockers"], ["manual:blocker"])
-        self.assertEqual(run["workers"]["review"]["next_eligible_action"], "resolve_blocker")
+        self.assert_blocked_worker(run, "review", ["manual:blocker"])
 
     def test_start_requeued_worker_finishes_without_stale_status_metadata(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = RunStore(store_root)
-            store.create_run("demo", directory=directory, server_url="http://opencode.example")
-            store.upsert_worker(
-                "demo",
+        with MultiWorkerServiceScenario(self) as scenario:
+            scenario.add_worker(
                 "build",
                 role="build",
                 prompt="Run the implementation",
                 status="done",
                 output_refs=["assistant:msg_build_assistant"],
             )
-            store.upsert_worker(
-                "demo",
+            scenario.add_worker(
                 "review",
                 role="review",
                 prompt="Review the implementation",
@@ -937,8 +776,7 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                 worker["last_failure_category"] = "api"
                 worker["last_failure_reason"] = "previous failure"
 
-            store.update_run("demo", seed_stale_metadata)
-            client = FakeClient([])
+            scenario.store.update_run(RUN_NAME, seed_stale_metadata)
             executions = []
 
             def execute_prompt(client, session_id, prompt, capabilities):
@@ -949,16 +787,8 @@ class MultiWorkerOrchestrationServiceTest(unittest.TestCase):
                     "status": "done",
                 }
 
-            service = DependencyOrderedSerialRunOrchestrationService(
-                store,
-                client_factory=lambda url: client,
-                capability_detector=lambda client: CAPABILITIES,
-                executor=execute_prompt,
-                now=lambda: "2026-07-03T00:00:00Z",
-            )
-
-            outcome = service.start(DependencyOrderedSerialRunStartRequest(name="demo", worker_id="review", role="review"))
-            run = store.load_run("demo")
+            outcome = scenario.service(executor=execute_prompt).start(scenario.request("review", role="review"))
+            run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertEqual(executions, [("ses_review", "Review the implementation")])

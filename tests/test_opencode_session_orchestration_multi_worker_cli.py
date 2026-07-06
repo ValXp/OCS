@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import tempfile
 import unittest
 
@@ -9,65 +10,83 @@ except ModuleNotFoundError:
     from orchestration_cli_harness import configure_multi_worker_server, payloads_for, request_paths
 
 
+@dataclass
+class CliScenarioResult:
+    start: object
+    payload: dict
+    requests: list
+    directory: str
+
+
 class MultiWorkerOrchestrationCliTest(unittest.TestCase):
-    def test_start_executes_each_ready_worker_through_blocking_executor(self):
+    def run_multi_worker_scenario(self, workers, *, server_config=None, start_args=()):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(server)
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
+                configure_multi_worker_server(server, **(server_config or {}))
+                self.assert_cli_success(
+                    run_ocs(
+                        "run",
+                        "--store",
+                        store,
+                        "init",
+                        "demo",
+                        "--directory",
+                        directory,
+                        "--server",
+                        server.url,
+                    ),
                     "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
                 )
-                planner = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "planner",
-                    "--role",
-                    "plan",
-                    "--prompt",
-                    "Create the implementation plan",
-                    "--agent",
-                    "plan",
-                    "--model",
-                    "openai/gpt-5.5",
-                )
-                docs = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "docs",
-                    "--role",
-                    "write",
-                    "--prompt",
-                    "Draft the release notes",
-                    "--agent",
-                    "build",
-                    "--model",
-                    "openai/gpt-5.5-mini",
-                )
-                start = run_ocs("run", "--store", store, "start", "demo")
+                for worker in workers:
+                    self.assert_cli_success(run_ocs(*self.worker_command(store, worker)), f"worker {worker['id']}")
+                start = run_ocs("run", "--store", store, "start", "demo", *start_args)
                 requests = list(server.requests)
             status = run_ocs("run", "--store", store, "status", "demo", "--json")
+            self.assert_cli_success(status, "status")
+            payload = load_json(self, status, "status")
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(planner.returncode, 0, format_completed_process(planner))
-        self.assertEqual(docs.returncode, 0, format_completed_process(docs))
-        self.assertEqual(start.returncode, 0, format_completed_process(start))
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
+        return CliScenarioResult(start=start, payload=payload, requests=requests, directory=directory)
+
+    def worker_command(self, store, worker):
+        args = ["run", "--store", store, "worker", "demo", worker["id"], "--role", worker["role"]]
+        if "prompt" in worker and worker["prompt"] is not None:
+            args.extend(["--prompt", worker["prompt"]])
+        for key, flag in (("agent", "--agent"), ("model", "--model"), ("session", "--session"), ("status", "--status")):
+            if worker.get(key) is not None:
+                args.extend([flag, worker[key]])
+        dependencies = worker.get("depends_on", ())
+        if isinstance(dependencies, str):
+            dependencies = (dependencies,)
+        for dependency in dependencies:
+            args.extend(["--depends-on", dependency])
+        return args
+
+    def assert_cli_success(self, result, description):
+        self.assertEqual(result.returncode, 0, f"{description} failed\n{format_completed_process(result)}")
+
+    def test_start_executes_each_ready_worker_through_blocking_executor(self):
+        scenario = self.run_multi_worker_scenario(
+            [
+                {
+                    "id": "planner",
+                    "role": "plan",
+                    "prompt": "Create the implementation plan",
+                    "agent": "plan",
+                    "model": "openai/gpt-5.5",
+                },
+                {
+                    "id": "docs",
+                    "role": "write",
+                    "prompt": "Draft the release notes",
+                    "agent": "build",
+                    "model": "openai/gpt-5.5-mini",
+                },
+            ]
+        )
+
+        self.assertEqual(scenario.start.returncode, 0, format_completed_process(scenario.start))
         self.assertEqual(
-            request_paths(requests)[2:],
+            request_paths(scenario.requests)[2:],
             [
                 ("POST", "/api/session"),
                 ("POST", "/session/ses_docs/run"),
@@ -78,14 +97,14 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            payloads_for(requests, "POST", "/api/session"),
+            payloads_for(scenario.requests, "POST", "/api/session"),
             [
-                {"location": {"directory": directory}, "agent": "build", "model": "openai/gpt-5.5-mini"},
-                {"location": {"directory": directory}, "agent": "plan", "model": "openai/gpt-5.5"},
+                {"location": {"directory": scenario.directory}, "agent": "build", "model": "openai/gpt-5.5-mini"},
+                {"location": {"directory": scenario.directory}, "agent": "plan", "model": "openai/gpt-5.5"},
             ],
         )
-        self.assertIn("run=demo status=done", start.stdout)
-        payload = load_json(self, status, "status")
+        self.assertIn("run=demo status=done", scenario.start.stdout)
+        payload = scenario.payload
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["output_refs"], ["docs:msg_docs_assistant", "planner:msg_plan_assistant"])
         self.assertEqual(payload["workers"]["planner"]["status"], "done")
@@ -100,217 +119,100 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["docs"]["result"]["text"], "Docs ready.")
 
     def test_start_with_cleanup_deletes_created_worker_sessions_and_records_cleanup(self):
-        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(server)
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
-                )
-                planner = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "planner",
-                    "--role",
-                    "plan",
-                    "--prompt",
-                    "Create the implementation plan",
-                )
-                docs = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "docs",
-                    "--role",
-                    "write",
-                    "--prompt",
-                    "Draft the release notes",
-                )
-                start = run_ocs("run", "--store", store, "start", "demo", "--cleanup")
-                requests = list(server.requests)
-            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+        scenario = self.run_multi_worker_scenario(
+            [
+                {"id": "planner", "role": "plan", "prompt": "Create the implementation plan"},
+                {"id": "docs", "role": "write", "prompt": "Draft the release notes"},
+            ],
+            start_args=("--cleanup",),
+        )
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(planner.returncode, 0, format_completed_process(planner))
-        self.assertEqual(docs.returncode, 0, format_completed_process(docs))
-        self.assertEqual(start.returncode, 0, format_completed_process(start))
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
-        payload = load_json(self, status, "status")
+        self.assertEqual(scenario.start.returncode, 0, format_completed_process(scenario.start))
+        payload = scenario.payload
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["workers"]["docs"]["status"], "done")
         self.assertEqual(payload["workers"]["docs"]["cleanup"], {"requested": True, "deleted": True})
         self.assertEqual(payload["workers"]["planner"]["status"], "done")
         self.assertEqual(payload["workers"]["planner"]["cleanup"], {"requested": True, "deleted": True})
-        self.assertEqual(payloads_for(requests, "DELETE", "/api/session/ses_docs"), [None])
-        self.assertEqual(payloads_for(requests, "DELETE", "/api/session/ses_plan"), [None])
+        self.assertEqual(payloads_for(scenario.requests, "DELETE", "/api/session/ses_docs"), [None])
+        self.assertEqual(payloads_for(scenario.requests, "DELETE", "/api/session/ses_plan"), [None])
 
     def test_start_with_cleanup_does_not_delete_preexisting_worker_sessions(self):
-        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(
-                    server,
-                    session_ids=["ses_unused"],
-                    run_payloads={
-                        "ses_metadata": {"id": "msg_metadata_user", "status": "submitted"},
-                        "ses_argument": {"id": "msg_argument_user", "status": "submitted"},
+        scenario = self.run_multi_worker_scenario(
+            [
+                {
+                    "id": "metadata",
+                    "role": "build",
+                    "prompt": "Use the stored session",
+                    "session": "ses_metadata",
+                },
+                {"id": "argument", "role": "review", "prompt": "Use the session passed to start"},
+            ],
+            server_config={
+                "session_ids": ["ses_unused"],
+                "run_payloads": {
+                    "ses_metadata": {"id": "msg_metadata_user", "status": "submitted"},
+                    "ses_argument": {"id": "msg_argument_user", "status": "submitted"},
+                },
+                "reply_payloads": {
+                    "ses_metadata": {
+                        "id": "msg_metadata_assistant",
+                        "status": "completed",
+                        "text": "Metadata worker done.",
                     },
-                    reply_payloads={
-                        "ses_metadata": {
-                            "id": "msg_metadata_assistant",
-                            "status": "completed",
-                            "text": "Metadata worker done.",
-                        },
-                        "ses_argument": {
-                            "id": "msg_argument_assistant",
-                            "status": "completed",
-                            "text": "Argument worker done.",
-                        },
+                    "ses_argument": {
+                        "id": "msg_argument_assistant",
+                        "status": "completed",
+                        "text": "Argument worker done.",
                     },
-                )
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
-                )
-                metadata = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "metadata",
-                    "--role",
-                    "build",
-                    "--prompt",
-                    "Use the stored session",
-                    "--session",
-                    "ses_metadata",
-                )
-                argument = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "argument",
-                    "--role",
-                    "review",
-                    "--prompt",
-                    "Use the session passed to start",
-                )
-                start = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "start",
-                    "demo",
-                    "--worker",
-                    "argument",
-                    "--session",
-                    "ses_argument",
-                    "--cleanup",
-                )
-                requests = list(server.requests)
-            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+                },
+            },
+            start_args=("--worker", "argument", "--session", "ses_argument", "--cleanup"),
+        )
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(metadata.returncode, 0, format_completed_process(metadata))
-        self.assertEqual(argument.returncode, 0, format_completed_process(argument))
-        self.assertEqual(start.returncode, 0, format_completed_process(start))
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
-        payload = load_json(self, status, "status")
+        self.assertEqual(scenario.start.returncode, 0, format_completed_process(scenario.start))
+        payload = scenario.payload
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["workers"]["metadata"]["session_id"], "ses_metadata")
         self.assertEqual(payload["workers"]["metadata"]["status"], "done")
         self.assertEqual(payload["workers"]["argument"]["session_id"], "ses_argument")
         self.assertEqual(payload["workers"]["argument"]["status"], "done")
-        self.assertEqual(payloads_for(requests, "POST", "/api/session"), [])
-        self.assertFalse(any(method == "DELETE" for method, _path, _payload in requests))
+        self.assertEqual(payloads_for(scenario.requests, "POST", "/api/session"), [])
+        self.assertFalse(any(method == "DELETE" for method, _path, _payload in scenario.requests))
 
     def test_start_blocks_dependent_worker_when_prerequisite_fails(self):
-        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(
-                    server,
-                    session_ids=["ses_build"],
-                    run_payloads={"ses_build": {"id": "msg_build_user", "status": "failed", "error": "tests failed"}},
-                    reply_payloads={},
-                )
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
-                )
-                build = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "build",
-                    "--role",
-                    "build",
-                    "--prompt",
-                    "Run the implementation",
-                )
-                review = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "review",
-                    "--role",
-                    "review",
-                    "--prompt",
-                    "Review the implementation",
-                    "--depends-on",
-                    "build",
-                )
-                start = run_ocs("run", "--store", store, "start", "demo")
-                requests = list(server.requests)
-            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+        scenario = self.run_multi_worker_scenario(
+            [
+                {"id": "build", "role": "build", "prompt": "Run the implementation"},
+                {
+                    "id": "review",
+                    "role": "review",
+                    "prompt": "Review the implementation",
+                    "depends_on": ["build"],
+                },
+            ],
+            server_config={
+                "session_ids": ["ses_build"],
+                "run_payloads": {"ses_build": {"id": "msg_build_user", "status": "failed", "error": "tests failed"}},
+                "reply_payloads": {},
+            },
+        )
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(build.returncode, 0, format_completed_process(build))
-        self.assertEqual(review.returncode, 0, format_completed_process(review))
-        self.assertEqual(start.returncode, 69)
-        self.assertIn("provider failure", start.stderr)
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
+        self.assertEqual(scenario.start.returncode, 69)
+        self.assertIn("provider failure", scenario.start.stderr)
         self.assertEqual(
-            [path for path in request_paths(requests) if path[0] == "POST"],
+            [path for path in request_paths(scenario.requests) if path[0] == "POST"],
             [
                 ("POST", "/api/session"),
                 ("POST", "/session/ses_build/run"),
             ],
         )
-        self.assertEqual(payloads_for(requests, "POST", "/api/session"), [{"location": {"directory": directory}}])
-        self.assertEqual(payloads_for(requests, "POST", "/session/ses_build/run"), [{"message": "Run the implementation"}])
-        payload = load_json(self, status, "status")
+        self.assertEqual(payloads_for(scenario.requests, "POST", "/api/session"), [{"location": {"directory": scenario.directory}}])
+        self.assertEqual(
+            payloads_for(scenario.requests, "POST", "/session/ses_build/run"),
+            [{"message": "Run the implementation"}],
+        )
+        payload = scenario.payload
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["output_refs"], [])
         self.assertEqual(payload["workers"]["build"]["status"], "failed")
@@ -320,60 +222,22 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["blockers"], ["dependency:build"])
 
     def test_start_persists_dependency_blocking_when_prerequisite_is_already_failed(self):
-        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(server)
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
-                )
-                build = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "build",
-                    "--role",
-                    "build",
-                    "--prompt",
-                    "Run the implementation",
-                    "--status",
-                    "failed",
-                )
-                review = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "review",
-                    "--role",
-                    "review",
-                    "--prompt",
-                    "Review the implementation",
-                    "--depends-on",
-                    "build",
-                )
-                start = run_ocs("run", "--store", store, "start", "demo")
-                requests = list(server.requests)
-            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+        scenario = self.run_multi_worker_scenario(
+            [
+                {"id": "build", "role": "build", "prompt": "Run the implementation", "status": "failed"},
+                {
+                    "id": "review",
+                    "role": "review",
+                    "prompt": "Review the implementation",
+                    "depends_on": ["build"],
+                },
+            ]
+        )
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(build.returncode, 0, format_completed_process(build))
-        self.assertEqual(review.returncode, 0, format_completed_process(review))
-        self.assertEqual(start.returncode, 69)
-        self.assertIn("run=demo status=failed", start.stdout)
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
-        self.assertFalse(any(method == "POST" for method, _path, _payload in requests))
-        payload = load_json(self, status, "status")
+        self.assertEqual(scenario.start.returncode, 69)
+        self.assertIn("run=demo status=failed", scenario.start.stdout)
+        self.assertFalse(any(method == "POST" for method, _path, _payload in scenario.requests))
+        payload = scenario.payload
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["workers"]["build"]["status"], "failed")
         self.assertEqual(payload["workers"]["review"]["status"], "blocked")
@@ -381,60 +245,17 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_blocks_workers_in_dependency_cycle(self):
-        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(server)
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
-                )
-                worker_a = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "a",
-                    "--role",
-                    "build",
-                    "--prompt",
-                    "Run worker A",
-                    "--depends-on",
-                    "b",
-                )
-                worker_b = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "b",
-                    "--role",
-                    "review",
-                    "--prompt",
-                    "Run worker B",
-                    "--depends-on",
-                    "a",
-                )
-                start = run_ocs("run", "--store", store, "start", "demo")
-                requests = list(server.requests)
-            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+        scenario = self.run_multi_worker_scenario(
+            [
+                {"id": "a", "role": "build", "prompt": "Run worker A", "depends_on": ["b"]},
+                {"id": "b", "role": "review", "prompt": "Run worker B", "depends_on": ["a"]},
+            ]
+        )
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(worker_a.returncode, 0, format_completed_process(worker_a))
-        self.assertEqual(worker_b.returncode, 0, format_completed_process(worker_b))
-        self.assertEqual(start.returncode, 75)
-        self.assertIn("run=demo status=blocked", start.stdout)
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
-        self.assertFalse(any(path[0] == "POST" for path in request_paths(requests)))
-        payload = load_json(self, status, "status")
+        self.assertEqual(scenario.start.returncode, 75)
+        self.assertIn("run=demo status=blocked", scenario.start.stdout)
+        self.assertFalse(any(path[0] == "POST" for path in request_paths(scenario.requests)))
+        payload = scenario.payload
         self.assertEqual(payload["status"], "blocked")
         self.assertEqual(payload["workers"]["a"]["status"], "blocked")
         self.assertEqual(payload["workers"]["a"]["blockers"], ["dependency-cycle:a->b->a"])
@@ -444,56 +265,22 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["b"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_blocks_prompted_worker_waiting_on_unprompted_worker(self):
-        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(server)
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
-                )
-                setup = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "setup",
-                    "--role",
-                    "build",
-                )
-                review = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "review",
-                    "--role",
-                    "review",
-                    "--prompt",
-                    "Review the implementation",
-                    "--depends-on",
-                    "setup",
-                )
-                start = run_ocs("run", "--store", store, "start", "demo")
-                requests = list(server.requests)
-            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+        scenario = self.run_multi_worker_scenario(
+            [
+                {"id": "setup", "role": "build"},
+                {
+                    "id": "review",
+                    "role": "review",
+                    "prompt": "Review the implementation",
+                    "depends_on": ["setup"],
+                },
+            ]
+        )
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(setup.returncode, 0, format_completed_process(setup))
-        self.assertEqual(review.returncode, 0, format_completed_process(review))
-        self.assertEqual(start.returncode, 75)
-        self.assertIn("run=demo status=blocked", start.stdout)
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
-        self.assertFalse(any(path[0] == "POST" for path in request_paths(requests)))
-        payload = load_json(self, status, "status")
+        self.assertEqual(scenario.start.returncode, 75)
+        self.assertIn("run=demo status=blocked", scenario.start.stdout)
+        self.assertFalse(any(path[0] == "POST" for path in request_paths(scenario.requests)))
+        payload = scenario.payload
         self.assertEqual(payload["status"], "blocked")
         self.assertEqual(payload["workers"]["setup"]["status"], "queued")
         self.assertEqual(payload["workers"]["setup"].get("prompt"), None)
@@ -502,71 +289,33 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(payload["workers"]["review"]["next_eligible_action"], "resolve_blocker")
 
     def test_start_returns_partial_failure_exit_code_when_some_workers_complete_before_failure(self):
-        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
-            with FakeOpenCodeServer() as server:
-                configure_multi_worker_server(
-                    server,
-                    session_ids=["ses_docs", "ses_plan"],
-                    run_payloads={
-                        "ses_docs": {"id": "msg_docs_user", "status": "submitted"},
-                        "ses_plan": {"id": "msg_plan_user", "status": "submitted"},
+        scenario = self.run_multi_worker_scenario(
+            [
+                {"id": "docs", "role": "write", "prompt": "Draft the release notes"},
+                {"id": "planner", "role": "plan", "prompt": "Create the implementation plan"},
+            ],
+            server_config={
+                "session_ids": ["ses_docs", "ses_plan"],
+                "run_payloads": {
+                    "ses_docs": {"id": "msg_docs_user", "status": "submitted"},
+                    "ses_plan": {"id": "msg_plan_user", "status": "submitted"},
+                },
+                "reply_payloads": {
+                    "ses_docs": {
+                        "id": "msg_docs_assistant",
+                        "status": "completed",
+                        "cost": 0.02,
+                        "tokens": {"total": 17},
+                        "text": "Docs ready.",
                     },
-                    reply_payloads={
-                        "ses_docs": {
-                            "id": "msg_docs_assistant",
-                            "status": "completed",
-                            "cost": 0.02,
-                            "tokens": {"total": 17},
-                            "text": "Docs ready.",
-                        },
-                        "ses_plan": {"id": "msg_plan_assistant", "status": "failed", "error": "planner failed"},
-                    },
-                )
-                init = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "init",
-                    "demo",
-                    "--directory",
-                    directory,
-                    "--server",
-                    server.url,
-                )
-                docs = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "docs",
-                    "--role",
-                    "write",
-                    "--prompt",
-                    "Draft the release notes",
-                )
-                planner = run_ocs(
-                    "run",
-                    "--store",
-                    store,
-                    "worker",
-                    "demo",
-                    "planner",
-                    "--role",
-                    "plan",
-                    "--prompt",
-                    "Create the implementation plan",
-                )
-                start = run_ocs("run", "--store", store, "start", "demo")
-            status = run_ocs("run", "--store", store, "status", "demo", "--json")
+                    "ses_plan": {"id": "msg_plan_assistant", "status": "failed", "error": "planner failed"},
+                },
+            },
+        )
 
-        self.assertEqual(init.returncode, 0, format_completed_process(init))
-        self.assertEqual(docs.returncode, 0, format_completed_process(docs))
-        self.assertEqual(planner.returncode, 0, format_completed_process(planner))
-        self.assertEqual(start.returncode, 1)
-        self.assertIn("planner failed", start.stderr)
-        self.assertEqual(status.returncode, 0, format_completed_process(status))
-        payload = load_json(self, status, "status")
+        self.assertEqual(scenario.start.returncode, 1)
+        self.assertIn("planner failed", scenario.start.stderr)
+        payload = scenario.payload
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["output_refs"], ["docs:msg_docs_assistant"])
         self.assertEqual(payload["workers"]["docs"]["status"], "done")
