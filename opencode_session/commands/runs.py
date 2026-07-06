@@ -13,8 +13,7 @@ from opencode_session.run_record import run_record_for_output
 from opencode_session.run_services import RunCommandService, RunStartRequest, RunWorkerSessionNotFound
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root
 from opencode_session.session_lifecycle import format_abort_compact
-from opencode_session.status import short_status
-from opencode_session.worker_state import worker_field, worker_lifecycle_state_for_status_alias
+from opencode_session.worker_state import worker_field
 
 def add_run_parser(subparsers, *, add_server_argument, positive_float, handler):
     parser = subparsers.add_parser("run", help="manage local orchestration runs")
@@ -269,16 +268,6 @@ def _positive_timeout_seconds(value, positive_float):
     if timeout.is_integer():
         return int(timeout)
     return timeout
-
-
-def _lifecycle_state_from_status_alias(status):
-    if status is None:
-        return None
-    public_status = short_status(status)
-    lifecycle_state = worker_lifecycle_state_for_status_alias(public_status)
-    if lifecycle_state is None:
-        raise RunStoreError(f"unsupported worker status: {status}")
-    return lifecycle_state
 
 
 def _error_result(args, message, exit_code, print_error):
