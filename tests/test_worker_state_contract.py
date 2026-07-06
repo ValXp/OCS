@@ -434,6 +434,42 @@ class WorkerStateContractTest(unittest.TestCase):
         assert_worker_outcome(self, result_worker, status="done", action="collect", lifecycle="done_collect")
         self.assertEqual(result_worker["output_refs"], ["assistant:msg_assistant"])
 
+    def test_worker_transition_definitions_are_complete_and_cohesive(self):
+        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS
+
+        self.assertEqual(set(WorkerTransitionName), set(_WORKER_TRANSITION_DEFINITIONS))
+        for transition_name, definition in _WORKER_TRANSITION_DEFINITIONS.items():
+            with self.subTest(transition=transition_name):
+                self.assertIs(definition.name, transition_name)
+                self.assertIsInstance(definition.source_states, frozenset)
+                self.assertIsInstance(definition.target_states, frozenset)
+                self.assertTrue(callable(definition.apply_transition))
+
+    def test_retry_transition_definition_carries_legality_target_and_behavior(self):
+        from opencode_session.worker_lifecycle_reducer import _WORKER_TRANSITION_DEFINITIONS
+
+        worker = normalize_worker(
+            {
+                "status": "failed",
+                "failure_category": "provider",
+                "retryable_failures": ["provider"],
+                "retry_count": 0,
+                "retry_limit": 1,
+            },
+            "review",
+        )
+        transition = schedule_worker_retry(worker, "provider", "try again")
+        definition = _WORKER_TRANSITION_DEFINITIONS[transition.name]
+        target_lifecycle = definition.target_lifecycle_state(transition)
+
+        self.assertIn(worker_lifecycle_state(worker), definition.source_states)
+        self.assertEqual(target_lifecycle, "active_retry")
+        self.assertIn(target_lifecycle, definition.target_states)
+
+        apply_worker_transition_to_worker(worker, transition)
+
+        self.assertEqual(worker_lifecycle_state(worker), target_lifecycle)
+
     def test_snapshot_replay_allows_legal_active_to_done_transition(self):
         worker = normalize_worker({"status": "active", "prompt_ids": ["msg_initial"]}, "review")
         snapshot = normalize_worker_snapshot(

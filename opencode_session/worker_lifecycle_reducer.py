@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import dataclass
 
 from opencode_session.status import short_status
 from opencode_session.worker_attempt_log import _append_attempt, _finalize_attempt
@@ -35,6 +36,29 @@ from opencode_session.worker_state import (
 )
 
 
+@dataclass(frozen=True)
+class WorkerTransitionDefinition:
+    name: WorkerTransitionName
+    source_states: frozenset
+    target_states: frozenset
+    apply_transition: object
+    target_lifecycle: object = None
+    is_legal_transition: object = None
+
+    def is_legal(self, latest_worker, transition):
+        if self.is_legal_transition is not None:
+            return self.is_legal_transition(latest_worker, transition)
+        return worker_lifecycle_state(latest_worker) in self.source_states
+
+    def apply(self, reducer, transition):
+        return self.apply_transition(reducer, transition)
+
+    def target_lifecycle_state(self, transition):
+        if callable(self.target_lifecycle):
+            return self.target_lifecycle(transition)
+        return self.target_lifecycle
+
+
 class WorkerLifecycleReducer:
     def __init__(self, record):
         self.record = record
@@ -43,9 +67,10 @@ class WorkerLifecycleReducer:
     def apply(self, transition):
         if not isinstance(transition.name, WorkerTransitionName):
             raise ValueError(f"unknown worker transition: {transition.name}")
-        if not self._transition_is_legal(transition):
+        definition = _worker_transition_definition(transition.name)
+        if not self._has_accepted_abort() and not definition.is_legal(self.latest_worker, transition):
             return self._unchanged_worker(transition)
-        worker = _WORKER_TRANSITION_APPLIERS[transition.name](self, transition)
+        worker = definition.apply(self, transition)
         _finalize_worker_attempt(worker, transition.attempt_finalization)
         return WorkerRecord.from_worker(worker, self.record.worker_id or transition.worker_id).to_worker()
 
@@ -69,7 +94,7 @@ class WorkerLifecycleReducer:
         if self._has_accepted_abort():
             return worker
         _clear_current_status_fields(worker)
-        worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_ACTIVE_WAIT))
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, _transition_target_lifecycle_state(transition)))
         _set_if_not_unset(worker, "timeout_started_at", payload.timeout_started_at)
         if payload.clear_prompt_ids:
             worker["prompt_ids"] = []
@@ -86,12 +111,7 @@ class WorkerLifecycleReducer:
         if self._has_accepted_abort():
             self._merge_prompt_ids(worker, payload.prompt_ids)
             return worker
-        lifecycle_state = (
-            WORKER_LIFECYCLE_FAILED_RETRY
-            if payload.retryable and payload.retry_available
-            else WORKER_LIFECYCLE_FAILED_TERMINAL
-        )
-        worker.update(worker_lifecycle_set_fields(transition.worker_id, lifecycle_state))
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, _transition_target_lifecycle_state(transition)))
         worker.update(
             {
                 "error": payload.reason,
@@ -114,7 +134,7 @@ class WorkerLifecycleReducer:
         worker = self._copy_latest()
         if self._has_accepted_abort():
             return worker
-        worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_BLOCKED_DEPENDENCY))
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, _transition_target_lifecycle_state(transition)))
         worker["blockers"] = list(transition.payload.blockers)
         return worker
 
@@ -126,7 +146,7 @@ class WorkerLifecycleReducer:
         worker["id"] = transition.worker_id
         worker["abort"] = deepcopy(payload.abort)
         if _abort_is_accepted(payload.abort):
-            worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_ABORTED))
+            worker.update(worker_lifecycle_set_fields(transition.worker_id, _transition_target_lifecycle_state(transition)))
         return worker
 
     def retry_scheduled(self, transition):
@@ -136,7 +156,7 @@ class WorkerLifecycleReducer:
             self._merge_prompt_ids(worker, payload.prompt_ids)
             return worker
         _clear_current_status_fields(worker)
-        worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_ACTIVE_RETRY))
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, _transition_target_lifecycle_state(transition)))
         worker.update(
             {
                 "retry_count": payload.retry_count,
@@ -153,12 +173,7 @@ class WorkerLifecycleReducer:
         worker = self._copy_latest()
         if self._has_accepted_abort():
             return worker
-        worker.update(
-            worker_lifecycle_set_fields(
-                transition.worker_id,
-                _timeout_lifecycle_state(payload.status, payload.retry_available),
-            )
-        )
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, _transition_target_lifecycle_state(transition)))
         worker.update(
             {
                 "error": payload.reason,
@@ -186,7 +201,7 @@ class WorkerLifecycleReducer:
             self._merge_prompt_ids(worker, payload.prompt_ids)
             return worker
         status = short_status(payload.result["status"])
-        worker.update(worker_lifecycle_set_fields(transition.worker_id, _result_lifecycle_state(status)))
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, _transition_target_lifecycle_state(transition)))
         worker["result"] = deepcopy(payload.result)
         _set_if_not_unset(worker, "timeout_started_at", payload.timeout_started_at)
         if status == WORKER_STATUS_DONE:
@@ -237,16 +252,6 @@ class WorkerLifecycleReducer:
     def _unchanged_worker(self, transition):
         return WorkerRecord.from_worker(self.latest_worker, self.record.worker_id or transition.worker_id).to_worker()
 
-    def _transition_is_legal(self, transition):
-        if self._has_accepted_abort():
-            return True
-        if transition.name == WorkerTransitionName.SNAPSHOT_APPLIED:
-            return _snapshot_transition_is_legal(self.latest_worker, transition)
-        return worker_lifecycle_state(self.latest_worker) in _WORKER_TRANSITION_SOURCE_STATES.get(
-            transition.name,
-            frozenset(),
-        )
-
     def _has_accepted_abort(self):
         return _accepted_abort(self.latest_worker)
 
@@ -279,20 +284,6 @@ def _snapshot_transition_lifecycle_state(transition):
     return WORKER_LIFECYCLE_QUEUED
 
 
-_WORKER_TRANSITION_APPLIERS = {
-    WorkerTransitionName.PROVISIONED: WorkerLifecycleReducer.provisioned,
-    WorkerTransitionName.ACTIVE: WorkerLifecycleReducer.active,
-    WorkerTransitionName.ATTEMPT_STARTED: WorkerLifecycleReducer.attempt_started,
-    WorkerTransitionName.FAILED: WorkerLifecycleReducer.failed,
-    WorkerTransitionName.DEPENDENCY_BLOCKED: WorkerLifecycleReducer.dependency_blocked,
-    WorkerTransitionName.ABORTED: WorkerLifecycleReducer.aborted,
-    WorkerTransitionName.RETRY_SCHEDULED: WorkerLifecycleReducer.retry_scheduled,
-    WorkerTransitionName.TIMED_OUT: WorkerLifecycleReducer.timed_out,
-    WorkerTransitionName.RESULT_APPLIED: WorkerLifecycleReducer.result_applied,
-    WorkerTransitionName.CLEANUP_UPDATED: WorkerLifecycleReducer.cleanup_updated,
-    WorkerTransitionName.SNAPSHOT_APPLIED: WorkerLifecycleReducer.snapshot_applied,
-}
-
 _WORKER_EXECUTABLE_LIFECYCLE_STATES = frozenset(
     {
         WORKER_LIFECYCLE_QUEUED,
@@ -319,58 +310,139 @@ _WORKER_ABORT_SOURCE_STATES = frozenset(
     }
 )
 
-_WORKER_TRANSITION_SOURCE_STATES = {
-    WorkerTransitionName.PROVISIONED: frozenset({*_WORKER_EXECUTABLE_LIFECYCLE_STATES, WORKER_LIFECYCLE_ACTIVE_WAIT}),
-    WorkerTransitionName.ACTIVE: _WORKER_ACTIVE_SOURCE_STATES,
-    WorkerTransitionName.ATTEMPT_STARTED: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
-    WorkerTransitionName.FAILED: _WORKER_FAILURE_SOURCE_STATES,
-    WorkerTransitionName.DEPENDENCY_BLOCKED: frozenset(
-        {
-            WORKER_LIFECYCLE_QUEUED,
-            WORKER_LIFECYCLE_ACTIVE_WAIT,
-            WORKER_LIFECYCLE_ACTIVE_RETRY,
-        }
+def _failed_lifecycle_state(transition):
+    payload = transition.payload
+    if payload.retryable and payload.retry_available:
+        return WORKER_LIFECYCLE_FAILED_RETRY
+    return WORKER_LIFECYCLE_FAILED_TERMINAL
+
+
+def _timed_out_lifecycle_state(transition):
+    payload = transition.payload
+    return _timeout_lifecycle_state(payload.status, payload.retry_available)
+
+
+def _result_applied_lifecycle_state(transition):
+    return _result_lifecycle_state(short_status(transition.payload.result["status"]))
+
+
+_WORKER_TRANSITION_DEFINITIONS = {
+    WorkerTransitionName.PROVISIONED: WorkerTransitionDefinition(
+        WorkerTransitionName.PROVISIONED,
+        frozenset({*_WORKER_EXECUTABLE_LIFECYCLE_STATES, WORKER_LIFECYCLE_ACTIVE_WAIT}),
+        frozenset(),
+        WorkerLifecycleReducer.provisioned,
     ),
-    WorkerTransitionName.ABORTED: _WORKER_ABORT_SOURCE_STATES,
-    WorkerTransitionName.RETRY_SCHEDULED: frozenset(
-        {
-            WORKER_LIFECYCLE_ACTIVE_WAIT,
-            WORKER_LIFECYCLE_FAILED_RETRY,
-            WORKER_LIFECYCLE_TIMEOUT_RETRY,
-            WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
-        }
+    WorkerTransitionName.ACTIVE: WorkerTransitionDefinition(
+        WorkerTransitionName.ACTIVE,
+        _WORKER_ACTIVE_SOURCE_STATES,
+        frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+        WorkerLifecycleReducer.active,
+        target_lifecycle=WORKER_LIFECYCLE_ACTIVE_WAIT,
     ),
-    WorkerTransitionName.TIMED_OUT: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
-    WorkerTransitionName.RESULT_APPLIED: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
-    WorkerTransitionName.CLEANUP_UPDATED: WORKER_LIFECYCLE_STATES,
+    WorkerTransitionName.ATTEMPT_STARTED: WorkerTransitionDefinition(
+        WorkerTransitionName.ATTEMPT_STARTED,
+        frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+        frozenset(),
+        WorkerLifecycleReducer.attempt_started,
+    ),
+    WorkerTransitionName.FAILED: WorkerTransitionDefinition(
+        WorkerTransitionName.FAILED,
+        _WORKER_FAILURE_SOURCE_STATES,
+        frozenset({WORKER_LIFECYCLE_FAILED_RETRY, WORKER_LIFECYCLE_FAILED_TERMINAL}),
+        WorkerLifecycleReducer.failed,
+        target_lifecycle=_failed_lifecycle_state,
+    ),
+    WorkerTransitionName.DEPENDENCY_BLOCKED: WorkerTransitionDefinition(
+        WorkerTransitionName.DEPENDENCY_BLOCKED,
+        frozenset(
+            {
+                WORKER_LIFECYCLE_QUEUED,
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_ACTIVE_RETRY,
+            }
+        ),
+        frozenset({WORKER_LIFECYCLE_BLOCKED_DEPENDENCY}),
+        WorkerLifecycleReducer.dependency_blocked,
+        target_lifecycle=WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+    ),
+    WorkerTransitionName.ABORTED: WorkerTransitionDefinition(
+        WorkerTransitionName.ABORTED,
+        _WORKER_ABORT_SOURCE_STATES,
+        frozenset({WORKER_LIFECYCLE_ABORTED}),
+        WorkerLifecycleReducer.aborted,
+        target_lifecycle=WORKER_LIFECYCLE_ABORTED,
+    ),
+    WorkerTransitionName.RETRY_SCHEDULED: WorkerTransitionDefinition(
+        WorkerTransitionName.RETRY_SCHEDULED,
+        frozenset(
+            {
+                WORKER_LIFECYCLE_ACTIVE_WAIT,
+                WORKER_LIFECYCLE_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+            }
+        ),
+        frozenset({WORKER_LIFECYCLE_ACTIVE_RETRY}),
+        WorkerLifecycleReducer.retry_scheduled,
+        target_lifecycle=WORKER_LIFECYCLE_ACTIVE_RETRY,
+    ),
+    WorkerTransitionName.TIMED_OUT: WorkerTransitionDefinition(
+        WorkerTransitionName.TIMED_OUT,
+        frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+        frozenset(
+            {
+                WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
+                WORKER_LIFECYCLE_TIMEOUT_ABORTED,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL,
+                WORKER_LIFECYCLE_TIMEOUT_RETRY,
+                WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+            }
+        ),
+        WorkerLifecycleReducer.timed_out,
+        target_lifecycle=_timed_out_lifecycle_state,
+    ),
+    WorkerTransitionName.RESULT_APPLIED: WorkerTransitionDefinition(
+        WorkerTransitionName.RESULT_APPLIED,
+        frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
+        frozenset(
+            {
+                WORKER_LIFECYCLE_ABORTED,
+                WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
+                WORKER_LIFECYCLE_DONE_COLLECT,
+                WORKER_LIFECYCLE_FAILED_TERMINAL,
+                WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
+            }
+        ),
+        WorkerLifecycleReducer.result_applied,
+        target_lifecycle=_result_applied_lifecycle_state,
+    ),
+    WorkerTransitionName.CLEANUP_UPDATED: WorkerTransitionDefinition(
+        WorkerTransitionName.CLEANUP_UPDATED,
+        WORKER_LIFECYCLE_STATES,
+        frozenset(),
+        WorkerLifecycleReducer.cleanup_updated,
+    ),
+    WorkerTransitionName.SNAPSHOT_APPLIED: WorkerTransitionDefinition(
+        WorkerTransitionName.SNAPSHOT_APPLIED,
+        WORKER_LIFECYCLE_STATES,
+        frozenset(),
+        WorkerLifecycleReducer.snapshot_applied,
+        is_legal_transition=_snapshot_transition_is_legal,
+    ),
 }
 
-_WORKER_TRANSITION_TARGET_STATES = {
-    WorkerTransitionName.ACTIVE: frozenset({WORKER_LIFECYCLE_ACTIVE_WAIT}),
-    WorkerTransitionName.FAILED: frozenset({WORKER_LIFECYCLE_FAILED_RETRY, WORKER_LIFECYCLE_FAILED_TERMINAL}),
-    WorkerTransitionName.DEPENDENCY_BLOCKED: frozenset({WORKER_LIFECYCLE_BLOCKED_DEPENDENCY}),
-    WorkerTransitionName.ABORTED: frozenset({WORKER_LIFECYCLE_ABORTED}),
-    WorkerTransitionName.RETRY_SCHEDULED: frozenset({WORKER_LIFECYCLE_ACTIVE_RETRY}),
-    WorkerTransitionName.TIMED_OUT: frozenset(
-        {
-            WORKER_LIFECYCLE_BLOCKED_TIMEOUT,
-            WORKER_LIFECYCLE_TIMEOUT_ABORTED,
-            WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY,
-            WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL,
-            WORKER_LIFECYCLE_TIMEOUT_RETRY,
-            WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
-        }
-    ),
-    WorkerTransitionName.RESULT_APPLIED: frozenset(
-        {
-            WORKER_LIFECYCLE_ABORTED,
-            WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
-            WORKER_LIFECYCLE_DONE_COLLECT,
-            WORKER_LIFECYCLE_FAILED_TERMINAL,
-            WORKER_LIFECYCLE_TIMEOUT_TERMINAL,
-        }
-    ),
-}
+
+def _worker_transition_definition(name):
+    definition = _WORKER_TRANSITION_DEFINITIONS.get(name)
+    if definition is None:
+        raise ValueError(f"unknown worker transition: {name}")
+    return definition
+
+
+def _transition_target_lifecycle_state(transition):
+    return _worker_transition_definition(transition.name).target_lifecycle_state(transition)
 
 _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
     source_state: frozenset(
@@ -378,9 +450,9 @@ _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
             source_state,
             *(
                 target_state
-                for transition_name, source_states in _WORKER_TRANSITION_SOURCE_STATES.items()
-                if source_state in source_states
-                for target_state in _WORKER_TRANSITION_TARGET_STATES.get(transition_name, ())
+                for definition in _WORKER_TRANSITION_DEFINITIONS.values()
+                if source_state in definition.source_states
+                for target_state in definition.target_states
             ),
         }
     )
