@@ -15,6 +15,11 @@ from opencode_session.worker_state import (
 )
 from opencode_session.worker_domain import WorkerRecord, WorkerSchedulingState, WorkerTransition
 
+try:
+    from tests.worker_state_scenarios import WorkerScenario, assert_worker_outcome
+except ModuleNotFoundError:
+    from worker_state_scenarios import WorkerScenario, assert_worker_outcome
+
 
 class WorkerStateContractTest(unittest.TestCase):
     def test_normalize_worker_applies_defaults_and_derives_next_action(self):
@@ -146,9 +151,39 @@ class WorkerStateContractTest(unittest.TestCase):
 
         apply_worker_transition_to_worker(worker, mark_dependency_blocked(worker, ["dependency:build"]))
 
-        self.assertEqual(worker["status"], "blocked")
-        self.assertEqual(worker["blockers"], ["dependency:build"])
-        self.assertEqual(worker["next_eligible_action"], "resolve_blocker")
+        assert_worker_outcome(
+            self,
+            worker,
+            status="blocked",
+            action="resolve_blocker",
+            lifecycle="blocked_dependency",
+            blockers=["dependency:build"],
+        )
+
+    def test_worker_scenario_asserts_retry_to_success_outcome(self):
+        result = {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
+
+        (
+            WorkerScenario(
+                "review",
+                prompt="Review",
+                status="failed",
+                retryable_failures=["provider"],
+                retry_count=0,
+                retry_limit=1,
+            )
+            .apply(lambda worker: schedule_worker_retry(worker, "provider", "provider failed"))
+            .assert_outcome(self, status="active", action="retry", lifecycle="active_retry")
+            .apply(lambda worker: mark_worker_active(worker))
+            .apply(lambda worker: apply_worker_result(worker, result, prompt_ids=("msg_user",)))
+            .assert_outcome(
+                self,
+                status="done",
+                action="collect",
+                lifecycle="done_collect",
+                output_refs=["assistant:msg_assistant"],
+            )
+        )
 
     def test_apply_worker_result_done_clears_stale_current_status_metadata(self):
         worker = normalize_worker(

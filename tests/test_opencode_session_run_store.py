@@ -8,6 +8,11 @@ from opencode_session.run_persistence import persist_worker_snapshot_update
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_aborted, refresh_run_summary
 
+try:
+    from tests.worker_state_scenarios import assert_worker_outcome
+except ModuleNotFoundError:
+    from worker_state_scenarios import assert_worker_outcome
+
 
 class RunStoreConcurrencyTest(unittest.TestCase):
     def test_create_run_fails_when_run_already_exists(self):
@@ -47,8 +52,13 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             loaded = run_store.load_run("demo")
             stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(loaded["workers"]["planner"]["status"], "active")
-        self.assertEqual(loaded["workers"]["planner"]["next_eligible_action"], "wait")
+        assert_worker_outcome(
+            self,
+            loaded["workers"]["planner"],
+            status="active",
+            action="wait",
+            lifecycle="active_wait",
+        )
         self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "active_wait")
         self.assertNotIn("status", stored["workers"]["planner"])
         self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
