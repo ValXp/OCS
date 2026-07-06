@@ -1,4 +1,17 @@
+from copy import deepcopy
+from dataclasses import dataclass
+
 from opencode_session.worker_state import apply_worker_transition_to_worker, normalize_worker
+
+
+@dataclass(frozen=True)
+class WorkerTransitionCase:
+    name: str
+    worker_fields: object
+    transition_factory: object
+    expected_outcome: object
+    expected_fields: object = None
+    absent_fields: object = ()
 
 
 class WorkerScenario:
@@ -33,3 +46,18 @@ def assert_worker_outcome(
         test_case.assertEqual(worker["blockers"], blockers)
     if output_refs is not None:
         test_case.assertEqual(worker["output_refs"], output_refs)
+
+
+def assert_worker_transition_case(test_case, case, *, worker_id="review"):
+    worker = normalize_worker(deepcopy(case.worker_fields), worker_id)
+    transition = case.transition_factory(worker)
+    test_case.assertTrue(transition, case.name)
+
+    apply_worker_transition_to_worker(worker, transition)
+
+    assert_worker_outcome(test_case, worker, **case.expected_outcome)
+    for field_name, expected_value in (case.expected_fields or {}).items():
+        test_case.assertEqual(worker[field_name], expected_value)
+    for field_name in case.absent_fields:
+        test_case.assertNotIn(field_name, worker)
+    return worker
