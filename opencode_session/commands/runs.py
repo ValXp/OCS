@@ -13,10 +13,7 @@ from opencode_session.run_services import RunCommandService, RunStartRequest, Ru
 from opencode_session.run_store import RunStore, RunStoreError, default_store_root
 from opencode_session.session_lifecycle import format_abort_compact
 from opencode_session.status import short_status
-from opencode_session.worker_state import (
-    WORKER_LIFECYCLE_STATES,
-    worker_lifecycle_state_for_status_alias,
-)
+from opencode_session.worker_state import worker_lifecycle_state_for_status_alias
 
 def add_run_parser(subparsers, *, add_server_argument, positive_float, handler):
     parser = subparsers.add_parser("run", help="manage local orchestration runs")
@@ -91,12 +88,7 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     run_worker_parser.add_argument("--prompt", help="prompt text to run for this worker")
     run_worker_parser.add_argument("--depends-on", dest="dependencies", action="append", help="worker dependency ID")
     run_worker_parser.add_argument("--prompt-id", dest="prompt_ids", action="append", help="prompt admission ID")
-    run_worker_parser.add_argument("--status", help="worker status alias for simple lifecycle states")
-    run_worker_parser.add_argument(
-        "--lifecycle-state",
-        choices=sorted(WORKER_LIFECYCLE_STATES),
-        help="canonical worker lifecycle state",
-    )
+    run_worker_parser.add_argument("--status", help="safe manual worker status alias")
     run_worker_parser.add_argument("--retry-count", type=int, help="worker retry count")
     run_worker_parser.add_argument("--retry-limit", type=int, help="maximum automatic retries for retryable failures")
     run_worker_parser.add_argument(
@@ -167,7 +159,6 @@ def _status_run(args, service, **_context):
 
 
 def _upsert_run_worker(args, service, **_context):
-    lifecycle_state = _worker_lifecycle_state_arg(args)
     run = service.upsert_worker(
         args.name,
         args.worker_id,
@@ -178,7 +169,7 @@ def _upsert_run_worker(args, service, **_context):
         prompt=args.prompt,
         dependencies=args.dependencies,
         prompt_ids=args.prompt_ids,
-        lifecycle_state=lifecycle_state,
+        status=args.status,
         retry_count=args.retry_count,
         retry_limit=args.retry_limit,
         retryable_failures=args.retryable_failures,
@@ -257,14 +248,6 @@ def _positive_timeout_seconds(value, positive_float):
     if timeout.is_integer():
         return int(timeout)
     return timeout
-
-
-def _worker_lifecycle_state_arg(args):
-    status_lifecycle_state = _lifecycle_state_from_status_alias(args.status)
-    if args.lifecycle_state is not None and status_lifecycle_state is not None:
-        if args.lifecycle_state != status_lifecycle_state:
-            raise RunStoreError("--status and --lifecycle-state specify different lifecycle states")
-    return args.lifecycle_state or status_lifecycle_state
 
 
 def _lifecycle_state_from_status_alias(status):

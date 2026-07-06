@@ -14,10 +14,18 @@ from opencode_session.multi_worker_orchestration import (
 from opencode_session.prompt_admission import admit_prompt
 from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationRecovery
 from opencode_session.run_prompt_worker import ensure_prompt_worker
+from opencode_session.run_record import RunRecordError, upsert_worker_record
 from opencode_session.run_store import RunStoreError
+from opencode_session.status import short_status
 from opencode_session.schema_common import NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord, Worker
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
-from opencode_session.worker_state import mark_worker_aborted, sync_worker_record, worker_record_for_mutation
+from opencode_session.worker_state import (
+    mark_dependency_blocked,
+    mark_worker_aborted,
+    mark_worker_active,
+    sync_worker_record,
+    worker_record_for_mutation,
+)
 
 
 REMOTE_MUTATION_JOURNAL_FIELD = "remote_mutation_journal"
@@ -88,7 +96,42 @@ class RunCommandService:
         return self.store.load_run(name)
 
     def upsert_worker(self, name, worker_id, **changes):
-        return self.store.upsert_worker(name, worker_id, **changes)
+        lifecycle_state = changes.pop("lifecycle_state", None)
+        if lifecycle_state is not None:
+            raise RunStoreError(
+                "raw lifecycle_state updates are not supported by run commands; "
+                "use --status active/blocked or the explicit start/abort/result transitions"
+            )
+        status = changes.pop("status", None)
+        if status is None:
+            return self.store.upsert_worker(name, worker_id, **changes)
+
+        status = short_status(status)
+        if status not in {"active", "blocked"}:
+            raise RunStoreError(
+                f"worker status '{status}' cannot be set manually; "
+                "use run start, run abort, or reducer-owned result/failure/timeout handling"
+            )
+
+        def mutate(run):
+            try:
+                upsert_worker_record(run, worker_id, changes, now=self.now())
+            except RunRecordError as error:
+                raise RunStoreError(str(error), kind=error.kind) from error
+            worker = run["workers"][worker_id]
+            if status == "active":
+                transition = mark_worker_active(worker, now=self.now)
+            else:
+                blockers = [blocker for blocker in changes.get("blockers") or [] if str(blocker).strip()]
+                if not blockers:
+                    raise RunStoreError("--status blocked requires at least one --blocker")
+                transition = mark_dependency_blocked(worker, blockers)
+            record = worker_record_for_mutation(worker, worker_id)
+            record.apply_transition(transition)
+            sync_worker_record(worker, record)
+            run["updated_at"] = self.now()
+
+        return self.store.update_run(name, mutate)
 
     def start_run(self, request):
         if request.prompt is not None:

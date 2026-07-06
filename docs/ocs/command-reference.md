@@ -55,7 +55,7 @@ All run commands accept `run --store PATH ...`. If omitted, the store is `OCS_RU
 - `run steer NAME WORKER_ID TEXT [--delivery steer|queue] [--message-id ID] [--json]`: admit input to a worker session and record the prompt ID.
 - `run abort NAME WORKER_ID [--json]`: abort a worker session and mark the worker aborted when accepted.
 
-Worker metadata options include `--session`, `--agent`, `--model`, `--prompt`, `--depends-on`, `--prompt-id`, `--status`, `--retry-count`, `--retry-limit`, `--retryable`, `--timeout-seconds`, `--timeout-policy`, `--blocker`, and `--output-ref`.
+Worker metadata options include `--session`, `--agent`, `--model`, `--prompt`, `--depends-on`, `--prompt-id`, `--status active|blocked`, `--retry-count`, `--retry-limit`, `--retryable`, `--timeout-seconds`, `--timeout-policy`, `--blocker`, and `--output-ref`. `--status blocked` requires at least one `--blocker`; terminal states are owned by `run start`, `run abort`, and result/failure/timeout reducers.
 
 ## Blocker Commands
 

@@ -9,6 +9,9 @@ except ModuleNotFoundError:
     from mocked_cli_harness import FakeOpenCodeServer, format_completed_process, load_json, run_ocs
     from orchestration_cli_harness import configure_multi_worker_server, payloads_for, request_paths
 
+from opencode_session.run_store import RunStore
+from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_failed
+
 
 @dataclass
 class CliScenarioResult:
@@ -39,6 +42,8 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
                 )
                 for worker in workers:
                     self.assert_cli_success(run_ocs(*self.worker_command(store, worker)), f"worker {worker['id']}")
+                    if worker.get("fail_before_start"):
+                        self.mark_worker_failed(store, worker["id"])
                 start = run_ocs("run", "--store", store, "start", "demo", *start_args)
                 requests = list(server.requests)
             status = run_ocs("run", "--store", store, "status", "demo", "--json")
@@ -46,6 +51,16 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
             payload = load_json(self, status, "status")
 
         return CliScenarioResult(start=start, payload=payload, requests=requests, directory=directory)
+
+    def mark_worker_failed(self, store, worker_id):
+        def fail_worker(run):
+            worker = run["workers"][worker_id]
+            apply_worker_transition_to_worker(
+                worker,
+                mark_worker_failed(worker, "provider", "preexisting failure", retryable=False),
+            )
+
+        RunStore(store).update_run("demo", fail_worker)
 
     def worker_command(self, store, worker):
         args = ["run", "--store", store, "worker", "demo", worker["id"], "--role", worker["role"]]
@@ -224,7 +239,7 @@ class MultiWorkerOrchestrationCliTest(unittest.TestCase):
     def test_start_persists_dependency_blocking_when_prerequisite_is_already_failed(self):
         scenario = self.run_multi_worker_scenario(
             [
-                {"id": "build", "role": "build", "prompt": "Run the implementation", "status": "failed"},
+                {"id": "build", "role": "build", "prompt": "Run the implementation", "fail_before_start": True},
                 {
                     "id": "review",
                     "role": "review",

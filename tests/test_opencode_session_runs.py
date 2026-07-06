@@ -98,8 +98,6 @@ class RunStoreCliTest(unittest.TestCase):
                 "worker",
                 "demo",
                 "builder",
-                "--status",
-                "done",
                 "--output-ref",
                 "file:summary.md",
             )
@@ -107,9 +105,9 @@ class RunStoreCliTest(unittest.TestCase):
 
         expected = (
             f"run=demo status=queued dir={directory} server=http://opencode.example "
-            "workers=1 queued=0 active=0 done=1 blocked=0 failed=0 aborted=0 timeout=0 "
+            "workers=1 queued=0 active=1 done=0 blocked=0 failed=0 aborted=0 timeout=0 "
             "retries=0 timeout_s=- blockers=- outputs=-\n"
-            "worker=builder role=build status=done session=ses_builder agent=build "
+            "worker=builder role=build status=active session=ses_builder agent=build "
             "model=openai/gpt-5.5 deps=planner,qa prompts=prompt-123 "
             "retries=2 timeout=600 blockers=- outputs=file:summary.md\n"
         )
@@ -119,6 +117,158 @@ class RunStoreCliTest(unittest.TestCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(status.stderr, "")
         self.assertEqual(status.stdout, expected)
+
+    def test_worker_command_rejects_raw_lifecycle_state_flag(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            init = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                directory,
+                "--server",
+                "http://opencode.example",
+            )
+            worker = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "builder",
+                "--role",
+                "build",
+                "--lifecycle-state",
+                "done_collect",
+            )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 2)
+        self.assertEqual(worker.stdout, "")
+        self.assertIn("unrecognized arguments: --lifecycle-state done_collect", worker.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["workers"], {})
+
+    def test_worker_command_rejects_terminal_status_without_reducer_payload(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            init = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                directory,
+                "--server",
+                "http://opencode.example",
+            )
+            worker = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "builder",
+                "--role",
+                "build",
+                "--status",
+                "done",
+                "--output-ref",
+                "file:summary.md",
+            )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 65)
+        self.assertEqual(worker.stdout, "")
+        self.assertIn("worker status 'done' cannot be set manually", worker.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["workers"], {})
+
+    def test_worker_command_rejects_blocked_status_without_blockers(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            init = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                directory,
+                "--server",
+                "http://opencode.example",
+            )
+            worker = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "builder",
+                "--role",
+                "build",
+                "--status",
+                "blocked",
+            )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(worker.returncode, 65)
+        self.assertEqual(worker.stdout, "")
+        self.assertIn("--status blocked requires at least one --blocker", worker.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["workers"], {})
+
+    def test_worker_command_active_status_clears_stale_blockers(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            init = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "init",
+                "demo",
+                "--directory",
+                directory,
+                "--server",
+                "http://opencode.example",
+            )
+            blocked = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "builder",
+                "--role",
+                "build",
+                "--status",
+                "blocked",
+                "--blocker",
+                "dependency:planner",
+            )
+            active = self.run_cli(
+                "run",
+                "--store",
+                store,
+                "worker",
+                "demo",
+                "builder",
+                "--status",
+                "active",
+            )
+            status = self.run_cli("run", "--store", store, "status", "demo", "--json")
+
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertEqual(blocked.returncode, 0, blocked.stderr)
+        self.assertEqual(active.returncode, 0, active.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        worker = json.loads(status.stdout)["workers"]["builder"]
+        self.assertEqual(worker["status"], "active")
+        self.assertEqual(worker["lifecycle_state"], "active_wait")
+        self.assertEqual(worker["blockers"], [])
 
     def test_init_existing_run_fails_without_destroying_workers(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:

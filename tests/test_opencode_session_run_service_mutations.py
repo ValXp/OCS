@@ -340,6 +340,21 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(journal["cleanup_failure"]["recorded_at"], "2026-07-05T00:00:00Z")
 
 
+class RunCommandServiceWorkerUpsertTest(unittest.TestCase):
+    def test_upsert_worker_rejects_raw_lifecycle_state(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            service = RunCommandService(store, now=lambda: "2026-07-05T00:00:00Z")
+
+            with self.assertRaisesRegex(RunStoreError, "raw lifecycle_state updates are not supported"):
+                service.upsert_worker("demo", "planner", role="plan", lifecycle_state="done_collect")
+
+            run = store.load_run("demo")
+
+        self.assertEqual(run["workers"], {})
+
+
 def _active_worker_store(store_root, directory):
     store = RunStore(store_root)
     store.create_run("demo", directory=directory, server_url="http://opencode.example")
