@@ -81,16 +81,17 @@ class OpenCodeApiClient:
     def delete_response(self, path, *, timeout=None, deadline=None):
         return self._request_json("DELETE", path, timeout=timeout, deadline=deadline)
 
-    def stream_events(self, path, *, on_open=None, deadline=None):
+    def stream_events(self, path, *, on_open=None, deadline=None, stop_event=None):
         url = urljoin(self.base_url, path.lstrip("/"))
         headers = {"Accept": "text/event-stream, application/json"}
         request = Request(url, headers=headers, method="GET")
         try:
             with urlopen(request, timeout=self._stream_open_timeout(deadline)) as response:
-                set_response_socket_timeout(response, None if deadline is None else deadline.require_time())
+                stream_timeout = _event_stream_read_timeout(deadline, stop_event)
+                set_response_socket_timeout(response, stream_timeout)
                 if on_open is not None:
                     on_open()
-                lines = response if deadline is None else _iter_response_lines_until_deadline(response, deadline)
+                lines = _event_stream_lines(response, deadline, stop_event)
                 yield from iter_event_stream(lines)
         except TimeoutExpired:
             raise
@@ -324,3 +325,31 @@ def _iter_response_lines_until_deadline(response, deadline):
         if line == b"":
             return
         yield line
+
+
+def _event_stream_lines(response, deadline, stop_event):
+    if stop_event is None:
+        return response if deadline is None else _iter_response_lines_until_deadline(response, deadline)
+    return _iter_response_lines_until_stop(response, deadline, stop_event)
+
+
+def _iter_response_lines_until_stop(response, deadline, stop_event):
+    while not stop_event.is_set():
+        set_response_socket_timeout(response, _event_stream_read_timeout(deadline, stop_event))
+        try:
+            line = response.readline()
+        except TimeoutError as error:
+            if deadline is not None and deadline.expired():
+                raise TimeoutExpired() from error
+            continue
+        if line == b"":
+            return
+        yield line
+
+
+def _event_stream_read_timeout(deadline, stop_event):
+    if stop_event is None:
+        return None if deadline is None else deadline.require_time()
+    if deadline is None:
+        return 0.2
+    return min(0.2, deadline.require_time())
