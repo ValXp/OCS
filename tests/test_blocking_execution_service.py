@@ -57,6 +57,43 @@ class _DeadlineClient:
         return _Response({"id": "msg_assistant_deadline", "status": "completed", "text": "ok"})
 
 
+class _UnknownSessionMessageClient:
+    def __init__(self):
+        self.timeout = 3
+        self.requests = []
+
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None):
+        self.requests.append(("message", session_id, message, message_id, timeout))
+        return _Response({"unexpected": {"shape": True}})
+
+
+class _UnknownLegacyRunClient:
+    def __init__(self):
+        self.timeout = 3
+        self.requests = []
+
+    def run_session_response(self, session_id, message, *, timeout=None):
+        self.requests.append(("run", session_id, message, None, timeout))
+        return _Response({"tokenUsage": {"input": 1}})
+
+    def reply_session_response(self, session_id, *, timeout=None):
+        raise AssertionError("reply should not be requested after unknown run schema")
+
+
+class _UnknownLegacyReplyClient:
+    def __init__(self):
+        self.timeout = 3
+        self.requests = []
+
+    def run_session_response(self, session_id, message, *, timeout=None):
+        self.requests.append(("run", session_id, message, None, timeout))
+        return _Response({"id": "msg_user_legacy", "status": "submitted"})
+
+    def reply_session_response(self, session_id, *, timeout=None):
+        self.requests.append(("reply", session_id, None, None, timeout))
+        return _Response({"tokenUsage": {"output": 1}})
+
+
 class BlockingExecutionServiceTest(unittest.TestCase):
     def test_prefers_modern_session_message_and_returns_normalized_result(self):
         from opencode_session.blocking_execution import (
@@ -144,6 +181,65 @@ class BlockingExecutionServiceTest(unittest.TestCase):
             result["api_path"],
             {"run": "/custom/{sessionID}/run", "reply": "/custom/{sessionID}/reply"},
         )
+
+    def test_rejects_unknown_session_message_schema_instead_of_completed_result(self):
+        from opencode_session.blocking_execution import (
+            BlockingProviderFailure,
+            execute_blocking_prompt,
+        )
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc(
+            {"paths": {"/session/{sessionID}/message": {"post": {}}}}
+        )
+        client = _UnknownSessionMessageClient()
+
+        with self.assertRaises(BlockingProviderFailure) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn(
+            "unrecognized message schema from blocking message response",
+            str(raised.exception),
+        )
+        self.assertTrue(raised.exception.prompt_id.startswith("msg_"))
+
+    def test_rejects_unknown_legacy_run_schema_before_reply(self):
+        from opencode_session.blocking_execution import (
+            BlockingProviderFailure,
+            execute_blocking_prompt,
+        )
+
+        capabilities = {"route_availability": {}, "legacy_fallback_available": True}
+        client = _UnknownLegacyRunClient()
+
+        with self.assertRaises(BlockingProviderFailure) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn(
+            "unrecognized message schema from legacy run response",
+            str(raised.exception),
+        )
+        self.assertIsNone(raised.exception.prompt_id)
+        self.assertEqual([request[0] for request in client.requests], ["run"])
+
+    def test_rejects_unknown_legacy_reply_schema_instead_of_completed_result(self):
+        from opencode_session.blocking_execution import (
+            BlockingProviderFailure,
+            execute_blocking_prompt,
+        )
+
+        capabilities = {"route_availability": {}, "legacy_fallback_available": True}
+        client = _UnknownLegacyReplyClient()
+
+        with self.assertRaises(BlockingProviderFailure) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn(
+            "unrecognized message schema from legacy reply response",
+            str(raised.exception),
+        )
+        self.assertEqual(raised.exception.prompt_id, "msg_user_legacy")
+        self.assertEqual([request[0] for request in client.requests], ["run", "reply"])
 
 
 if __name__ == "__main__":

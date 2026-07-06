@@ -53,8 +53,17 @@ def execute_blocking_prompt(
 def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=None, profile=None):
     profile = profile or OpenCodeServerProfile.default()
     route = profile.message_route("legacy_run")
-    run_record = normalize_message_record(run_message, route=route)
-    reply_record = normalize_message_record(reply_message, route=route)
+    run_record = _normalize_known_message_record(
+        run_message,
+        route=route,
+        source="legacy run response",
+    )
+    reply_record = _normalize_known_message_record(
+        reply_message,
+        route=route,
+        source="legacy reply response",
+        prompt_id=run_record.get("id"),
+    )
     raw_status = _message_raw_status(reply_record, default="completed")
     status = short_status(raw_status)
     return {
@@ -125,10 +134,17 @@ def _execute_session_message_prompt(client, session_id, prompt, capabilities, pr
     if deadline is not None:
         kwargs["deadline"] = deadline
     response = client.message_session_response(session_id, prompt, **kwargs)
-    error = provider_failure(response.data, route=profile.message_route("blocking_message"))
+    route = profile.message_route("blocking_message")
+    assistant_record = _normalize_known_message_record(
+        response.data,
+        route=route,
+        source="blocking message response",
+        prompt_id=message_id,
+    )
+    error = provider_failure(assistant_record, route=route)
     if error:
         raise BlockingProviderFailure(error, prompt_id=message_id)
-    return _session_message_result(session_id, message_id, response.data, capabilities, profile)
+    return _session_message_result(session_id, message_id, assistant_record, capabilities, profile)
 
 
 def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, profile, timeout, deadline):
@@ -137,26 +153,37 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, p
         run_kwargs["deadline"] = deadline
     run_response = client.run_session_response(session_id, prompt, **run_kwargs)
     route = profile.message_route("legacy_run")
-    error = provider_failure(run_response.data, route=route)
+    run_record = _normalize_known_message_record(
+        run_response.data,
+        route=route,
+        source="legacy run response",
+    )
+    error = provider_failure(run_record, route=route)
     if error:
         raise BlockingProviderFailure(
             error,
-            prompt_id=normalize_message_record(run_response.data, route=route).get("id"),
+            prompt_id=run_record.get("id"),
         )
     reply_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         reply_kwargs["deadline"] = deadline
     reply_response = client.reply_session_response(session_id, **reply_kwargs)
-    error = provider_failure(reply_response.data, route=route)
+    reply_record = _normalize_known_message_record(
+        reply_response.data,
+        route=route,
+        source="legacy reply response",
+        prompt_id=run_record.get("id"),
+    )
+    error = provider_failure(reply_record, route=route)
     if error:
         raise BlockingProviderFailure(
             error,
-            prompt_id=normalize_message_record(run_response.data, route=route).get("id"),
+            prompt_id=run_record.get("id"),
         )
     return legacy_run_reply_result(
         session_id,
-        run_response.data,
-        reply_response.data,
+        run_record,
+        reply_record,
         api_path=_legacy_api_path(capabilities),
         profile=profile,
     )
@@ -172,7 +199,12 @@ def _request_timeout(client, timeout, deadline=None):
 
 
 def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities, profile):
-    assistant_record = normalize_message_record(assistant_message, route=profile.message_route("blocking_message"))
+    assistant_record = _normalize_known_message_record(
+        assistant_message,
+        route=profile.message_route("blocking_message"),
+        source="blocking message response",
+        prompt_id=prompt_message_id,
+    )
     raw_status = _message_raw_status(assistant_record, default="completed")
     status = short_status(raw_status)
     return {
@@ -199,6 +231,17 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
 
 def _message_raw_status(message, *, default=None):
     return message.get("raw_status") or message.get("status") or default
+
+
+def _normalize_known_message_record(message, *, route, source, prompt_id=None):
+    record = normalize_message_record(message, route=route)
+    if record.get("schema_status") == "unknown":
+        failure = f"unrecognized message schema from {source}: {_compact_value(record.get('raw'))}"
+        raise BlockingProviderFailure(
+            failure,
+            prompt_id=prompt_id,
+        )
+    return record
 
 
 def _legacy_api_path(capabilities):
