@@ -10,9 +10,8 @@ from opencode_session.status_policy import (
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_lifecycle import (
-    _UNSET,
+    UNSET_TRANSITION_FIELD,
     WORKER_ACTION_NONE,
-    WORKER_LIFECYCLE_ACTIVE_RETRY,
     WORKER_STATUS_ABORTED,
     WORKER_STATUS_BLOCKED,
     WORKER_STATUS_DONE,
@@ -21,15 +20,7 @@ from opencode_session.worker_lifecycle import (
     WorkerTransition,
     worker_retry_available,
 )
-from opencode_session.worker_normalization import WorkerRecord
-
-
-def _latest_prompt_ids_are_retry_marker(latest_worker):
-    return (
-        isinstance(latest_worker, dict)
-        and WorkerRecord.from_worker(latest_worker).lifecycle_state == WORKER_LIFECYCLE_ACTIVE_RETRY
-        and latest_worker.get("last_failure_category") is not None
-    )
+from opencode_session.worker_normalization import WorkerRecord, latest_prompt_ids_are_retry_marker
 
 
 def default_worker(worker_id):
@@ -57,13 +48,13 @@ def ensure_worker(run, worker_id, *, role):
 
 
 def mark_worker_active(worker, *, now=None):
-    timeout_started_at = _UNSET
+    timeout_started_at = UNSET_TRANSITION_FIELD
     if now is not None:
         timeout_started_at = now() if worker.get("timeout_seconds") else None
     transition = WorkerTransition.active(
         _worker_id(worker),
         timeout_started_at=timeout_started_at,
-        clear_prompt_ids=_latest_prompt_ids_are_retry_marker(worker),
+        clear_prompt_ids=latest_prompt_ids_are_retry_marker(worker),
     )
     transition.apply_to_worker(worker)
     return transition
@@ -149,7 +140,7 @@ def _worker_id(worker):
 
 
 def _existing_or_unset(worker, field_name):
-    return worker[field_name] if field_name in worker else _UNSET
+    return worker[field_name] if field_name in worker else UNSET_TRANSITION_FIELD
 
 
 def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):

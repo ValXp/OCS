@@ -38,7 +38,6 @@ from opencode_session.worker_lifecycle import (
     WORKER_STATUS_TIMEOUT,
     WorkerTransition,
     WorkerTransitionSpec,
-    _UNSET,
     is_blocked_status,
     is_dependency_blockable_status,
     is_failed_dependency_status,

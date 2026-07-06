@@ -51,7 +51,6 @@ WORKER_LIST_FIELDS = (
 )
 REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
-_UNSET = UNSET_TRANSITION_FIELD
 
 PUBLIC_WORKER_STATE_BY_LIFECYCLE = {
     WORKER_LIFECYCLE_QUEUED: (WORKER_STATUS_QUEUED, WORKER_ACTION_START),
@@ -129,7 +128,7 @@ class WorkerTransition:
         )
 
     @classmethod
-    def active(cls, worker_id, *, timeout_started_at=_UNSET, clear_prompt_ids=False):
+    def active(cls, worker_id, *, timeout_started_at=UNSET_TRANSITION_FIELD, clear_prompt_ids=False):
         return cls._from_spec(
             worker_id,
             "active",
@@ -149,7 +148,7 @@ class WorkerTransition:
         *,
         retryable=True,
         retry_available=False,
-        timeout_started_at=_UNSET,
+        timeout_started_at=UNSET_TRANSITION_FIELD,
         prompt_ids=(),
     ):
         return cls._from_spec(
@@ -190,7 +189,7 @@ class WorkerTransition:
         reason,
         *,
         retry_count,
-        timeout_started_at=_UNSET,
+        timeout_started_at=UNSET_TRANSITION_FIELD,
         prompt_ids=(),
     ):
         return cls._from_spec(
@@ -216,7 +215,7 @@ class WorkerTransition:
         timed_out_at,
         retry_available=False,
         manual_retry_required=False,
-        timeout_started_at=_UNSET,
+        timeout_started_at=UNSET_TRANSITION_FIELD,
     ):
         return cls._from_spec(
             worker_id,
@@ -233,7 +232,7 @@ class WorkerTransition:
         )
 
     @classmethod
-    def result_applied(cls, worker_id, result, *, prompt_ids=(), timeout_started_at=_UNSET):
+    def result_applied(cls, worker_id, result, *, prompt_ids=(), timeout_started_at=UNSET_TRANSITION_FIELD):
         return cls._from_spec(
             worker_id,
             "result_applied",
@@ -370,7 +369,7 @@ def _provisioned_transition_spec(worker_id, worker):
     return _transition_spec(set_fields=set_fields, set_if_missing_fields=set_if_missing_fields)
 
 
-def _active_transition_spec(worker_id, *, timeout_started_at=_UNSET, clear_prompt_ids=False):
+def _active_transition_spec(worker_id, *, timeout_started_at=UNSET_TRANSITION_FIELD, clear_prompt_ids=False):
     set_fields, delete_fields = _cleared_current_status_fields()
     set_fields.update(worker_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_ACTIVE_WAIT))
     _set_if_not_unset(set_fields, "timeout_started_at", timeout_started_at)
@@ -386,7 +385,7 @@ def _failed_transition_spec(
     *,
     retryable=True,
     retry_available=False,
-    timeout_started_at=_UNSET,
+    timeout_started_at=UNSET_TRANSITION_FIELD,
     prompt_ids=(),
 ):
     lifecycle_state = (
@@ -436,7 +435,7 @@ def _retry_scheduled_transition_spec(
     reason,
     *,
     retry_count,
-    timeout_started_at=_UNSET,
+    timeout_started_at=UNSET_TRANSITION_FIELD,
     prompt_ids=(),
 ):
     set_fields, delete_fields = _cleared_current_status_fields()
@@ -464,7 +463,7 @@ def _timed_out_transition_spec(
     timed_out_at,
     retry_available=False,
     manual_retry_required=False,
-    timeout_started_at=_UNSET,
+    timeout_started_at=UNSET_TRANSITION_FIELD,
 ):
     lifecycle_state = _timeout_lifecycle_state(status, retry_available)
     set_fields = worker_lifecycle_set_fields(worker_id, lifecycle_state)
@@ -495,7 +494,7 @@ def _result_applied_transition_spec(
     result,
     *,
     prompt_ids=(),
-    timeout_started_at=_UNSET,
+    timeout_started_at=UNSET_TRANSITION_FIELD,
 ):
     status = short_status(result["status"])
     set_fields = worker_lifecycle_set_fields(worker_id, _result_lifecycle_state(status))
@@ -586,5 +585,5 @@ def _prompt_ids_merge(prompt_ids):
 
 
 def _set_if_not_unset(fields, name, value):
-    if value is not _UNSET:
+    if value is not UNSET_TRANSITION_FIELD:
         fields[name] = value
