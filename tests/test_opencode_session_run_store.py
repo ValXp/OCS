@@ -7,6 +7,7 @@ from pathlib import Path
 from opencode_session.run_persistence import persist_worker_snapshot_update
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_state import (
+    WorkerRecord,
     apply_worker_result,
     apply_worker_transition_to_worker,
     mark_worker_aborted,
@@ -64,6 +65,8 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             action="wait",
             lifecycle="active_wait",
         )
+        self.assertIsInstance(loaded["workers"]["planner"], WorkerRecord)
+        self.assertIs(type(stored["workers"]["planner"]), dict)
         self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "active_wait")
         self.assertNotIn("status", stored["workers"]["planner"])
         self.assertNotIn("next_eligible_action", stored["workers"]["planner"])

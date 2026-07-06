@@ -14,6 +14,7 @@ from opencode_session.worker_state import (
     WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS,
     WORKER_LIFECYCLE_STATES,
     WORKER_STATUS_PRIORITY_BY_STATUS,
+    WorkerRecord,
     WorkerTransition,
     WorkerTransitionName,
     apply_worker_transition_to_worker,
@@ -120,6 +121,7 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
 
+        self.assertIsInstance(worker, WorkerRecord)
         self.assertEqual(worker["id"], "review")
         self.assertEqual(worker["status"], "failed")
         self.assertEqual(worker["dependencies"], [])
@@ -157,6 +159,7 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
 
+        self.assertIsInstance(worker, WorkerRecord)
         assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
 
     def test_deserialize_worker_snapshot_hydrates_defaults_and_public_state(self):
@@ -188,6 +191,7 @@ class WorkerStateContractTest(unittest.TestCase):
 
         snapshot = serialize_worker_snapshot(worker, "review")
 
+        self.assertIs(type(snapshot), dict)
         self.assertEqual(snapshot["lifecycle_state"], "done_collect")
         self.assertEqual(snapshot["session_id"], "ses_review")
         self.assertNotIn("status", snapshot)

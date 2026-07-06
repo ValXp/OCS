@@ -17,7 +17,7 @@ from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord, Worker
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
-from opencode_session.worker_state import apply_worker_transition_to_worker, mark_worker_aborted
+from opencode_session.worker_state import mark_worker_aborted, sync_worker_record, worker_record_for_mutation
 
 
 REMOTE_MUTATION_JOURNAL_FIELD = "remote_mutation_journal"
@@ -170,9 +170,9 @@ class RunCommandService:
 
         def record_prompt_admission(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
-            prompt_ids = latest_worker.setdefault("prompt_ids", [])
-            if admitted_message_id not in prompt_ids:
-                prompt_ids.append(admitted_message_id)
+            latest_record = worker_record_for_mutation(latest_worker, worker_id)
+            latest_record.remember_prompt_id(admitted_message_id)
+            sync_worker_record(latest_worker, latest_record)
 
         run = self.remote_mutations.finalize(run, mutation_id, before_finalize=record_prompt_admission)
         return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
@@ -208,7 +208,9 @@ class RunCommandService:
 
         def mark_aborted(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
-            apply_worker_transition_to_worker(latest_worker, mark_worker_aborted(latest_worker, abort))
+            latest_record = worker_record_for_mutation(latest_worker, worker_id)
+            latest_record.apply_transition(mark_worker_aborted(latest_record, abort))
+            sync_worker_record(latest_worker, latest_record)
             refresh_orchestration_run_summary(latest_run)
 
         run = self.remote_mutations.finalize(run, mutation_id, before_finalize=mark_aborted)

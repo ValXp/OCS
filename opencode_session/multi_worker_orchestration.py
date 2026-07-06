@@ -32,6 +32,8 @@ from opencode_session.worker_state import (
     exit_code_for_run as _exit_code_for_orchestration_run,
     is_executable_worker,
     refresh_run_summary as _refresh_worker_run_summary,
+    sync_worker_record,
+    worker_record_for_mutation,
     worker_prompt as _worker_prompt,
     workers_in_dependency_order as _workers_in_dependency_order,
 )
@@ -242,12 +244,13 @@ class DependencyOrderedSerialRunOrchestrationService:
                 latest_run["server_url"] = request.server_url
             if request.session_id is not None or request.agent is not None or request.model is not None:
                 worker = _ensure_orchestration_worker(latest_run, request.worker_id, role=request.role)
-                if request.session_id is not None:
-                    worker["session_id"] = request.session_id
-                if request.agent is not None:
-                    worker["agent"] = request.agent
-                if request.model is not None:
-                    worker["model"] = request.model
+                worker_record = worker_record_for_mutation(worker, request.worker_id)
+                worker_record.set_session(
+                    request.session_id if request.session_id is not None else worker_record.get("session_id"),
+                    agent=request.agent,
+                    model=request.model,
+                )
+                sync_worker_record(worker, worker_record)
 
         run = self._persist_mutation(run, prepare)
         if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if isinstance(worker, dict)):

@@ -23,9 +23,12 @@ from opencode_session.worker_attempt_policy import (
 )
 from opencode_session.worker_attempt_log import new_worker_attempt_record
 from opencode_session.worker_state import (
+    WorkerRecord,
     WorkerTransition,
     apply_worker_transition_to_worker,
     mark_worker_active,
+    sync_worker_record,
+    worker_record_for_mutation,
 )
 
 
@@ -113,13 +116,11 @@ class WorkerSessionCreationJournal:
 
         def update_worker(latest_run):
             latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
-            latest_worker["session_id"] = session_id
-            if agent is not None:
-                latest_worker["agent"] = agent
-            if model is not None:
-                latest_worker["model"] = model
+            latest_record = worker_record_for_mutation(latest_worker, intent.worker_id)
+            latest_record.set_session(session_id, agent=agent, model=model)
             if intent.cleanup_requested:
-                _remember_worker_session_for_cleanup(latest_worker, session_id)
+                latest_record.remember_session_for_cleanup(session_id)
+            sync_worker_record(latest_worker, latest_record)
 
         updated_run = self.journal.mark_applied(
             run,
@@ -272,18 +273,16 @@ def ensure_worker_session(
     model=None,
     treat_falsey_session_as_missing=False,
 ):
-    worker_session_id = session_id or worker.get("session_id")
+    record = worker_record_for_mutation(worker)
+    worker_session_id = session_id or record.get("session_id")
     created_session_id = None
     missing_session = not worker_session_id if treat_falsey_session_as_missing else worker_session_id is None
     if missing_session:
         create_response = client.create_session_response(run["directory"], agent=agent, model=model)
         worker_session_id = require_session_id(create_response)
         created_session_id = worker_session_id
-    worker["session_id"] = worker_session_id
-    if agent is not None:
-        worker["agent"] = agent
-    if model is not None:
-        worker["model"] = model
+    record.set_session(worker_session_id, agent=agent, model=model)
+    sync_worker_record(worker, record)
     return WorkerSessionOutcome(worker_session_id, created_session_id)
 
 
@@ -307,12 +306,10 @@ def provision_worker_session(
             model=model,
             treat_falsey_session_as_missing=True,
         )
-    worker["session_id"] = session_id or worker.get("session_id")
-    if agent is not None:
-        worker["agent"] = agent
-    if model is not None:
-        worker["model"] = model
-    return WorkerSessionOutcome(worker.get("session_id"))
+    record = worker_record_for_mutation(worker)
+    record.set_session(session_id or record.get("session_id"), agent=agent, model=model)
+    sync_worker_record(worker, record)
+    return WorkerSessionOutcome(record.get("session_id"))
 
 
 def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor):
@@ -414,7 +411,8 @@ def _attempt_status(transition):
 
 
 def cleanup_created_worker_sessions(client, worker, session_ids):
-    cleanup = worker.setdefault("cleanup", {"requested": True, "deleted": False})
+    record = worker_record_for_mutation(worker)
+    cleanup = record.ensure_cleanup()
     cleanup_outcome = cleanup_disposable_sessions(client, session_ids)
     cleanup_record = cleanup_outcome.record
     deleted_session_ids = list(cleanup_record["deleted"])
@@ -440,7 +438,9 @@ def cleanup_created_worker_sessions(client, worker, session_ids):
     else:
         cleanup.pop("verified", None)
     if errors:
+        sync_worker_record(worker, record)
         return WorkerCleanupOutcome(deleted_session_ids, cleanup_outcome.first_error)
+    sync_worker_record(worker, record)
     return WorkerCleanupOutcome(deleted_session_ids)
 
 
@@ -486,7 +486,7 @@ def _ensure_latest_worker(run, worker_id):
     workers = run.setdefault("workers", {})
     worker = workers.get(worker_id)
     if not isinstance(worker, dict):
-        worker = {"id": worker_id}
+        worker = WorkerRecord.default_fields(worker_id)
         workers[worker_id] = worker
     return worker
 
@@ -496,14 +496,9 @@ def _worker_session_journal_entries(run):
 
 
 def _remember_worker_session_for_cleanup(worker, session_id):
-    cleanup = worker.setdefault("cleanup", {"requested": True, "deleted": False})
-    cleanup["requested"] = True
-    cleanup["deleted"] = False
-    sessions = cleanup.get("sessions")
-    if not isinstance(sessions, list):
-        sessions = []
-    _append_unique_session_id(sessions, session_id)
-    cleanup["sessions"] = sessions
+    record = worker_record_for_mutation(worker)
+    record.remember_session_for_cleanup(session_id)
+    sync_worker_record(worker, record)
 
 
 def _string_list(value):

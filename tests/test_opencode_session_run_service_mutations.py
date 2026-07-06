@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from opencode_session.run_services import REMOTE_MUTATION_JOURNAL_FIELD, RunCommandService
 from opencode_session.run_store import RunStore, RunStoreError
+from opencode_session.worker_state import WorkerRecord
 
 
 PROMPT_CAPABILITIES = {
@@ -110,6 +112,43 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(run["workers"]["planner"]["prompt_ids"], ["msg_steer_1"])
         self.assertEqual(len(client.requests), 1)
 
+    def test_steer_records_prompt_id_through_worker_record_boundary(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = _active_worker_store(store_root, directory)
+            client = RecordingRunClient(
+                prompt_response={
+                    "sessionID": "ses_plan",
+                    "messageID": "msg_steer_1",
+                    "delivery": "queue",
+                    "state": "admitted",
+                }
+            )
+            service = RunCommandService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: PROMPT_CAPABILITIES,
+                now=lambda: "2026-07-05T00:00:00Z",
+            )
+            calls = []
+            original = WorkerRecord.remember_prompt_id
+
+            def traced_remember_prompt_id(self, prompt_id):
+                calls.append((self.worker_id, prompt_id))
+                return original(self, prompt_id)
+
+            with patch.object(WorkerRecord, "remember_prompt_id", traced_remember_prompt_id):
+                result = service.steer_worker(
+                    "demo",
+                    "planner",
+                    "Continue with the plan",
+                    delivery="queue",
+                    message_id="msg_steer_1",
+                )
+
+        self.assertIsInstance(result.worker, WorkerRecord)
+        self.assertEqual(calls, [("planner", "msg_steer_1")])
+        self.assertEqual(result.worker["prompt_ids"], ["msg_steer_1"])
+
     def test_steer_keeps_journal_when_final_prompt_persistence_fails_after_api_success(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             inner_store = _active_worker_store(store_root, directory)
@@ -214,6 +253,31 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(run["status"], "aborted")
         self.assertEqual(run["workers"]["planner"]["status"], "aborted")
         self.assertEqual(len(client.requests), 1)
+
+    def test_abort_applies_transition_through_worker_record_boundary(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = _active_worker_store(store_root, directory)
+            client = RecordingRunClient(
+                abort_response={"sessionID": "ses_plan", "accepted": True, "status": "aborted"}
+            )
+            service = RunCommandService(
+                store,
+                client_factory=lambda url: client,
+                now=lambda: "2026-07-05T00:00:00Z",
+            )
+            calls = []
+            original = WorkerRecord.apply_transition
+
+            def traced_apply_transition(self, transition):
+                calls.append((self.worker_id, transition.name.value))
+                return original(self, transition)
+
+            with patch.object(WorkerRecord, "apply_transition", traced_apply_transition):
+                result = service.abort_worker("demo", "planner")
+
+        self.assertIsInstance(result.worker, WorkerRecord)
+        self.assertEqual(calls, [("planner", "aborted")])
+        self.assertEqual(result.worker["status"], "aborted")
 
     def test_abort_keeps_journal_when_final_abort_persistence_fails_after_api_success(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:

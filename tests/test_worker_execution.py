@@ -1,6 +1,7 @@
 from copy import deepcopy
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.run_persistence import PersistedWorkerTransitions
@@ -10,9 +11,11 @@ from opencode_session.worker_execution import (
     WorkerExecutionTimeout,
     WorkerSessionCreationJournal,
     cleanup_created_worker_sessions,
+    ensure_worker_session,
     execute_worker_attempts,
+    provision_worker_session,
 )
-from opencode_session.worker_state import apply_worker_transition, ensure_worker
+from opencode_session.worker_state import WorkerRecord, apply_worker_transition, ensure_worker
 
 
 CAPABILITIES = {
@@ -65,6 +68,61 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(attempt.get("session_id"), session_id)
         self.assertEqual(attempt.get("status"), status)
         return attempt
+
+    def test_ensure_worker_session_uses_worker_record_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            client = FakeClient(["ses_new"])
+            calls = []
+            original = WorkerRecord.set_session
+
+            def traced_set_session(self, session_id, *, agent=None, model=None):
+                calls.append((self.worker_id, session_id, agent, model))
+                return original(self, session_id, agent=agent, model=model)
+
+            with patch.object(WorkerRecord, "set_session", traced_set_session):
+                outcome = ensure_worker_session(
+                    client,
+                    run,
+                    worker,
+                    agent="build",
+                    model="openai/gpt-5.5",
+                    treat_falsey_session_as_missing=True,
+                )
+
+        self.assertIsInstance(worker, WorkerRecord)
+        self.assertEqual(outcome.session_id, "ses_new")
+        self.assertEqual(calls, [("worker", "ses_new", "build", "openai/gpt-5.5")])
+        self.assertEqual(worker["session_id"], "ses_new")
+
+    def test_provision_without_create_uses_worker_record_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_worker(run, "worker", role="worker")
+            client = FakeClient([])
+            calls = []
+            original = WorkerRecord.set_session
+
+            def traced_set_session(self, session_id, *, agent=None, model=None):
+                calls.append((self.worker_id, session_id, agent, model))
+                return original(self, session_id, agent=agent, model=model)
+
+            with patch.object(WorkerRecord, "set_session", traced_set_session):
+                outcome = provision_worker_session(
+                    client,
+                    run,
+                    worker,
+                    session_id="ses_existing",
+                    agent="plan",
+                    model="openai/gpt-5.5",
+                    create_session=False,
+                )
+
+        self.assertEqual(client.requests, [])
+        self.assertEqual(outcome.session_id, "ses_existing")
+        self.assertEqual(calls, [("worker", "ses_existing", "plan", "openai/gpt-5.5")])
+        self.assertEqual(worker["session_id"], "ses_existing")
 
     def test_cleanup_created_worker_sessions_clears_stale_sessions_after_single_session_success(self):
         worker = {

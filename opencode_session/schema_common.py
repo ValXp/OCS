@@ -89,7 +89,7 @@ class WorkerAttemptRecord(TypedDict, total=False):
 
 
 # Persisted snapshots are intentionally sparse JSON. The storage boundary hydrates
-# them into Worker before core orchestration code sees a worker.
+# them into worker_state.WorkerRecord before core orchestration code mutates them.
 class WorkerSnapshotRecord(TypedDict, total=False):
     id: str
     name: str

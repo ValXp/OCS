@@ -661,10 +661,17 @@ def is_dependency_blockable_worker(worker):
     return WorkerSchedulingState.from_worker(worker).can_block_for_dependency()
 
 
-@dataclass(frozen=True)
-class WorkerRecord:
-    worker_id: str
-    fields: dict
+class WorkerRecord(dict):
+    """Hydrated worker domain object.
+
+    Worker records remain dict-compatible for existing orchestration code, but
+    core worker mutations should live here instead of scattered string-key
+    updates. Storage still writes sparse snapshots via to_snapshot().
+    """
+
+    def __init__(self, worker_id, fields=None):
+        super().__init__(dict(fields or {}))
+        self._worker_id = self.get("id") or worker_id
 
     @classmethod
     def from_worker(cls, worker, worker_id=None):
@@ -702,7 +709,7 @@ class WorkerRecord:
     def default_fields(cls, worker_id):
         fields = cls.default_snapshot_fields(worker_id)
         fields.update(cls.public_state_fields(fields["lifecycle_state"]))
-        return require_internal_worker(fields)
+        return cls.from_worker(require_internal_worker(fields), worker_id)
 
     @classmethod
     def public_state(cls, lifecycle_state):
@@ -715,6 +722,14 @@ class WorkerRecord:
     @classmethod
     def lifecycle_set_fields(cls, worker_id, lifecycle_state):
         return worker_lifecycle_set_fields(worker_id, lifecycle_state)
+
+    @property
+    def worker_id(self):
+        return self.get("id") or self._worker_id
+
+    @property
+    def fields(self):
+        return self
 
     @property
     def lifecycle_state(self):
@@ -742,7 +757,7 @@ class WorkerRecord:
 
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
-        fields = dict(self.fields)
+        fields = dict(self)
         fields.pop("status", None)
         fields.pop("next_eligible_action", None)
         normalized.update(fields)
@@ -767,10 +782,53 @@ class WorkerRecord:
     def to_worker(self):
         normalized = self.to_snapshot()
         normalized.update(self.public_state_fields(normalized["lifecycle_state"]))
-        return require_internal_worker(normalized)
+        return type(self).from_worker(require_internal_worker(normalized), self.worker_id)
 
     def serialized_public_state(self):
         return self.public_state_fields(self.lifecycle_state)
+
+    def set_session(self, session_id, *, agent=None, model=None):
+        self["session_id"] = deepcopy(session_id)
+        if agent is not None:
+            self["agent"] = deepcopy(agent)
+        if model is not None:
+            self["model"] = deepcopy(model)
+        return self
+
+    def remember_prompt_id(self, prompt_id):
+        prompt_ids = self.get("prompt_ids")
+        if not isinstance(prompt_ids, list):
+            prompt_ids = []
+        if prompt_id not in prompt_ids:
+            prompt_ids.append(prompt_id)
+        self["prompt_ids"] = prompt_ids
+        return self
+
+    def apply_transition(self, transition):
+        merged = _apply_worker_transition_to_record(self, transition)
+        self.clear()
+        self.update(merged)
+        self._worker_id = self.get("id") or self._worker_id or transition.worker_id
+        return self
+
+    def ensure_cleanup(self):
+        cleanup = self.get("cleanup")
+        if not isinstance(cleanup, dict):
+            cleanup = {"requested": True, "deleted": False}
+            self["cleanup"] = cleanup
+        return cleanup
+
+    def remember_session_for_cleanup(self, session_id):
+        cleanup = self.ensure_cleanup()
+        cleanup["requested"] = True
+        cleanup["deleted"] = False
+        sessions = cleanup.get("sessions")
+        if not isinstance(sessions, list):
+            sessions = []
+        if isinstance(session_id, str) and session_id and session_id not in sessions:
+            sessions.append(session_id)
+        cleanup["sessions"] = sessions
+        return self
 
 
 def default_worker_record(worker_id):
@@ -783,6 +841,20 @@ def deserialize_worker_record(worker, worker_id):
 
 def serialize_worker_snapshot(worker, worker_id):
     return WorkerRecord.from_worker(worker, worker_id).to_snapshot()
+
+
+def worker_record_for_mutation(worker, worker_id=None):
+    if isinstance(worker, WorkerRecord):
+        return worker
+    return WorkerRecord.from_worker(worker, worker_id)
+
+
+def sync_worker_record(worker, record):
+    if worker is not record and isinstance(worker, dict):
+        worker.clear()
+        worker.update(record)
+        return worker
+    return record
 
 
 def require_internal_worker(worker):
@@ -1083,17 +1155,17 @@ def _apply_worker_transition_to_record(worker, transition):
 
 
 def apply_worker_transition_to_worker(worker, transition):
-    merged = _apply_worker_transition_to_record(worker, transition)
-    worker.clear()
-    worker.update(merged)
-    return worker
+    record = worker_record_for_mutation(worker, transition.worker_id)
+    record.apply_transition(transition)
+    return sync_worker_record(worker, record)
 
 
 def apply_worker_transition(latest_workers, transition):
     latest_worker = latest_workers.get(transition.worker_id)
-    merged = _apply_worker_transition_to_record(latest_worker, transition)
-    latest_workers[transition.worker_id] = merged
-    return merged
+    record = worker_record_for_mutation(latest_worker, transition.worker_id)
+    record.apply_transition(transition)
+    latest_workers[transition.worker_id] = record
+    return record
 
 
 def next_eligible_action(worker):
