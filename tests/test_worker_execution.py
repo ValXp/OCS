@@ -6,7 +6,9 @@ from opencode_session.api_client import OpenCodeApiError
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_start_core import RunStartCore
 from opencode_session.worker_execution import (
+    WORKER_SESSION_JOURNAL_FIELD,
     WorkerExecutionTimeout,
+    WorkerSessionCreationJournal,
     cleanup_created_worker_sessions,
     execute_worker_attempts,
 )
@@ -95,6 +97,44 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(outcome.deleted_session_ids, ["ses_missing"])
         self.assertIsNone(outcome.error)
         self.assertEqual(worker["cleanup"], {"requested": True, "deleted": True})
+
+    def test_worker_session_journal_records_cleanup_failure_when_discard_fails(self):
+        run = {"name": "demo", "directory": "/workspace", "workers": {"worker": {"id": "worker"}}}
+        worker = run["workers"]["worker"]
+        calls = []
+
+        def persist_run_mutation(run, mutator):
+            calls.append("persist")
+            if len(calls) == 2:
+                raise RuntimeError("forced cleanup failure")
+            mutator(run)
+            return run
+
+        journal = WorkerSessionCreationJournal(
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+            id_factory=lambda: "worker-session-intent-1",
+        )
+
+        run, worker, intent = journal.record_intent(run, worker, cleanup_requested=True)
+        run, worker = journal.discard_intent_best_effort(run, worker, intent)
+
+        self.assertEqual(calls, ["persist", "persist", "persist"])
+        self.assertIs(worker, run["workers"]["worker"])
+        entry = run[WORKER_SESSION_JOURNAL_FIELD][0]
+        self.assertEqual(entry["id"], "worker-session-intent-1")
+        self.assertEqual(entry["kind"], "worker_session_create")
+        self.assertEqual(entry["status"], "intent")
+        self.assertTrue(entry["cleanup_requested"])
+        self.assertEqual(
+            entry["cleanup_failure"],
+            {
+                "operation": "discard_worker_session_create",
+                "error_type": "RuntimeError",
+                "message": "forced cleanup failure",
+                "recorded_at": "2026-07-05T00:00:00Z",
+            },
+        )
 
     def test_execute_worker_attempts_rejects_create_response_without_session_id_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:

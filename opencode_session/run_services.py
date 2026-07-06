@@ -12,6 +12,7 @@ from opencode_session.multi_worker_orchestration import (
     workers_in_dependency_order,
 )
 from opencode_session.prompt_admission import admit_prompt
+from opencode_session.remote_journal import PersistedRemoteMutationJournal
 from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import NormalizedAbortRecord, NormalizedAdmissionRecord, RunRecord, Worker
@@ -73,6 +74,11 @@ class RunCommandService:
         self.client_factory = client_factory
         self.capability_detector = capability_detector
         self.now = now or _utc_now
+        self.remote_mutations = PersistedRemoteMutationJournal(
+            REMOTE_MUTATION_JOURNAL_FIELD,
+            self._persist_run_mutation,
+            now=self.now,
+        )
 
     def create_run(self, name, *, directory, server_url):
         return self.store.create_run(name, directory=directory, server_url=server_url)
@@ -130,22 +136,19 @@ class RunCommandService:
         prompt_message_id = message_id or _new_prompt_message_id()
         mutation_id = _new_remote_mutation_id()
 
-        def record_prompt_intent(latest_run):
+        def prompt_intent(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
-            _append_remote_mutation(
-                latest_run,
-                {
-                    "id": mutation_id,
-                    "kind": "steer_prompt",
-                    "worker_id": worker_id,
-                    "session_id": latest_worker["session_id"],
-                    "message_id": prompt_message_id,
-                    "delivery": delivery,
-                    "text": text,
-                },
-            )
+            return {
+                "id": mutation_id,
+                "kind": "steer_prompt",
+                "worker_id": worker_id,
+                "session_id": latest_worker["session_id"],
+                "message_id": prompt_message_id,
+                "delivery": delivery,
+                "text": text,
+            }
 
-        self._update_run(name, record_prompt_intent)
+        run = self.remote_mutations.record_intent_from(run, prompt_intent)
         try:
             result = admit_prompt(
                 client,
@@ -156,7 +159,11 @@ class RunCommandService:
                 message_id=prompt_message_id,
             )
         except Exception:
-            self._discard_remote_mutation_best_effort(name, mutation_id)
+            self.remote_mutations.discard_intent_best_effort(
+                run,
+                mutation_id,
+                operation="discard_remote_mutation",
+            )
             raise
         admission = result.record
         admitted_message_id = admission["message_id"]
@@ -166,9 +173,8 @@ class RunCommandService:
             prompt_ids = latest_worker.setdefault("prompt_ids", [])
             if admitted_message_id not in prompt_ids:
                 prompt_ids.append(admitted_message_id)
-            _remove_remote_mutation(latest_run, mutation_id)
 
-        run = self._update_run(name, record_prompt_admission)
+        run = self.remote_mutations.finalize(run, mutation_id, before_finalize=record_prompt_admission)
         return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
 
     def abort_worker(self, name, worker_id):
@@ -177,23 +183,24 @@ class RunCommandService:
         client = self.client_factory(run["server_url"])
         mutation_id = _new_remote_mutation_id()
 
-        def record_abort_intent(latest_run):
+        def abort_intent(latest_run):
             latest_worker = _run_worker_with_session(latest_run, worker_id)
-            _append_remote_mutation(
-                latest_run,
-                {
-                    "id": mutation_id,
-                    "kind": "abort_worker",
-                    "worker_id": worker_id,
-                    "session_id": latest_worker["session_id"],
-                },
-            )
+            return {
+                "id": mutation_id,
+                "kind": "abort_worker",
+                "worker_id": worker_id,
+                "session_id": latest_worker["session_id"],
+            }
 
-        self._update_run(name, record_abort_intent)
+        run = self.remote_mutations.record_intent_from(run, abort_intent)
         try:
             response = client.abort_session_response(worker["session_id"])
         except Exception as error:
-            self._discard_remote_mutation_best_effort(name, mutation_id)
+            self.remote_mutations.discard_intent_best_effort(
+                run,
+                mutation_id,
+                operation="discard_remote_mutation",
+            )
             if isinstance(error, OpenCodeApiError) and is_session_not_found_error(error):
                 raise RunWorkerSessionNotFound(worker["session_id"]) from error
             raise
@@ -203,10 +210,12 @@ class RunCommandService:
             latest_worker = _run_worker_with_session(latest_run, worker_id)
             apply_worker_transition_to_worker(latest_worker, mark_worker_aborted(latest_worker, abort))
             refresh_orchestration_run_summary(latest_run)
-            _remove_remote_mutation(latest_run, mutation_id)
 
-        run = self._update_run(name, mark_aborted)
+        run = self.remote_mutations.finalize(run, mutation_id, before_finalize=mark_aborted)
         return RunAbortResult(run=run, worker=run["workers"][worker_id], abort=abort, raw_body=response.body)
+
+    def _persist_run_mutation(self, run, mutator):
+        return self._update_run(run["name"], mutator)
 
     def _update_run(self, name, mutator):
         def update(run):
@@ -214,30 +223,6 @@ class RunCommandService:
             run["updated_at"] = self.now()
 
         return self.store.update_run(name, update)
-
-    def _discard_remote_mutation_best_effort(self, name, mutation_id):
-        try:
-            self._update_run(name, lambda latest_run: _remove_remote_mutation(latest_run, mutation_id))
-        except Exception as cleanup_error:
-            self._record_remote_mutation_cleanup_failure_best_effort(name, mutation_id, cleanup_error)
-
-    def _record_remote_mutation_cleanup_failure_best_effort(self, name, mutation_id, cleanup_error):
-        def record_cleanup_failure(latest_run):
-            _mark_remote_mutation_cleanup_failure(
-                latest_run,
-                mutation_id,
-                {
-                    "operation": "discard_remote_mutation",
-                    "error_type": type(cleanup_error).__name__,
-                    "message": str(cleanup_error),
-                    "recorded_at": self.now(),
-                },
-            )
-
-        try:
-            self._update_run(name, record_cleanup_failure)
-        except Exception:
-            pass
 
 
 class RunWorkerSessionNotFound(Exception):
@@ -263,36 +248,6 @@ def _run_worker_with_session(run, worker_id):
     if not worker.get("session_id"):
         raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no session", kind="missing")
     return worker
-
-
-def _append_remote_mutation(run, mutation):
-    journal = run.get(REMOTE_MUTATION_JOURNAL_FIELD)
-    if not isinstance(journal, list):
-        journal = []
-    journal.append(mutation)
-    run[REMOTE_MUTATION_JOURNAL_FIELD] = journal
-
-
-def _remove_remote_mutation(run, mutation_id):
-    journal = run.get(REMOTE_MUTATION_JOURNAL_FIELD)
-    if not isinstance(journal, list):
-        run.pop(REMOTE_MUTATION_JOURNAL_FIELD, None)
-        return
-    remaining = [mutation for mutation in journal if not isinstance(mutation, dict) or mutation.get("id") != mutation_id]
-    if remaining:
-        run[REMOTE_MUTATION_JOURNAL_FIELD] = remaining
-    else:
-        run.pop(REMOTE_MUTATION_JOURNAL_FIELD, None)
-
-
-def _mark_remote_mutation_cleanup_failure(run, mutation_id, cleanup_failure):
-    journal = run.get(REMOTE_MUTATION_JOURNAL_FIELD)
-    if not isinstance(journal, list):
-        return
-    for mutation in journal:
-        if isinstance(mutation, dict) and mutation.get("id") == mutation_id:
-            mutation["cleanup_failure"] = cleanup_failure
-            return
 
 
 def _new_prompt_message_id():

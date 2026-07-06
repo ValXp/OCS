@@ -6,6 +6,7 @@ from typing import Optional
 from opencode_session.api_client import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure, execute_blocking_prompt
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
+from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationJournal
 from opencode_session.schema_common import ExecutionResultRecord, RunRecord, Worker
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
@@ -28,6 +29,7 @@ RETRY_SCHEDULED = "retry_scheduled"
 TERMINAL_FAILURE = "terminal_failure"
 WORKER_SESSION_JOURNAL_FIELD = "worker_session_journal"
 WORKER_SESSION_CREATE_KIND = "worker_session_create"
+_WORKER_SESSION_JOURNAL = RemoteMutationJournal(WORKER_SESSION_JOURNAL_FIELD)
 
 _ATTEMPT_COMPLETED = "completed"
 _ATTEMPT_FAILED = "failed"
@@ -84,6 +86,11 @@ class WorkerSessionCreationJournal:
         self.persist_run_mutation = persist_run_mutation
         self.now = now
         self.id_factory = id_factory or _new_worker_session_journal_id
+        self.journal = PersistedRemoteMutationJournal(
+            WORKER_SESSION_JOURNAL_FIELD,
+            self.persist_run_mutation,
+            now=self.now,
+        )
 
     def record_intent(self, run, worker, *, agent=None, model=None, cleanup_requested=False):
         intent = WorkerSessionCreationIntent(
@@ -105,14 +112,25 @@ class WorkerSessionCreationJournal:
         if model is not None:
             entry["model"] = model
 
-        def record(latest_run):
-            _append_worker_session_journal_entry(latest_run, entry)
-
-        updated_run = self.persist_run_mutation(run, record)
+        updated_run = self.journal.record_intent(run, entry)
         return updated_run, _latest_worker(updated_run, worker), intent
 
     def record_created(self, run, worker, intent, session_id, *, agent=None, model=None):
-        def record(latest_run):
+        fields = {
+            "status": "created",
+            "session_id": session_id,
+            "created_session_ids": [session_id],
+            "created_at": self.now(),
+        }
+        missing_entry = {
+            "id": intent.id,
+            "kind": WORKER_SESSION_CREATE_KIND,
+            "worker_id": intent.worker_id,
+            "cleanup_requested": intent.cleanup_requested,
+            **fields,
+        }
+
+        def update_worker(latest_run):
             latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
             latest_worker["session_id"] = session_id
             if agent is not None:
@@ -121,34 +139,24 @@ class WorkerSessionCreationJournal:
                 latest_worker["model"] = model
             if intent.cleanup_requested:
                 _remember_worker_session_for_cleanup(latest_worker, session_id)
-            _update_worker_session_journal_entry(
-                latest_run,
-                intent.id,
-                {
-                    "status": "created",
-                    "session_id": session_id,
-                    "created_session_ids": [session_id],
-                    "created_at": self.now(),
-                },
-            )
 
-        updated_run = self.persist_run_mutation(run, record)
+        updated_run = self.journal.mark_applied(
+            run,
+            intent.id,
+            fields,
+            before_mark=update_worker,
+            missing_entry=missing_entry,
+        )
         return updated_run, _latest_worker(updated_run, worker)
 
     def discard_intent_best_effort(self, run, worker, intent):
-        return self._remove_best_effort(run, worker, intent)
+        return self._remove_best_effort(run, worker, intent, operation="discard_worker_session_create")
 
     def finalize_best_effort(self, run, worker, intent):
-        return self._remove_best_effort(run, worker, intent)
+        return self._remove_best_effort(run, worker, intent, operation="finalize_worker_session_create")
 
-    def _remove_best_effort(self, run, worker, intent):
-        try:
-            updated_run = self.persist_run_mutation(
-                run,
-                lambda latest_run: _remove_worker_session_journal_entry(latest_run, intent.id),
-            )
-        except Exception:
-            return run, worker
+    def _remove_best_effort(self, run, worker, intent, *, operation):
+        updated_run = self.journal.finalize_best_effort(run, intent.id, operation=operation)
         return updated_run, _latest_worker(updated_run, worker)
 
 
@@ -572,43 +580,8 @@ def _ensure_latest_worker(run, worker_id):
     return worker
 
 
-def _append_worker_session_journal_entry(run, entry):
-    journal = run.get(WORKER_SESSION_JOURNAL_FIELD)
-    if not isinstance(journal, list):
-        journal = []
-    journal.append(dict(entry))
-    run[WORKER_SESSION_JOURNAL_FIELD] = journal
-
-
-def _update_worker_session_journal_entry(run, entry_id, fields):
-    journal = run.get(WORKER_SESSION_JOURNAL_FIELD)
-    if not isinstance(journal, list):
-        journal = []
-        run[WORKER_SESSION_JOURNAL_FIELD] = journal
-    for entry in journal:
-        if isinstance(entry, dict) and entry.get("id") == entry_id:
-            entry.update(fields)
-            return
-    journal.append({"id": entry_id, "kind": WORKER_SESSION_CREATE_KIND, **dict(fields)})
-
-
-def _remove_worker_session_journal_entry(run, entry_id):
-    journal = run.get(WORKER_SESSION_JOURNAL_FIELD)
-    if not isinstance(journal, list):
-        run.pop(WORKER_SESSION_JOURNAL_FIELD, None)
-        return
-    remaining = [entry for entry in journal if not isinstance(entry, dict) or entry.get("id") != entry_id]
-    if remaining:
-        run[WORKER_SESSION_JOURNAL_FIELD] = remaining
-    else:
-        run.pop(WORKER_SESSION_JOURNAL_FIELD, None)
-
-
 def _worker_session_journal_entries(run):
-    journal = run.get(WORKER_SESSION_JOURNAL_FIELD) if isinstance(run, dict) else None
-    if not isinstance(journal, list):
-        return ()
-    return tuple(entry for entry in journal if isinstance(entry, dict))
+    return _WORKER_SESSION_JOURNAL.pending_entries(run)
 
 
 def _remember_worker_session_for_cleanup(worker, session_id):
