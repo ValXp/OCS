@@ -48,6 +48,51 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         self.assertEqual(worker_output_field(worker, "status"), "active")
         self.assertEqual(worker_output_field(worker, "next_eligible_action"), "wait")
 
+    def test_normalize_run_migrates_legacy_public_status_at_hydration_boundary(self):
+        run = normalize_run(
+            {
+                "name": "demo",
+                "workers": {
+                    "review": {
+                        "id": "review",
+                        "role": "review",
+                        "prompt": "Review the change",
+                        "status": "active",
+                        "next_eligible_action": "retry",
+                    }
+                },
+            },
+            fallback_name="demo",
+        )
+
+        worker = run["workers"]["review"]
+        output = run_record_for_output(run)["workers"]["review"]
+
+        self.assertIsInstance(worker, WorkerRecord)
+        self.assertEqual(worker.lifecycle_state, "active_retry")
+        self.assertIsNone(worker.field("status"))
+        self.assertIsNone(worker.field("next_eligible_action"))
+        self.assertEqual(output["status"], "active")
+        self.assertEqual(output["next_eligible_action"], "retry")
+
+    def test_worker_state_core_does_not_infer_legacy_public_status(self):
+        from opencode_session.worker_state import normalize_worker, worker_lifecycle_state
+
+        worker = normalize_worker(
+            {
+                "id": "review",
+                "role": "review",
+                "prompt": "Review the change",
+                "status": "done",
+                "next_eligible_action": "collect",
+            },
+            "review",
+        )
+
+        self.assertEqual(worker_lifecycle_state(worker), "queued")
+        self.assertIsNone(worker.field("status"))
+        self.assertIsNone(worker.field("next_eligible_action"))
+
     def test_storage_normalization_serializes_plain_json_worker_snapshots(self):
         hydrated = normalize_run(
             {

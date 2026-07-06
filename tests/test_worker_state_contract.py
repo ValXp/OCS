@@ -1,6 +1,11 @@
 from collections.abc import Mapping, MutableMapping
 import unittest
 
+from opencode_session.worker_storage_adapter import (
+    canonicalize_legacy_worker_record,
+    hydrate_worker_record,
+    normalize_worker_snapshot_for_storage,
+)
 from opencode_session.worker_state import (
     EXECUTABLE_WORKER_ACTIONS,
     FAILED_DEPENDENCY_STATUSES,
@@ -19,7 +24,6 @@ from opencode_session.worker_state import (
     WorkerLifecycleStatus,
     WorkerRecord,
     apply_worker_transition,
-    canonicalize_legacy_worker_record,
     deserialize_worker_record,
     is_executable_worker,
     is_worker_record,
@@ -130,7 +134,10 @@ class WorkerStateContractTest(unittest.TestCase):
         for status, lifecycle_state in WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS.items():
             with self.subTest(status=status):
                 self.assertEqual(worker_lifecycle_state_for_status_alias(status), lifecycle_state)
-                self.assertEqual(worker_lifecycle_state(normalize_worker({"status": status}, "review")), lifecycle_state)
+                self.assertEqual(
+                    worker_lifecycle_state(normalize_worker({"lifecycle_state": lifecycle_state}, "review")),
+                    lifecycle_state,
+                )
                 self.assertEqual(status_priority(status), WORKER_STATUS_PRIORITY_BY_STATUS[status])
 
         for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
@@ -158,7 +165,7 @@ class WorkerStateContractTest(unittest.TestCase):
         worker = normalize_worker(
             {
                 "id": "",
-                "status": "failed",
+                "lifecycle_state": "failed_retry",
                 "dependencies": "build",
                 "retry_count": "1",
                 "retry_limit": "2",
@@ -264,7 +271,7 @@ class WorkerStateContractTest(unittest.TestCase):
         for name, worker, expected_lifecycle, expected_status, expected_action, executable in cases:
             with self.subTest(name=name):
                 canonical = canonicalize_legacy_worker_record(worker)
-                record = normalize_worker(worker, worker["id"])
+                record = hydrate_worker_record(worker, worker["id"])
 
                 self.assertEqual(canonical["lifecycle_state"], expected_lifecycle)
                 self.assertIsInstance(record, WorkerRecord)
@@ -366,8 +373,8 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker.field("prompt_ids"), ["msg_review"])
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
-    def test_deserialize_worker_snapshot_hydrates_defaults_and_public_state(self):
-        worker = deserialize_worker_record(
+    def test_hydration_adapter_derives_legacy_public_state(self):
+        worker = hydrate_worker_record(
             {
                 "status": "active",
                 "next_eligible_action": "retry",
@@ -431,8 +438,8 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
-    def test_normalize_worker_snapshot_migrates_legacy_public_status_without_lifecycle(self):
-        snapshot = normalize_worker_snapshot(
+    def test_storage_adapter_migrates_legacy_public_status_without_lifecycle(self):
+        snapshot = normalize_worker_snapshot_for_storage(
             {
                 "id": "review",
                 "status": "done",

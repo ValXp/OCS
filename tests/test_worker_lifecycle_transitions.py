@@ -56,7 +56,7 @@ TRANSITION_CASES = (
     WorkerTransitionCase(
         "active worker clears stale current-status metadata",
         {
-            "status": "blocked",
+            "lifecycle_state": "blocked_dependency",
             "blockers": ["dependency:build"],
             "error": "previous failure",
             "failure_category": "api",
@@ -79,7 +79,7 @@ TRANSITION_CASES = (
     WorkerTransitionCase(
         "terminal failure records prompt ids",
         {
-            "status": "active",
+            "lifecycle_state": "active_wait",
             "next_eligible_action": "wait",
             "failure_retryable": False,
             "prompt_ids": ["msg_previous"],
@@ -97,7 +97,7 @@ TRANSITION_CASES = (
     WorkerTransitionCase(
         "retryable failure remains retry eligible",
         {
-            "status": "active",
+            "lifecycle_state": "active_wait",
             "next_eligible_action": "wait",
             "retryable_failures": ["provider"],
             "retry_count": 0,
@@ -122,7 +122,7 @@ TRANSITION_CASES = (
     WorkerTransitionCase(
         "done result clears stale current-status metadata",
         {
-            "status": "active",
+            "lifecycle_state": "active_wait",
             "blockers": ["dependency:build"],
             "error": "previous failure",
             "failure_category": "api",
@@ -156,7 +156,7 @@ TRANSITION_CASES = (
     WorkerTransitionCase(
         "scheduled retry clears stale current-status metadata",
         {
-            "status": "failed",
+            "lifecycle_state": "failed_retry",
             "blockers": ["dependency:build"],
             "error": "previous failure",
             "failure_category": "api",
@@ -190,7 +190,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
     def test_accepted_abort_preserves_late_result_but_keeps_prompt_ids(self):
         worker = normalize_worker(
             {
-                "status": "active",
+                "lifecycle_state": "active_wait",
                 "session_id": "ses_build",
                 "prompt_ids": ["msg_initial"],
             },
@@ -227,7 +227,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             WorkerScenario(
                 "review",
                 prompt="Review",
-                status="failed",
+                lifecycle_state="failed_retry",
                 retryable_failures=["provider"],
                 retry_count=0,
                 retry_limit=1,
@@ -250,7 +250,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
         original = normalize_worker(
             {
-                "status": "done",
+                "lifecycle_state": "done_collect",
                 "result": {
                     "status": "done",
                     "message_ids": {"assistant": "msg_done"},
@@ -294,7 +294,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
     def test_worker_transition_reducer_allows_legal_retry_timeout_and_result_transitions(self):
         retry_worker = normalize_worker(
             {
-                "status": "failed",
+                "lifecycle_state": "failed_retry",
                 "failure_category": "provider",
                 "retryable_failures": ["provider"],
                 "retry_count": 0,
@@ -309,7 +309,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
         timeout_worker = normalize_worker(
             {
-                "status": "active",
+                "lifecycle_state": "active_wait",
                 "retryable_failures": ["timeout"],
                 "retry_count": 0,
                 "retry_limit": 1,
@@ -331,7 +331,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         assert_worker_outcome(self, timeout_worker, status="failed", action="retry", lifecycle="timeout_failed_retry")
         self.assertTrue(worker_field(timeout_worker, "manual_retry_required"))
 
-        result_worker = normalize_worker({"status": "active"}, "review")
+        result_worker = normalize_worker({"lifecycle_state": "active_wait"}, "review")
         apply_worker_transition_to_worker(
             result_worker,
             WorkerTransition.result_applied(
@@ -361,7 +361,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
             (
                 WorkerTransitionName.ATTEMPT_STARTED,
-                {"status": "active"},
+                {"lifecycle_state": "active_wait"},
                 lambda worker: WorkerTransition.attempt_started(
                     worker_field(worker, "id"),
                     {"id": "attempt-1", "status": "active", "session_id": "ses_review"},
@@ -371,7 +371,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
             (
                 WorkerTransitionName.FAILED,
-                {"status": "active"},
+                {"lifecycle_state": "active_wait"},
                 lambda worker: mark_worker_failed(worker, "provider", "provider failed", retryable=False),
                 {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
                 {"failure_category": "provider", "failure_reason": "provider failed"},
@@ -385,7 +385,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
             (
                 WorkerTransitionName.ABORTED,
-                {"status": "active"},
+                {"lifecycle_state": "active_wait"},
                 lambda worker: mark_worker_aborted(worker, {"accepted": True}),
                 {"status": "aborted", "action": "none", "lifecycle": "aborted"},
                 {"abort": {"accepted": True}},
@@ -393,7 +393,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             (
                 WorkerTransitionName.RETRY_SCHEDULED,
                 {
-                    "status": "failed",
+                    "lifecycle_state": "failed_retry",
                     "failure_category": "provider",
                     "retryable_failures": ["provider"],
                     "retry_count": 0,
@@ -405,7 +405,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
             (
                 WorkerTransitionName.TIMED_OUT,
-                {"status": "active"},
+                {"lifecycle_state": "active_wait"},
                 lambda worker: WorkerTransition.timed_out(
                     worker_field(worker, "id"),
                     "worker timed out",
@@ -417,7 +417,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
             (
                 WorkerTransitionName.RESULT_APPLIED,
-                {"status": "active"},
+                {"lifecycle_state": "active_wait"},
                 lambda worker: WorkerTransition.result_applied(
                     worker_field(worker, "id"),
                     {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
@@ -434,7 +434,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             ),
             (
                 WorkerTransitionName.SNAPSHOT_APPLIED,
-                {"status": "active", "prompt_ids": ["msg_initial"]},
+                {"lifecycle_state": "active_wait", "prompt_ids": ["msg_initial"]},
                 lambda worker: WorkerTransition.snapshot_applied(
                     normalize_worker_snapshot(
                         {
@@ -504,7 +504,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
     def test_retry_transition_metadata_carries_legality_target_and_behavior(self):
         worker = normalize_worker(
             {
-                "status": "failed",
+                "lifecycle_state": "failed_retry",
                 "failure_category": "provider",
                 "retryable_failures": ["provider"],
                 "retry_count": 0,
@@ -536,7 +536,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             apply_worker_transition_to_worker(worker, transition)
 
     def test_snapshot_replay_allows_legal_active_to_done_transition(self):
-        worker = normalize_worker({"status": "active", "prompt_ids": ["msg_initial"]}, "review")
+        worker = normalize_worker({"lifecycle_state": "active_wait", "prompt_ids": ["msg_initial"]}, "review")
         snapshot = normalize_worker_snapshot(
             {
                 "id": "review",
@@ -562,7 +562,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
         original = normalize_worker(
             {
-                "status": "done",
+                "lifecycle_state": "done_collect",
                 "prompt_ids": ["msg_done"],
                 "result": {
                     "status": "done",
@@ -622,7 +622,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
     def test_mark_worker_active_clears_retry_marker_prompt_ids(self):
         worker = normalize_worker(
             {
-                "status": "failed",
+                "lifecycle_state": "failed_retry",
                 "retryable_failures": ["provider"],
                 "retry_count": 0,
                 "retry_limit": 1,
@@ -642,7 +642,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         self.assertEqual(worker_field(worker, "prompt_ids"), [])
 
     def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
-        worker = normalize_worker({"status": "active", "next_eligible_action": "wait"}, "planner")
+        worker = normalize_worker({"lifecycle_state": "active_wait", "next_eligible_action": "wait"}, "planner")
 
         apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": False}))
 

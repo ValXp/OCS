@@ -581,7 +581,7 @@ def public_worker_state_fields(lifecycle_state):
 
 
 def worker_output_dict(worker, worker_id=None):
-    record = WorkerRecord.from_worker(canonicalize_legacy_worker_record(worker), worker_id).to_worker()
+    record = WorkerRecord.from_worker(worker, worker_id).to_worker()
     fields = record.to_snapshot()
     fields.update(public_worker_state_fields(fields["lifecycle_state"]))
     return fields
@@ -1325,14 +1325,6 @@ def _worker_fields(worker):
     return {}
 
 
-def _raw_worker_field(worker, field_name, default=None):
-    if isinstance(worker, WorkerRecord):
-        return worker.field(field_name, default)
-    if isinstance(worker, Mapping):
-        return worker.get(field_name, default)
-    return default
-
-
 def worker_field(worker, field_name, default=None):
     return _require_worker_record(worker).field(field_name, default)
 
@@ -1359,26 +1351,6 @@ def worker_retry_available(worker, category=None):
     try:
         retry_count = int(worker_field(worker, "retry_count") or 0)
         retry_limit = int(worker_field(worker, "retry_limit") or 0)
-    except (TypeError, ValueError):
-        return False
-    return retry_count < retry_limit
-
-
-def _legacy_worker_retry_available(worker, category=None):
-    if not isinstance(worker, Mapping):
-        return False
-    if _raw_worker_field(worker, "failure_retryable") is False:
-        return False
-    retryable = set(_raw_worker_field(worker, "retryable_failures") or [])
-    if not retryable:
-        return False
-    if category is None:
-        category = _raw_worker_field(worker, "failure_category") or _raw_worker_field(worker, "last_failure_category")
-    if category and category not in retryable and "all" not in retryable:
-        return False
-    try:
-        retry_count = int(_raw_worker_field(worker, "retry_count") or 0)
-        retry_limit = int(_raw_worker_field(worker, "retry_limit") or 0)
     except (TypeError, ValueError):
         return False
     return retry_count < retry_limit
@@ -1431,71 +1403,11 @@ def worker_lifecycle_state(worker):
 def _canonical_lifecycle_state(worker):
     if isinstance(worker, WorkerRecord):
         return worker.lifecycle_state
-    lifecycle_state = _raw_worker_field(worker, "lifecycle_state") if isinstance(worker, Mapping) else None
-    if lifecycle_state in WORKER_LIFECYCLE_STATES:
-        return lifecycle_state
-    return _lifecycle_state_from_legacy_public_worker_state(worker)
-
-
-def _lifecycle_state_from_legacy_public_worker_state(worker):
-    """Compatibility boundary for legacy/public records that do not carry lifecycle_state."""
-    worker = worker if isinstance(worker, Mapping) else {}
-    status = short_status(_raw_worker_field(worker, "status"))
-    if status == WORKER_STATUS_QUEUED:
-        return worker_lifecycle_state_for_status_alias(status)
-    if status == WORKER_STATUS_ACTIVE:
-        if _raw_worker_field(worker, "next_eligible_action") == WORKER_ACTION_RETRY:
-            return worker_lifecycle_state_for_public_state(status, WORKER_ACTION_RETRY)
-        return worker_lifecycle_state_for_status_alias(status)
-    if is_blocked_status(status):
-        timeout_origin = _raw_worker_field(
-            worker,
-            "failure_category",
-        ) == WORKER_STATUS_TIMEOUT or WORKER_STATUS_TIMEOUT in set(
-            _raw_worker_field(worker, "blockers") or []
-        )
-        return worker_lifecycle_state_for_public_state(
-            status,
-            WORKER_ACTION_RESOLVE_BLOCKER,
-            timeout_origin=timeout_origin,
-        )
-    if status == WORKER_STATUS_DONE:
-        return worker_lifecycle_state_for_status_alias(status)
-    if status == WORKER_STATUS_FAILED:
-        if _raw_worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT:
-            return worker_lifecycle_state_for_public_state(
-                status,
-                WORKER_ACTION_RETRY if _legacy_worker_retry_available(worker, WORKER_STATUS_TIMEOUT) else WORKER_ACTION_NONE,
-                timeout_origin=True,
-            )
-        return worker_lifecycle_state_for_public_state(
-            status,
-            WORKER_ACTION_RETRY if _legacy_worker_retry_available(worker) else WORKER_ACTION_NONE,
-        )
-    if status == WORKER_STATUS_TIMEOUT:
-        return worker_lifecycle_state_for_public_state(
-            status,
-            WORKER_ACTION_RETRY if _legacy_worker_retry_available(worker, WORKER_STATUS_TIMEOUT) else WORKER_ACTION_NONE,
-            timeout_origin=True,
-        )
-    if status == WORKER_STATUS_ABORTED:
-        if _raw_worker_field(worker, "failure_category") == WORKER_STATUS_TIMEOUT:
-            return worker_lifecycle_state_for_public_state(
-                status,
-                WORKER_ACTION_NONE,
-                timeout_origin=True,
-            )
-        return worker_lifecycle_state_for_status_alias(status)
+    if isinstance(worker, Mapping):
+        lifecycle_state = worker.get("lifecycle_state")
+        if lifecycle_state in WORKER_LIFECYCLE_STATES:
+            return lifecycle_state
     return WORKER_LIFECYCLE_QUEUED
-
-
-def canonicalize_legacy_worker_record(worker):
-    fields = _worker_fields(worker)
-    if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
-        fields["lifecycle_state"] = _lifecycle_state_from_legacy_public_worker_state(fields)
-    for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
-        fields.pop(public_field_name, None)
-    return fields
 
 
 def latest_prompt_ids_are_retry_marker(latest_worker):
@@ -1722,7 +1634,7 @@ def default_worker_record(worker_id):
 
 
 def deserialize_worker_record(worker, worker_id):
-    return WorkerRecord.from_worker(canonicalize_legacy_worker_record(worker), worker_id).to_worker()
+    return WorkerRecord.from_worker(worker, worker_id).to_worker()
 
 
 def serialize_worker_snapshot(worker, worker_id):
@@ -1944,7 +1856,7 @@ def _abort_is_accepted(abort):
 
 
 def default_worker(worker_id):
-    return deserialize_worker_record({}, worker_id)
+    return default_worker_record(worker_id)
 
 
 def normalize_worker(worker, worker_id):
@@ -1952,7 +1864,7 @@ def normalize_worker(worker, worker_id):
 
 
 def normalize_worker_snapshot(worker, worker_id):
-    return serialize_worker_snapshot(canonicalize_legacy_worker_record(worker), worker_id)
+    return serialize_worker_snapshot(worker, worker_id)
 
 
 def _apply_worker_transition_to_record(worker, transition):

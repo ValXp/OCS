@@ -2,11 +2,13 @@ from copy import deepcopy
 from pathlib import Path
 
 from opencode_session.status import short_status
+from opencode_session.worker_storage_adapter import (
+    hydrate_worker_record,
+    normalize_worker_snapshot_for_storage,
+)
 from opencode_session.worker_state import (
     WORKER_LIFECYCLE_STATES,
     default_worker_record,
-    deserialize_worker_record,
-    serialize_worker_snapshot,
     worker_output_dict,
 )
 
@@ -48,7 +50,7 @@ def upsert_worker_record(run, worker_id, changes, *, now):
             raise RunRecordError(f"worker '{worker_id}' does not exist; --role is required to create it")
         worker = default_worker_record(worker_id)
     else:
-        worker = deserialize_worker_record(existing, worker_id)
+        worker = hydrate_worker_record(existing, worker_id)
 
     for public_field_name in ("status", "next_eligible_action"):
         if changes.get(public_field_name) is not None:
@@ -77,7 +79,7 @@ def upsert_worker_record(run, worker_id, changes, *, now):
         if changes.get(key) is not None:
             worker.set_field(key, changes[key])
 
-    workers[worker_id] = deserialize_worker_record(worker, worker_id)
+    workers[worker_id] = hydrate_worker_record(worker, worker_id)
     run["updated_at"] = now
 
 
@@ -102,7 +104,7 @@ def normalize_run(run, *, fallback_name):
         workers = {}
     elif not isinstance(workers, dict):
         raise RunRecordError(f"run record for '{fallback_name}' is corrupted: workers must be an object")
-    normalized["workers"] = {worker_id: deserialize_worker_record(worker, worker_id) for worker_id, worker in workers.items()}
+    normalized["workers"] = {worker_id: hydrate_worker_record(worker, worker_id) for worker_id, worker in workers.items()}
     normalized.setdefault("created_at", None)
     normalized.setdefault("updated_at", None)
     return normalized
@@ -111,7 +113,7 @@ def normalize_run(run, *, fallback_name):
 def normalize_run_for_storage(run, *, fallback_name):
     normalized = normalize_run(run, fallback_name=fallback_name)
     normalized["workers"] = {
-        worker_id: serialize_worker_snapshot(worker, worker_id)
+        worker_id: normalize_worker_snapshot_for_storage(worker, worker_id)
         for worker_id, worker in normalized["workers"].items()
     }
     return normalized

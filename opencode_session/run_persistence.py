@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from collections.abc import Mapping
 
+from opencode_session.worker_storage_adapter import normalize_worker_snapshot_for_storage
 from opencode_session.worker_state import (
     WorkerTransition,
     WorkerRecord,
     apply_worker_transition,
-    normalize_worker_snapshot,
     worker_field,
 )
 
@@ -45,7 +45,7 @@ def _snapshot_update_transition(worker):
         return None
     if not worker_id:
         return None
-    return WorkerTransition.snapshot_applied(normalize_worker_snapshot(worker, worker_id))
+    return WorkerTransition.snapshot_applied(normalize_worker_snapshot_for_storage(worker, worker_id))
 
 
 def persist_worker_transitions(store, run, transitions, *, refresh_run_summary, now):
