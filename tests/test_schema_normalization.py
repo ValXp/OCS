@@ -4,8 +4,14 @@ from opencode_session.events import normalize_event
 from opencode_session.schema_admission_adapter import normalize_admission_record
 from opencode_session.schema_common import NormalizedEventRecord, PersistedRunRecord, WorkerSnapshotRecord
 from opencode_session.schema_event_adapter import normalize_event_record
-from opencode_session.schema_message_adapter import iter_normalized_message_records, message_value, normalize_message_record
-from opencode_session.schema_session_adapter import normalize_session_payload
+from opencode_session.schema_message_adapter import (
+    LEGACY_MESSAGE_ROUTE,
+    SESSION_MESSAGE_ROUTE,
+    iter_normalized_message_records,
+    message_value,
+    normalize_message_record,
+)
+from opencode_session.schema_session_adapter import normalize_session_payload, session_value
 
 
 KNOWN_EVENT_ROUTE_FIXTURES = (
@@ -144,6 +150,24 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(session["tokens"], {"input": 4, "output": 6, "total": 10})
         self.assertEqual(session["createdAt"], "2026-07-01T00:00:00Z")
         self.assertEqual(session["updatedAt"], "2026-07-01T00:00:03Z")
+
+    def test_session_routes_require_record_identity_before_known_normalization(self):
+        api_payload = {"data": [{"title": "Missing id"}]}
+        legacy_payload = {"children": [{"name": "Missing id"}]}
+
+        api_session = normalize_session_payload(api_payload, route_path="/api/session")["data"][0]
+        legacy_session = normalize_session_payload(legacy_payload, route_path="/session")["children"][0]
+
+        self.assertEqual(api_session["schema_status"], "unknown")
+        self.assertEqual(api_session["raw"], {"title": "Missing id"})
+        self.assertEqual(legacy_session["schema_status"], "unknown")
+        self.assertEqual(legacy_session["raw"], {"name": "Missing id"})
+
+    def test_session_value_preserves_wrapped_record_compatibility(self):
+        session = {"data": {"sessionID": "ses_wrapped", "name": "Wrapped"}}
+
+        self.assertEqual(session_value(session, "id", "sessionID", "sessionId"), "ses_wrapped")
+        self.assertEqual(session_value(session, "title", "name"), "Wrapped")
 
     def test_normalizes_message_evidence_aliases(self):
         payload = {
@@ -286,6 +310,54 @@ class SchemaNormalizationTest(unittest.TestCase):
         )
         self.assertEqual(message_value(message, "error", "reason", "message"), "quota exceeded")
 
+    def test_message_route_adapters_accept_route_specific_shapes(self):
+        session_message = {
+            "info": {
+                "id": "msg_modern",
+                "role": "assistant",
+                "tokens": {"input": 2, "output": 3},
+            },
+            "parts": [{"type": "text", "text": "PONG"}],
+        }
+        legacy_message = {
+            "messageID": "msg_legacy",
+            "author": "assistant",
+            "state": "completed",
+            "tokenUsage": {"input": 1, "output": 1},
+            "content": "done",
+        }
+
+        normalized_session_message = normalize_message_record(session_message, route=SESSION_MESSAGE_ROUTE)
+        normalized_legacy_message = normalize_message_record(legacy_message, route=LEGACY_MESSAGE_ROUTE)
+
+        self.assertEqual(normalized_session_message["id"], "msg_modern")
+        self.assertEqual(normalized_session_message["role"], "assistant")
+        self.assertEqual(normalized_session_message["tokens"], {"input": 2, "output": 3, "total": 5})
+        self.assertEqual(normalized_session_message["text"], "PONG")
+        self.assertEqual(normalized_legacy_message["id"], "msg_legacy")
+        self.assertEqual(normalized_legacy_message["role"], "assistant")
+        self.assertEqual(normalized_legacy_message["status"], "done")
+        self.assertEqual(normalized_legacy_message["raw_status"], "completed")
+        self.assertEqual(normalized_legacy_message["tokens"], {"input": 1, "output": 1, "total": 2})
+
+    def test_session_message_route_rejects_legacy_only_message_aliases(self):
+        message = {"message_id": "msg_legacy", "kind": "assistant", "token_usage": {"input": 1}}
+
+        normalized = normalize_message_record(message, route=SESSION_MESSAGE_ROUTE)
+
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["raw"], message)
+        self.assertIsNone(message_value(message, "id", "messageID", "messageId", route=SESSION_MESSAGE_ROUTE))
+        self.assertEqual(message_value(message, "id", "message_id"), "msg_legacy")
+
+    def test_message_token_only_shape_is_unknown(self):
+        message = {"tokenUsage": {"input": 1, "output": 2}}
+
+        normalized = normalize_message_record(message, route=LEGACY_MESSAGE_ROUTE)
+
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["raw"], message)
+
     def test_event_session_mismatch_is_explicit_but_watcher_boundary_filters_it(self):
         event = {
             "type": "session.status",
@@ -322,6 +394,30 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(legacy_event["kind"], "status")
         self.assertEqual(legacy_event["session_id"], "ses_1")
         self.assertEqual(legacy_event["status"], "done")
+
+    def test_legacy_event_route_rejects_api_event_envelope(self):
+        event = {
+            "type": "session.status",
+            "properties": {"sessionID": "ses_1", "status": "completed"},
+        }
+
+        legacy_event = normalize_event_record(event, "ses_1", route_path="/event")
+
+        self.assertEqual(legacy_event["kind"], "unknown")
+        self.assertEqual(legacy_event["schema_status"], "unknown")
+        self.assertEqual(legacy_event["raw"], event)
+
+    def test_known_event_type_without_route_payload_details_is_unknown(self):
+        event = {"type": "session.status", "properties": {"unexpected": True}}
+
+        normalized = normalize_event_record(event, route_path="/api/event")
+
+        self.assertEqual(normalized["kind"], "unknown")
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["reason"], "unrecognized_event_shape")
+        self.assertEqual(normalized["type"], "session.status")
+        self.assertEqual(normalized["raw"], event)
+        self.assertNotIn("status", normalized)
 
     def test_unknown_event_shapes_are_not_classified_by_substrings(self):
         event = {

@@ -48,7 +48,7 @@ class ApiEventRouteDecoder:
         event_type = string_value(event.get("type"))
         if event_type is None:
             return None
-        return _decoded_from_fields(event_type, event["properties"])
+        return _decoded_from_api_properties(event_type, event["properties"])
 
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
         return _normalize_decoded_event(event, self.decode(event), target_session_id)
@@ -67,7 +67,7 @@ class LegacyEventRouteDecoder:
             payload = event.get("data")
         if event_type is None or not isinstance(payload, dict):
             return None
-        return _decoded_from_fields(event_type, payload)
+        return _decoded_from_legacy_payload(event_type, payload)
 
     def normalize_record(self, event, target_session_id=None) -> NormalizedEventRecord:
         return _normalize_decoded_event(event, self.decode(event), target_session_id)
@@ -91,7 +91,29 @@ class KnownEventRouteDecoder:
         return _normalize_decoded_event(event, self.decode(event), target_session_id)
 
 
-def _decoded_from_fields(event_type, fields):
+def _decoded_from_api_properties(event_type, fields):
+    tool = _tool_name(fields)
+    error = _error_text(fields.get("error")) or string_value(first_present(fields, "reason"))
+    blocker = _blocker_type(event_type, fields)
+    return DecodedEvent(
+        event_type=event_type,
+        session_id=_string_field(fields, "sessionID", "sessionId", "session_id"),
+        message_id=_string_field(fields, "messageID", "messageId", "message_id", "promptID", "promptId"),
+        status=_status_value(fields),
+        delivery=_string_field(fields, "delivery", "deliveryMode", "mode"),
+        text=_text_value(fields),
+        tool=tool,
+        call_id=_string_field(fields, "callID", "callId", "toolCallID", "toolCallId", "tool_call_id"),
+        step=_string_field(fields, "step", "stepID", "stepId", "step_id"),
+        title=_string_field(fields, "title", "description"),
+        blocker=blocker,
+        blocker_id=_blocker_id(fields) if blocker is not None else None,
+        question=_string_field(fields, "question", "prompt", "title") if blocker is not None else None,
+        error=error,
+    )
+
+
+def _decoded_from_legacy_payload(event_type, fields):
     tool = _tool_name(fields)
     error = _error_text(fields.get("error")) or string_value(first_present(fields, "reason"))
     blocker = _blocker_type(event_type, fields)
@@ -147,22 +169,40 @@ def _normalize_decoded_event(raw_event, decoded, target_session_id):
 def _event_kind(decoded):
     normalized_type = str(decoded.event_type or "").lower()
     if decoded.blocker is not None:
-        return "blocker"
-    if normalized_type in ERROR_EVENT_TYPES or decoded.error is not None:
+        if _has_event_detail(decoded, "session_id", "message_id", "blocker_id", "question", "status"):
+            return "blocker"
+        return "unknown"
+    if normalized_type in ERROR_EVENT_TYPES:
+        if _has_event_detail(decoded, "session_id", "message_id", "error"):
+            return "error"
+        return "unknown"
+    if decoded.error is not None:
         return "error"
     if normalized_type in TEXT_EVENT_TYPES and decoded.text is not None:
         return "text"
     if normalized_type in TOOL_EVENT_TYPES and (decoded.tool is not None or decoded.call_id is not None):
         return "tool"
     if normalized_type in ADMISSION_EVENT_TYPES:
-        return "admission"
+        if _has_event_detail(decoded, "session_id", "message_id", "status", "delivery"):
+            return "admission"
+        return "unknown"
     if normalized_type in PROMPT_EVENT_TYPES:
-        return "prompt"
+        if _has_event_detail(decoded, "session_id", "message_id", "status", "delivery"):
+            return "prompt"
+        return "unknown"
     if normalized_type in STEP_EVENT_TYPES:
-        return "step"
+        if _has_event_detail(decoded, "session_id", "message_id", "step", "status", "title"):
+            return "step"
+        return "unknown"
     if normalized_type in STATUS_EVENT_TYPES:
-        return "status"
+        if _has_event_detail(decoded, "session_id", "status"):
+            return "status"
+        return "unknown"
     return "unknown"
+
+
+def _has_event_detail(decoded, *names):
+    return any(getattr(decoded, name) is not None for name in names)
 
 
 def ignored_event_record(session_id, target_session_id, event_type) -> NormalizedEventRecord:

@@ -5,15 +5,30 @@ from opencode_session.status import short_status
 
 
 MESSAGE_CANONICAL_FIELDS = ("id", "role", "status", "raw_status", "cost", "tokens", "text")
+MESSAGE_VALUE_ALIASES = (
+    ("id", ("id", "messageID", "messageId", "message_id")),
+    ("role", ("role", "author", "speaker", "type", "kind")),
+    ("status", ("status", "state", "phase")),
+    ("cost", ("cost",)),
+    ("tokens", ("tokens", "token", "tokenUsage", "token_usage", "usage")),
+    ("text", ("text", "content")),
+    ("error", ("error", "reason", "message")),
+)
+SESSION_MESSAGE_ROUTE = "session_message"
+LEGACY_MESSAGE_ROUTE = "legacy_run_reply"
 
 
-def normalize_message_record(message) -> NormalizedMessageRecord:
+def normalize_message_record(message, *, route=None) -> NormalizedMessageRecord:
+    return _normalize_message_record(message, _message_fields_for_route(route))
+
+
+def _normalize_message_record(message, read_fields) -> NormalizedMessageRecord:
     if not isinstance(message, dict):
         return unknown_message_record(message)
     message = message_record(message)
 
-    fields = _compatible_message_fields(message)
-    if not _has_any_message_field(fields):
+    fields = read_fields(message)
+    if not _has_known_message_shape(fields):
         return unknown_message_record(message)
 
     normalized = dict(message)
@@ -31,9 +46,9 @@ def normalize_message_record(message) -> NormalizedMessageRecord:
     return normalized
 
 
-def iter_normalized_message_records(data):
+def iter_normalized_message_records(data, *, route=None):
     for message in iter_message_records(data):
-        yield normalize_message_record(message)
+        yield normalize_message_record(message, route=route)
 
 
 def iter_message_records(data):
@@ -58,46 +73,34 @@ def message_record(message):
     return message if isinstance(message, dict) else {}
 
 
-def message_value(message, *names):
+def message_value(message, *names, route=None):
     message = message_record(message)
-    if _requested(names, "id", "messageID", "messageId", "message_id"):
-        value = _compatible_message_id(message)
-        if value is not None:
-            return value
-    if _requested(names, "role", "author", "speaker", "type", "kind"):
-        value = _compatible_message_role(message)
-        if value is not None:
-            return value
-    if _requested(names, "status", "state", "phase"):
-        value = _compatible_message_status(message)
-        if value is not None:
-            return value
-    if _requested(names, "cost"):
-        value = _compatible_message_cost(message)
-        if value is not None:
-            return value
-    if _requested(names, "tokens", "token", "tokenUsage", "token_usage", "usage"):
-        value = _compatible_message_tokens(message)
-        if value is not None:
-            return value
-    if _requested(names, "text", "content"):
-        value = _compatible_message_text(message)
-        if value is not None:
-            return value
-    if _requested(names, "error", "reason", "message"):
-        value = _compatible_message_error(message)
-        if value is not None:
-            return value
+    fields = _message_fields_for_route(route)(message)
+    if not _has_known_message_shape(fields):
+        return None
+    for field_name, aliases in MESSAGE_VALUE_ALIASES:
+        if not _requested(names, *aliases):
+            continue
+        if field_name == "text":
+            return message_text(message, route=route)
+        return fields[field_name]
     return None
 
 
-def message_tokens(message):
-    return normalized_tokens(_compatible_message_tokens(message_record(message)))
-
-
-def message_text(message):
+def message_tokens(message, *, route=None):
     message = message_record(message)
-    text = _compatible_message_text(message)
+    fields = _message_fields_for_route(route)(message)
+    if route is not None and not _has_known_message_shape(fields):
+        return None
+    return normalized_tokens(fields["tokens"])
+
+
+def message_text(message, *, route=None):
+    message = message_record(message)
+    fields = _message_fields_for_route(route)(message)
+    if route is not None and not _has_known_message_shape(fields):
+        return ""
+    text = fields["text"]
     if text is not None:
         return text
     parts = message.get("parts")
@@ -110,43 +113,63 @@ def message_text(message):
     return ""
 
 
-def _compatible_message_fields(message):
+def _message_fields_for_route(route=None):
+    if route == SESSION_MESSAGE_ROUTE:
+        return _session_message_fields
+    if route == LEGACY_MESSAGE_ROUTE:
+        return _legacy_message_fields
+    return _legacy_message_fields
+
+
+def _session_message_fields(message):
     return {
-        "id": _compatible_message_id(message),
-        "role": _compatible_message_role(message),
-        "status": _compatible_message_status(message),
-        "cost": _compatible_message_cost(message),
-        "tokens": _compatible_message_tokens(message),
-        "text": _compatible_message_text(message),
-        "error": _compatible_message_error(message),
+        "id": _root_or_info_value(message, "id", "messageID", "messageId"),
+        "role": _root_or_info_value(message, "role"),
+        "status": _root_or_info_value(message, "status", "state"),
+        "cost": _root_or_info_value(message, "cost"),
+        "tokens": _root_or_info_value(message, "tokens", "tokenUsage", "usage"),
+        "text": _root_or_info_value(message, "text", "content"),
+        "error": _root_or_info_value(message, "error", "reason", "message"),
     }
 
 
-def _compatible_message_id(message):
+def _legacy_message_fields(message):
+    return {
+        "id": _legacy_message_id(message),
+        "role": _legacy_message_role(message),
+        "status": _legacy_message_status(message),
+        "cost": _legacy_message_cost(message),
+        "tokens": _legacy_message_tokens(message),
+        "text": _legacy_message_text(message),
+        "error": _legacy_message_error(message),
+    }
+
+
+def _legacy_message_id(message):
     return _root_or_info_value(message, "id", "messageID", "messageId", "message_id")
 
 
-def _compatible_message_role(message):
+def _legacy_message_role(message):
     return _root_or_info_value(message, "role", "author", "speaker", "type", "kind")
 
 
-def _compatible_message_status(message):
+def _legacy_message_status(message):
     return _root_or_info_value(message, "status", "state", "phase")
 
 
-def _compatible_message_cost(message):
+def _legacy_message_cost(message):
     return _root_or_info_value(message, "cost")
 
 
-def _compatible_message_tokens(message):
+def _legacy_message_tokens(message):
     return _root_or_info_value(message, "tokens", "token", "tokenUsage", "token_usage", "usage")
 
 
-def _compatible_message_text(message):
+def _legacy_message_text(message):
     return _root_or_info_value(message, "text", "content")
 
 
-def _compatible_message_error(message):
+def _legacy_message_error(message):
     return _root_or_info_value(message, "error", "reason", "message")
 
 
@@ -158,8 +181,8 @@ def _root_or_info_value(record, *names):
     return first_present(info, *names)
 
 
-def _has_any_message_field(fields):
-    return any(value is not None for value in fields.values())
+def _has_known_message_shape(fields):
+    return any(fields[name] is not None for name in ("id", "role", "status", "text", "error"))
 
 
 def unknown_message_record(raw) -> NormalizedMessageRecord:

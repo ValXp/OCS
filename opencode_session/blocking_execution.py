@@ -9,7 +9,13 @@ from opencode_session.capabilities import (
 )
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.schema_common import tokens_total
-from opencode_session.schema_message_adapter import message_text, message_tokens, message_value
+from opencode_session.schema_message_adapter import (
+    LEGACY_MESSAGE_ROUTE,
+    SESSION_MESSAGE_ROUTE,
+    message_text,
+    message_tokens,
+    message_value,
+)
 from opencode_session.status import short_status
 
 
@@ -57,13 +63,13 @@ def execute_blocking_prompt(
 
 
 def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=None):
-    raw_status = message_value(reply_message, "status") or "completed"
+    raw_status = message_value(reply_message, "status", route=LEGACY_MESSAGE_ROUTE) or "completed"
     status = short_status(raw_status)
     return {
         "session_id": session_id,
         "message_ids": {
-            "user": message_value(run_message, "id", "messageID", "messageId"),
-            "assistant": message_value(reply_message, "id", "messageID", "messageId"),
+            "user": message_value(run_message, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
+            "assistant": message_value(reply_message, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
         },
         "status": status,
         "raw_status": raw_status,
@@ -71,9 +77,9 @@ def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=
         "api_path": api_path or {"run": LEGACY_RUN_PATH, "reply": LEGACY_REPLY_PATH},
         "execution_strategy": "legacy_run_reply",
         "fallback": {"available": True, "strategy": "legacy_run_reply", "used": True},
-        "cost": message_value(reply_message, "cost"),
-        "tokens": message_tokens(reply_message),
-        "text": message_text(reply_message),
+        "cost": message_value(reply_message, "cost", route=LEGACY_MESSAGE_ROUTE),
+        "tokens": message_tokens(reply_message, route=LEGACY_MESSAGE_ROUTE),
+        "text": message_text(reply_message, route=LEGACY_MESSAGE_ROUTE),
     }
 
 
@@ -106,9 +112,9 @@ def format_blocking_execution_compact(result):
     return "run_blocking " + " ".join(f"{key}={_compact_value(value)}" for key, value in fields)
 
 
-def provider_failure(message):
-    status = str(message_value(message, "status") or "").lower()
-    error = message_value(message, "error", "reason", "message")
+def provider_failure(message, *, route=None):
+    status = str(message_value(message, "status", route=route) or "").lower()
+    error = message_value(message, "error", "reason", "message", route=route)
     if status not in {"failed", "error", "errored"}:
         if not status and error:
             if isinstance(error, dict):
@@ -126,7 +132,7 @@ def _execute_session_message_prompt(client, session_id, prompt, capabilities, ti
     if deadline is not None:
         kwargs["deadline"] = deadline
     response = client.message_session_response(session_id, prompt, **kwargs)
-    error = provider_failure(response.data)
+    error = provider_failure(response.data, route=SESSION_MESSAGE_ROUTE)
     if error:
         raise BlockingProviderFailure(error, prompt_id=message_id)
     return _session_message_result(session_id, message_id, response.data, capabilities)
@@ -137,21 +143,21 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, t
     if deadline is not None:
         run_kwargs["deadline"] = deadline
     run_response = client.run_session_response(session_id, prompt, **run_kwargs)
-    error = provider_failure(run_response.data)
+    error = provider_failure(run_response.data, route=LEGACY_MESSAGE_ROUTE)
     if error:
         raise BlockingProviderFailure(
             error,
-            prompt_id=message_value(run_response.data, "id", "messageID", "messageId"),
+            prompt_id=message_value(run_response.data, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
         )
     reply_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         reply_kwargs["deadline"] = deadline
     reply_response = client.reply_session_response(session_id, **reply_kwargs)
-    error = provider_failure(reply_response.data)
+    error = provider_failure(reply_response.data, route=LEGACY_MESSAGE_ROUTE)
     if error:
         raise BlockingProviderFailure(
             error,
-            prompt_id=message_value(run_response.data, "id", "messageID", "messageId"),
+            prompt_id=message_value(run_response.data, "id", "messageID", "messageId", route=LEGACY_MESSAGE_ROUTE),
         )
     return legacy_run_reply_result(
         session_id,
@@ -171,13 +177,13 @@ def _request_timeout(client, timeout, deadline=None):
 
 
 def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities):
-    raw_status = message_value(assistant_message, "status") or "completed"
+    raw_status = message_value(assistant_message, "status", route=SESSION_MESSAGE_ROUTE) or "completed"
     status = short_status(raw_status)
     return {
         "session_id": session_id,
         "message_ids": {
             "user": prompt_message_id,
-            "assistant": message_value(assistant_message, "id", "messageID", "messageId"),
+            "assistant": message_value(assistant_message, "id", "messageID", "messageId", route=SESSION_MESSAGE_ROUTE),
         },
         "status": status,
         "raw_status": raw_status,
@@ -189,9 +195,9 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
             "strategy": "legacy_run_reply",
             "used": False,
         },
-        "cost": message_value(assistant_message, "cost"),
-        "tokens": message_tokens(assistant_message),
-        "text": message_text(assistant_message),
+        "cost": message_value(assistant_message, "cost", route=SESSION_MESSAGE_ROUTE),
+        "tokens": message_tokens(assistant_message, route=SESSION_MESSAGE_ROUTE),
+        "text": message_text(assistant_message, route=SESSION_MESSAGE_ROUTE),
     }
 
 
