@@ -2,7 +2,6 @@ import unittest
 
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
-    WorkerTransition,
     apply_worker_result,
     exit_code_for_run,
     mark_dependency_blocked,
@@ -12,7 +11,9 @@ from opencode_session.worker_state import (
     refresh_run_summary,
     schedule_worker_retry,
 )
-from opencode_session.worker_model import WorkerRecord, WorkerSchedulingState
+from opencode_session.worker_lifecycle import WorkerTransition
+from opencode_session.worker_normalization import WorkerRecord
+from opencode_session.worker_scheduling import WorkerSchedulingState
 
 
 class WorkerStateContractTest(unittest.TestCase):

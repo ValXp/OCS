@@ -10,7 +10,8 @@ from opencode_session.worker_execution import (
     cleanup_created_worker_sessions,
     execute_worker_attempts,
 )
-from opencode_session.worker_state import EX_UNAVAILABLE, WorkerTransition
+from opencode_session.worker_lifecycle import WorkerTransition
+from opencode_session.worker_state import EX_UNAVAILABLE
 
 
 @dataclass

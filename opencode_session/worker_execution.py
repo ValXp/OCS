@@ -8,8 +8,8 @@ from opencode_session.disposable_session_lifecycle import cleanup_disposable_ses
 from opencode_session.schema_common import DomainRecord
 from opencode_session.session_ids import require_session_id
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
+from opencode_session.worker_lifecycle import WorkerTransition
 from opencode_session.worker_state import (
-    WorkerTransition,
     apply_worker_result,
     mark_worker_active,
     mark_worker_failed,

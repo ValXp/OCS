@@ -9,7 +9,7 @@ from opencode_session.status_policy import (
     exit_code_for_status,
 )
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_model import (
+from opencode_session.worker_lifecycle import (
     _UNSET,
     WORKER_ACTION_NONE,
     WORKER_LIFECYCLE_ACTIVE_RETRY,
@@ -18,10 +18,10 @@ from opencode_session.worker_model import (
     WORKER_STATUS_DONE,
     WORKER_STATUS_FAILED,
     WORKER_STATUS_TIMEOUT,
-    WorkerRecord,
     WorkerTransition,
     worker_retry_available,
 )
+from opencode_session.worker_normalization import WorkerRecord
 
 
 def _latest_prompt_ids_are_retry_marker(latest_worker):

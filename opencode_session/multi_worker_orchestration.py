@@ -17,11 +17,11 @@ from opencode_session.run_store import RunStoreError
 from opencode_session.schema_common import DomainRecord
 from opencode_session.worker_execution import RETRY_SCHEDULED
 from opencode_session.worker_dependencies import analyze_worker_dependencies
-from opencode_session.worker_model import is_executable_worker
+from opencode_session.worker_lifecycle import WorkerTransition
+from opencode_session.worker_scheduling import is_executable_worker
 from opencode_session.worker_state import (
     EX_UNAVAILABLE,
     EX_UNSUPPORTED,
-    WorkerTransition,
     ensure_worker as _ensure_orchestration_worker,
     exit_code_for_run as _exit_code_for_orchestration_run,
     refresh_run_summary as _refresh_worker_run_summary,

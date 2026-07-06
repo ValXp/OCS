@@ -1,4 +1,4 @@
-from opencode_session.worker_model import (
+from opencode_session.worker_lifecycle import (
     BLOCKED_WORKER_STATUS,
     FAILED_DEPENDENCY_STATUSES,
     TERMINAL_WORKER_STATUSES,

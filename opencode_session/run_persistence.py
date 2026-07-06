@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from opencode_session.worker_state import WorkerTransition
+from opencode_session.worker_lifecycle import WorkerTransition
 
 
 @dataclass(frozen=True)
