@@ -472,6 +472,34 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                 for field_name, expected_value in expected_fields.items():
                     self.assertEqual(worker_field(worker, field_name), expected_value)
 
+    def test_transition_dispatch_uses_reducer_functions_not_metadata_method_names(self):
+        from opencode_session.worker_lifecycle_reducer import (
+            WorkerLifecycleReducer,
+            _WORKER_TRANSITION_DEFINITIONS,
+        )
+
+        expected_appliers = {
+            WorkerTransitionName.PROVISIONED: WorkerLifecycleReducer.provisioned,
+            WorkerTransitionName.ACTIVE: WorkerLifecycleReducer.active,
+            WorkerTransitionName.ATTEMPT_STARTED: WorkerLifecycleReducer.attempt_started,
+            WorkerTransitionName.FAILED: WorkerLifecycleReducer.failed,
+            WorkerTransitionName.DEPENDENCY_BLOCKED: WorkerLifecycleReducer.dependency_blocked,
+            WorkerTransitionName.ABORTED: WorkerLifecycleReducer.aborted,
+            WorkerTransitionName.RETRY_SCHEDULED: WorkerLifecycleReducer.retry_scheduled,
+            WorkerTransitionName.TIMED_OUT: WorkerLifecycleReducer.timed_out,
+            WorkerTransitionName.RESULT_APPLIED: WorkerLifecycleReducer.result_applied,
+            WorkerTransitionName.CLEANUP_UPDATED: WorkerLifecycleReducer.cleanup_updated,
+            WorkerTransitionName.SNAPSHOT_APPLIED: WorkerLifecycleReducer.snapshot_applied,
+        }
+
+        self.assertEqual(set(WORKER_TRANSITION_METADATA), set(_WORKER_TRANSITION_DEFINITIONS))
+        for transition_name, metadata in WORKER_TRANSITION_METADATA.items():
+            with self.subTest(transition=transition_name):
+                self.assertNotIn("apply_method", metadata.__dataclass_fields__)
+                definition = _WORKER_TRANSITION_DEFINITIONS[transition_name]
+                self.assertIs(definition.metadata, metadata)
+                self.assertIs(definition.apply_transition, expected_appliers[transition_name])
+
     def test_retry_transition_definition_carries_legality_target_and_behavior(self):
         worker = normalize_worker(
             {

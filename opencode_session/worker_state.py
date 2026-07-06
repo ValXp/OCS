@@ -171,7 +171,6 @@ class WorkerTransitionMetadata:
     name: WorkerTransitionName
     source_states: frozenset
     target_states: frozenset
-    apply_method: str
     target_lifecycle: object = None
     is_legal_transition: object = None
     public_lifecycle_transition: bool = True
@@ -226,7 +225,6 @@ def _transition_metadata(
     *,
     source_states=(),
     target_states=(),
-    apply_method=None,
     target_lifecycle=None,
     is_legal_transition=None,
     public_lifecycle_transition=True,
@@ -235,7 +233,6 @@ def _transition_metadata(
         name,
         frozenset(source_states),
         frozenset(target_states),
-        apply_method or name.value,
         target_lifecycle=target_lifecycle,
         is_legal_transition=is_legal_transition,
         public_lifecycle_transition=public_lifecycle_transition,

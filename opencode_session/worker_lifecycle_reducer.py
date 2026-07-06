@@ -271,13 +271,35 @@ def apply_worker_transition_to_record(record, transition):
     return WorkerLifecycleReducer(record).apply(transition)
 
 
-_WORKER_TRANSITION_DEFINITIONS = {
-    name: WorkerTransitionDefinition(
-        metadata,
-        getattr(WorkerLifecycleReducer, metadata.apply_method),
-    )
-    for name, metadata in WORKER_TRANSITION_METADATA.items()
+_WORKER_TRANSITION_APPLIERS = {
+    WorkerTransitionName.PROVISIONED: WorkerLifecycleReducer.provisioned,
+    WorkerTransitionName.ACTIVE: WorkerLifecycleReducer.active,
+    WorkerTransitionName.ATTEMPT_STARTED: WorkerLifecycleReducer.attempt_started,
+    WorkerTransitionName.FAILED: WorkerLifecycleReducer.failed,
+    WorkerTransitionName.DEPENDENCY_BLOCKED: WorkerLifecycleReducer.dependency_blocked,
+    WorkerTransitionName.ABORTED: WorkerLifecycleReducer.aborted,
+    WorkerTransitionName.RETRY_SCHEDULED: WorkerLifecycleReducer.retry_scheduled,
+    WorkerTransitionName.TIMED_OUT: WorkerLifecycleReducer.timed_out,
+    WorkerTransitionName.RESULT_APPLIED: WorkerLifecycleReducer.result_applied,
+    WorkerTransitionName.CLEANUP_UPDATED: WorkerLifecycleReducer.cleanup_updated,
+    WorkerTransitionName.SNAPSHOT_APPLIED: WorkerLifecycleReducer.snapshot_applied,
 }
+
+
+def _worker_transition_definitions():
+    metadata_names = set(WORKER_TRANSITION_METADATA)
+    applier_names = set(_WORKER_TRANSITION_APPLIERS)
+    if metadata_names != applier_names:
+        missing = sorted(name.value for name in metadata_names - applier_names)
+        extra = sorted(name.value for name in applier_names - metadata_names)
+        raise ValueError(f"worker transition applier mismatch: missing={missing}, extra={extra}")
+    return {
+        name: WorkerTransitionDefinition(metadata, _WORKER_TRANSITION_APPLIERS[name])
+        for name, metadata in WORKER_TRANSITION_METADATA.items()
+    }
+
+
+_WORKER_TRANSITION_DEFINITIONS = _worker_transition_definitions()
 
 
 def _worker_transition_definition(name):
