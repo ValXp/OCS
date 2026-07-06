@@ -3,8 +3,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from opencode_session.schema_common import (
-    NormalizedEventRecord,
+from opencode_session.schema_event import NormalizedEventRecord
+from opencode_session.schema_helpers import (
     first_present,
     set_if_present,
     string_value,

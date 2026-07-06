@@ -2,12 +2,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable
 
-from opencode_session.schema_common import (
-    NormalizedMessageRecord,
+from opencode_session.schema_helpers import (
     normalized_tokens,
     root_or_info_value,
     set_missing,
 )
+from opencode_session.schema_message import NormalizedMessageRecord
 from opencode_session.status import short_status
 
 

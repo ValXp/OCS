@@ -5,7 +5,8 @@ from typing import Optional, Sequence
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocker_inventory import blocker_counts_for_session, load_blocker_counts
 from opencode_session.capabilities import capabilities_from_openapi_doc, configure_client_route_plan
-from opencode_session.schema_common import JsonObject, NormalizedAbortRecord, NormalizedSessionRecord, first_present
+from opencode_session.schema_helpers import JsonObject, first_present
+from opencode_session.schema_session import NormalizedAbortRecord, NormalizedSessionRecord
 from opencode_session.schema_session_adapter import collection_sessions, session_record
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
 

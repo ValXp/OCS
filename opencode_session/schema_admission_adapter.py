@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 
-from opencode_session.schema_common import (
+from opencode_session.schema_admission import NormalizedAdmissionRecord
+from opencode_session.schema_helpers import (
     CAMEL_MESSAGE_ID_ALIASES,
     DELIVERY_ALIASES,
     PROMPT_ID_ALIASES,
     SESSION_ID_ALIASES,
     STATUS_ALIASES,
-    NormalizedAdmissionRecord,
     first_present,
     root_or_info_value,
 )

@@ -1,5 +1,6 @@
 from opencode_session.formatting import compact_bool, compact_value
-from opencode_session.schema_common import NormalizedAbortRecord, bool_value, first_present
+from opencode_session.schema_helpers import bool_value, first_present
+from opencode_session.schema_session import NormalizedAbortRecord
 from opencode_session.status import short_status
 
 

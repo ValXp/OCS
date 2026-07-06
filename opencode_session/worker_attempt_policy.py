@@ -3,7 +3,7 @@ from typing import Optional
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.schema_common import ExecutionResultRecord
+from opencode_session.schema_execution import ExecutionResultRecord
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.worker_state import (
     WorkerTransition,

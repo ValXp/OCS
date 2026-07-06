@@ -24,7 +24,7 @@ from opencode_session.run_start_core import (
 )
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
-from opencode_session.schema_common import RunRecord
+from opencode_session.schema_run import RunRecord
 from opencode_session.worker_execution import (
     WorkerExecutionOutcome,
 )

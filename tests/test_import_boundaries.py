@@ -123,10 +123,29 @@ class ImportBoundaryTest(unittest.TestCase):
 
         self.assertTrue(hasattr(run_record, "normalize_run"))
 
-    def test_schema_common_hydrated_types_do_not_import_worker_state(self):
+    def test_schema_run_hydrated_types_do_not_import_worker_state(self):
+        blocked = BlockedModuleFinder({"opencode_session.worker_state"})
+        with temporarily_unimported(
+            "opencode_session.schema_run",
+            "opencode_session.schema_worker",
+            "opencode_session.worker_state",
+        ):
+            sys.meta_path.insert(0, blocked)
+            try:
+                schema_run = importlib.import_module("opencode_session.schema_run")
+                schema_worker = importlib.import_module("opencode_session.schema_worker")
+            finally:
+                sys.meta_path.remove(blocked)
+
+        self.assertTrue(hasattr(schema_run, "HydratedRunRecord"))
+        self.assertTrue(hasattr(schema_worker, "HydratedWorker"))
+
+    def test_schema_common_facade_reexports_legacy_contracts_without_worker_state(self):
         blocked = BlockedModuleFinder({"opencode_session.worker_state"})
         with temporarily_unimported(
             "opencode_session.schema_common",
+            "opencode_session.schema_run",
+            "opencode_session.schema_worker",
             "opencode_session.worker_state",
         ):
             sys.meta_path.insert(0, blocked)
@@ -137,6 +156,46 @@ class ImportBoundaryTest(unittest.TestCase):
 
         self.assertTrue(hasattr(schema_common, "HydratedRunRecord"))
         self.assertTrue(hasattr(schema_common, "HydratedWorker"))
+
+    def test_schema_domain_modules_do_not_import_schema_common_facade(self):
+        module_names = (
+            "opencode_session.schema_helpers",
+            "opencode_session.schema_session",
+            "opencode_session.schema_message",
+            "opencode_session.schema_admission",
+            "opencode_session.schema_event",
+            "opencode_session.schema_worker",
+            "opencode_session.schema_run",
+            "opencode_session.schema_capabilities",
+            "opencode_session.schema_execution",
+        )
+        blocked = BlockedModuleFinder({"opencode_session.schema_common"})
+        with temporarily_unimported("opencode_session.schema_common", *module_names):
+            sys.meta_path.insert(0, blocked)
+            try:
+                imported_modules = [importlib.import_module(module_name) for module_name in module_names]
+            finally:
+                sys.meta_path.remove(blocked)
+
+        self.assertEqual(len(module_names), len(imported_modules))
+
+    def test_package_domains_do_not_import_schema_common_facade(self):
+        project_root = Path(__file__).resolve().parents[1]
+        package_dir = project_root / "opencode_session"
+        offenders = []
+        for path in sorted(package_dir.rglob("*.py")):
+            if path.name == "schema_common.py":
+                continue
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "opencode_session.schema_common":
+                    offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "opencode_session.schema_common":
+                            offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+
+        self.assertEqual([], offenders)
 
     def test_worker_state_is_canonical_worker_state_surface(self):
         with temporarily_unimported(

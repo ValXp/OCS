@@ -4,7 +4,7 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.api_profile import OpenCodeServerProfile, server_profile_from_capabilities
 from opencode_session.formatting import compact_value
 from opencode_session.schema_admission_adapter import admission_response_fields
-from opencode_session.schema_common import first_present as _first_present
+from opencode_session.schema_helpers import first_present as _first_present
 
 
 UNSUPPORTED_BEHAVIOR_STATUSES = {400, 404, 405, 415, 422}

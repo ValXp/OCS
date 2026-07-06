@@ -4,7 +4,7 @@ from opencode_session.blocker_formatting import format_permission_compact
 from opencode_session.blocker_inventory import blocker_session_id, collection_blockers
 from opencode_session.events import normalize_event
 from opencode_session.schema_admission_adapter import admission_response_fields, normalize_admission_record
-from opencode_session.schema_common import NormalizedEventRecord, PersistedRunRecord, WorkerSnapshotRecord
+from opencode_session.schema_event import NormalizedEventRecord
 from opencode_session.schema_event_adapter import normalize_event_record
 from opencode_session.schema_message_adapter import (
     LEGACY_MESSAGE_ROUTE,
@@ -13,7 +13,9 @@ from opencode_session.schema_message_adapter import (
     message_value,
     normalize_message_record,
 )
+from opencode_session.schema_run import PersistedRunRecord
 from opencode_session.schema_session_adapter import normalize_session_payload, session_value
+from opencode_session.schema_worker import WorkerSnapshotRecord
 
 
 KNOWN_EVENT_ROUTE_FIXTURES = (

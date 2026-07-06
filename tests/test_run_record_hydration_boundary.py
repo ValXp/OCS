@@ -3,13 +3,8 @@ import unittest
 from typing import Dict, get_type_hints
 
 from opencode_session.run_record import normalize_run, normalize_run_for_storage, run_record_for_output
-from opencode_session.schema_common import (
-    HydratedRunRecord,
-    HydratedWorker,
-    PersistedRunRecord,
-    RunRecord,
-    WorkerSnapshotRecord,
-)
+from opencode_session.schema_run import HydratedRunRecord, PersistedRunRecord, RunRecord
+from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
 from opencode_session.worker_state import WorkerRecord, worker_output_field
 
 

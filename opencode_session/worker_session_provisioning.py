@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from opencode_session.remote_journal import PersistedRemoteMutationJournal, RemoteMutationOperation
-from opencode_session.schema_common import HydratedWorker, RunRecord
+from opencode_session.schema_run import RunRecord
+from opencode_session.schema_worker import HydratedWorker
 from opencode_session.session_ids import require_session_id
 from opencode_session.worker_state import (
     WorkerRecord,

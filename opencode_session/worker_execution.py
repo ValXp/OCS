@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from opencode_session.blocking_execution import execute_blocking_prompt
-from opencode_session.schema_common import RunRecord
+from opencode_session.schema_run import RunRecord
 from opencode_session.worker_attempt_execution import (
     coerce_worker_prompt_executor,
     execute_single_worker_attempt,

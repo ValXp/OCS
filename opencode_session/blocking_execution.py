@@ -7,7 +7,7 @@ from opencode_session.api_profile import (
     server_profile_from_capabilities,
 )
 from opencode_session.formatting import compact_value as _compact_value
-from opencode_session.schema_common import tokens_total
+from opencode_session.schema_helpers import tokens_total
 from opencode_session.schema_message_adapter import normalize_message_record
 from opencode_session.status import short_status
 

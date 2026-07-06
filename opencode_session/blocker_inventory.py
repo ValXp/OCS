@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from opencode_session.schema_common import (
+from opencode_session.schema_helpers import (
     CALL_ID_ALIASES,
     MESSAGE_ID_ALIASES,
     REQUEST_ID_ALIASES,

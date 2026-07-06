@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional, Type, Union
 
-from opencode_session.schema_common import WORKER_REQUIRED_FIELD_NAMES
+from opencode_session.schema_worker import WORKER_REQUIRED_FIELD_NAMES
 from opencode_session.status import short_status
 from opencode_session.worker_attempt_log import _append_attempt
 

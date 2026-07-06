@@ -2,8 +2,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable
 
-from opencode_session.schema_common import (
-    NormalizedSessionRecord,
+from opencode_session.schema_helpers import (
     child_value,
     collection_records,
     first_not_none,
@@ -11,6 +10,7 @@ from opencode_session.schema_common import (
     root_or_info_value,
     set_missing,
 )
+from opencode_session.schema_session import NormalizedSessionRecord
 
 
 SESSION_CANONICAL_FIELDS = ("id", "directory", "title", "agent", "model", "tokens", "createdAt", "updatedAt")
