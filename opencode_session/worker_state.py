@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union
+from typing import Callable, Optional, Type, Union
 
 from opencode_session.schema_common import WORKER_REQUIRED_FIELD_NAMES
 from opencode_session.status import short_status
@@ -432,29 +432,40 @@ class WorkerTransitionMetadata:
     public_lifecycle_transition: bool = True
 
 
+_WorkerTransitionPayloadType = Type[object]
+_WorkerTransitionPayloadFactory = Callable[..., "WorkerTransitionPayload"]
+_WorkerTransitionApplier = Callable[[object, "WorkerTransition"], dict]
+_WorkerTransitionTargetResolver = Callable[["WorkerTransition"], Optional[str]]
+_WorkerTransitionLegalityChecker = Callable[[object, "WorkerTransition"], bool]
+
+
 @dataclass(frozen=True)
 class WorkerTransitionSpec:
     name: WorkerTransitionName
     source_states: frozenset
-    payload_type: object
-    payload_factory: object
-    applier: object
+    payload_type: _WorkerTransitionPayloadType
+    payload_factory: _WorkerTransitionPayloadFactory
+    applier: _WorkerTransitionApplier
     target_states: frozenset = frozenset()
-    target_resolver: object = None
+    target_resolver: Optional[_WorkerTransitionTargetResolver] = None
     public_lifecycle_transition: bool = True
-    legality_checker: object = None
+    legality_checker: Optional[_WorkerTransitionLegalityChecker] = None
 
     def __post_init__(self):
         if not isinstance(self.name, WorkerTransitionName):
             raise ValueError(f"unknown worker transition: {self.name}")
         object.__setattr__(self, "source_states", frozenset(self.source_states))
         object.__setattr__(self, "target_states", frozenset(self.target_states))
-        if self.payload_type is None:
+        if self.payload_type is None or not isinstance(self.payload_type, type):
             raise ValueError(f"worker transition '{self.name.value}' missing payload type")
-        if self.payload_factory is None:
+        if self.payload_factory is None or not callable(self.payload_factory):
             raise ValueError(f"worker transition '{self.name.value}' missing payload factory")
-        if self.applier is None:
+        if self.applier is None or not callable(self.applier):
             raise ValueError(f"worker transition '{self.name.value}' missing applier")
+        if self.target_resolver is not None and not callable(self.target_resolver):
+            raise ValueError(f"worker transition '{self.name.value}' target resolver must be callable")
+        if self.legality_checker is not None and not callable(self.legality_checker):
+            raise ValueError(f"worker transition '{self.name.value}' legality checker must be callable")
 
     @property
     def metadata(self):
@@ -949,10 +960,11 @@ WorkerTransitionPayload = Union[
 
 
 def _provisioned_transition_payload(worker):
+    worker = _require_worker_record(worker)
     return _ProvisionedTransition(
-        session_id=deepcopy(worker_field(worker, "session_id")),
-        agent=_copy_present(worker_field(worker, "agent")),
-        model=_copy_present(worker_field(worker, "model")),
+        session_id=deepcopy(worker.session_id),
+        agent=_copy_present(worker.agent),
+        model=_copy_present(worker.model),
     )
 
 
@@ -1039,7 +1051,8 @@ def _result_applied_transition_payload(result, *, prompt_ids=(), timeout_started
 
 
 def _cleanup_updated_transition_payload(worker):
-    return _CleanupUpdatedTransition(deepcopy(worker_field(worker, "cleanup")))
+    worker = _require_worker_record(worker)
+    return _CleanupUpdatedTransition(deepcopy(worker.cleanup))
 
 
 def _snapshot_applied_transition_payload(worker):
@@ -1053,7 +1066,7 @@ def _snapshot_applied_transition_payload(worker):
 
 def _snapshot_worker_id(worker):
     if isinstance(worker, WorkerRecord):
-        return worker.field("id")
+        return worker.worker_id
     if isinstance(worker, Mapping):
         return worker.get("id")
     raise TypeError("snapshot worker must be WorkerRecord or persisted worker mapping")
@@ -1429,6 +1442,7 @@ def _worker_fields(worker):
 
 
 def worker_field(worker, field_name, default=None):
+    """Compatibility accessor for dynamic persisted fields; core invariants use WorkerRecord properties."""
     return _require_worker_record(worker).field(field_name, default)
 
 
@@ -1442,21 +1456,7 @@ def is_worker_record(worker):
 
 def worker_retry_available(worker, category=None):
     worker = _require_worker_record(worker)
-    if worker_field(worker, "failure_retryable") is False:
-        return False
-    retryable = set(worker_field(worker, "retryable_failures") or [])
-    if not retryable:
-        return False
-    if category is None:
-        category = worker_field(worker, "failure_category") or worker_field(worker, "last_failure_category")
-    if category and category not in retryable and "all" not in retryable:
-        return False
-    try:
-        retry_count = int(worker_field(worker, "retry_count") or 0)
-        retry_limit = int(worker_field(worker, "retry_limit") or 0)
-    except (TypeError, ValueError):
-        return False
-    return retry_count < retry_limit
+    return worker.retry_available(category)
 
 
 def is_blocked_status(status):
@@ -1487,7 +1487,7 @@ class WorkerSchedulingState:
     @classmethod
     def from_worker(cls, worker):
         worker = _require_worker_record(worker)
-        return cls(worker_lifecycle_state(worker), worker_has_prompt(worker))
+        return cls(worker.lifecycle_state, worker.has_prompt)
 
     def can_execute(self):
         metadata = WORKER_LIFECYCLE_METADATA.get(self.lifecycle_state)
@@ -1514,9 +1514,10 @@ def _canonical_lifecycle_state(worker):
 
 
 def latest_prompt_ids_are_retry_marker(latest_worker):
+    latest_worker = _require_worker_record(latest_worker)
     return (
-        worker_lifecycle_state(latest_worker) == WORKER_LIFECYCLE_ACTIVE_RETRY
-        and worker_field(latest_worker, "last_failure_category") is not None
+        latest_worker.lifecycle_state == WORKER_LIFECYCLE_ACTIVE_RETRY
+        and latest_worker.last_failure_category is not None
     )
 
 
@@ -1525,8 +1526,7 @@ def next_eligible_worker_action(worker):
 
 
 def worker_has_prompt(worker):
-    prompt = worker_field(worker, "prompt")
-    return prompt is not None and bool(str(prompt))
+    return _require_worker_record(worker).has_prompt
 
 
 def is_executable_worker(worker):
@@ -1554,17 +1554,21 @@ class WorkerRecord:
             return self.to_snapshot() == other.to_snapshot()
         return NotImplemented
 
-    def _raw_field(self, field_name, default=None):
+    def _raw_field(self, field_name: str, default: object = None) -> object:
         return self._fields.get(field_name, default)
 
-    def field(self, field_name, default=None):
+    def _list_field(self, field_name: str) -> list:
+        value = self._raw_field(field_name)
+        return value if isinstance(value, list) else []
+
+    def field(self, field_name: str, default: object = None) -> object:
         if field_name == "id":
             return self.worker_id
         if field_name == "lifecycle_state":
             return self.lifecycle_state
         return self._raw_field(field_name, default)
 
-    def has_field(self, field_name):
+    def has_field(self, field_name: str) -> bool:
         return field_name in self._fields or field_name in {"id", "lifecycle_state"}
 
     def set_field(self, field_name, value):
@@ -1632,19 +1636,109 @@ class WorkerRecord:
         return worker_lifecycle_set_fields(worker_id, lifecycle_state)
 
     @property
-    def worker_id(self):
+    def worker_id(self) -> str:
         return self._fields.get("id") or self._worker_id
 
     @property
-    def lifecycle_state(self):
+    def lifecycle_state(self) -> str:
         lifecycle_state = self._raw_field("lifecycle_state")
         if lifecycle_state in WORKER_LIFECYCLE_STATES:
             return lifecycle_state
         return WORKER_LIFECYCLE_QUEUED
 
     @property
-    def has_prompt(self):
-        return worker_has_prompt(self)
+    def role(self) -> object:
+        return self._raw_field("role")
+
+    @property
+    def session_id(self) -> object:
+        return self._raw_field("session_id")
+
+    @property
+    def agent(self) -> object:
+        return self._raw_field("agent")
+
+    @property
+    def model(self) -> object:
+        return self._raw_field("model")
+
+    @property
+    def prompt(self) -> object:
+        return self._raw_field("prompt")
+
+    @property
+    def prompt_ids(self) -> list:
+        return self._list_field("prompt_ids")
+
+    @property
+    def retry_count(self) -> int:
+        return int(self._raw_field("retry_count") or 0)
+
+    @property
+    def retry_limit(self) -> int:
+        return int(self._raw_field("retry_limit") or 0)
+
+    @property
+    def retryable_failures(self) -> list:
+        return self._list_field("retryable_failures")
+
+    @property
+    def failure_retryable(self) -> object:
+        return self._raw_field("failure_retryable")
+
+    @property
+    def failure_category(self) -> object:
+        return self._raw_field("failure_category")
+
+    @property
+    def last_failure_category(self) -> object:
+        return self._raw_field("last_failure_category")
+
+    @property
+    def timeout_seconds(self) -> object:
+        return self._raw_field("timeout_seconds")
+
+    @property
+    def timeout_policy(self) -> object:
+        return self._raw_field("timeout_policy") or WORKER_STATUS_TIMEOUT
+
+    @property
+    def timeout_started_at(self) -> object:
+        return self._raw_field("timeout_started_at")
+
+    @property
+    def output_refs(self) -> list:
+        return self._list_field("output_refs")
+
+    @property
+    def cleanup(self) -> object:
+        return self._raw_field("cleanup")
+
+    @property
+    def abort(self) -> object:
+        return self._raw_field("abort")
+
+    @property
+    def has_prompt(self) -> bool:
+        prompt = self.prompt
+        return prompt is not None and bool(str(prompt))
+
+    def retry_available(self, category=None) -> bool:
+        if self.failure_retryable is False:
+            return False
+        retryable = set(self.retryable_failures or [])
+        if not retryable:
+            return False
+        if category is None:
+            category = self.failure_category or self.last_failure_category
+        if category and category not in retryable and "all" not in retryable:
+            return False
+        try:
+            retry_count = self.retry_count
+            retry_limit = self.retry_limit
+        except (TypeError, ValueError):
+            return False
+        return retry_count < retry_limit
 
     def scheduling_state(self):
         return WorkerSchedulingState(
@@ -1694,9 +1788,7 @@ class WorkerRecord:
         return self
 
     def remember_prompt_id(self, prompt_id):
-        prompt_ids = self.field("prompt_ids")
-        if not isinstance(prompt_ids, list):
-            prompt_ids = []
+        prompt_ids = list(self.prompt_ids)
         if prompt_id not in prompt_ids:
             prompt_ids.append(prompt_id)
         self.set_field("prompt_ids", prompt_ids)
@@ -1708,15 +1800,15 @@ class WorkerRecord:
             raise WorkerTransitionError(result)
         merged = result.worker
         self.replace_fields(merged)
-        self._worker_id = self.field("id") or self._worker_id or transition.worker_id
+        self._worker_id = self.worker_id or self._worker_id or transition.worker_id
         return self
 
     def ensure_cleanup(self):
-        cleanup = self.field("cleanup")
+        cleanup = self.cleanup
         if not isinstance(cleanup, dict):
             cleanup = {"requested": True, "deleted": False}
             self.set_field("cleanup", cleanup)
-            cleanup = self.field("cleanup")
+            cleanup = self.cleanup
         return cleanup
 
     def remember_session_for_cleanup(self, session_id):
@@ -1792,7 +1884,7 @@ class WorkerTransition:
 
     @classmethod
     def provisioned(cls, worker):
-        worker_id = worker_field(worker, "id")
+        worker_id = _worker_id(worker)
         return cls.create(WorkerTransitionName.PROVISIONED, worker_id, worker)
 
     @classmethod
@@ -1895,7 +1987,7 @@ class WorkerTransition:
 
     @classmethod
     def cleanup_updated(cls, worker):
-        worker_id = worker_field(worker, "id")
+        worker_id = _worker_id(worker)
         return cls.create(WorkerTransitionName.CLEANUP_UPDATED, worker_id, worker)
 
     @classmethod
@@ -1942,8 +2034,8 @@ def _snapshot_transition_fields(transition):
 
 def _accepted_abort(worker):
     if isinstance(worker, WorkerRecord):
-        abort = worker.field("abort")
-        lifecycle_state = worker_lifecycle_state(worker)
+        abort = worker.abort
+        lifecycle_state = worker.lifecycle_state
     elif isinstance(worker, Mapping):
         abort = worker.get("abort")
         lifecycle_state = _canonical_lifecycle_state(worker)
@@ -1998,7 +2090,7 @@ def next_eligible_action(worker):
 def ensure_worker(run, worker_id, *, role):
     workers = run.setdefault("workers", {})
     worker = normalize_worker(workers.get(worker_id), worker_id)
-    if not worker.field("role"):
+    if not worker.role:
         worker.set_field("role", role)
     worker.set_field("id", worker_id)
     workers[worker_id] = worker
@@ -2006,11 +2098,12 @@ def ensure_worker(run, worker_id, *, role):
 
 
 def mark_worker_active(worker, *, now=None):
+    worker = _require_worker_record(worker)
     timeout_started_at = UNSET_TRANSITION_FIELD
     if now is not None:
-        timeout_started_at = now() if worker_field(worker, "timeout_seconds") else None
+        timeout_started_at = now() if worker.timeout_seconds else None
     transition = WorkerTransition.active(
-        _worker_id(worker),
+        worker.worker_id,
         timeout_started_at=timeout_started_at,
         clear_prompt_ids=latest_prompt_ids_are_retry_marker(worker),
     )
@@ -2018,56 +2111,62 @@ def mark_worker_active(worker, *, now=None):
 
 
 def mark_worker_failed(worker, category, reason, *, retryable=True, prompt_ids=()):
+    worker = _require_worker_record(worker)
     transition = WorkerTransition.failed(
-        _worker_id(worker),
+        worker.worker_id,
         category,
         reason,
         retryable=retryable,
         retry_available=worker_retry_available(worker, category),
-        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+        timeout_started_at=_timeout_started_at_or_unset(worker),
         prompt_ids=prompt_ids,
     )
     return transition
 
 
 def mark_dependency_blocked(worker, blockers):
-    transition = WorkerTransition.dependency_blocked(_worker_id(worker), blockers)
+    worker = _require_worker_record(worker)
+    transition = WorkerTransition.dependency_blocked(worker.worker_id, blockers)
     return transition
 
 
 def mark_worker_aborted(worker, abort):
-    transition = WorkerTransition.aborted(_worker_id(worker), abort)
+    worker = _require_worker_record(worker)
+    transition = WorkerTransition.aborted(worker.worker_id, abort)
     return transition
 
 
 def schedule_worker_retry(worker, category, reason, *, prompt_ids=()):
+    worker = _require_worker_record(worker)
     if not worker_retry_available(worker, category):
         return False
     transition = WorkerTransition.retry_scheduled(
-        _worker_id(worker),
+        worker.worker_id,
         category,
         reason,
-        retry_count=int(worker_field(worker, "retry_count") or 0) + 1,
-        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+        retry_count=worker.retry_count + 1,
+        timeout_started_at=_timeout_started_at_or_unset(worker),
         prompt_ids=prompt_ids,
     )
     return transition
 
 
 def worker_timeout_reason(worker):
-    return f"worker timed out after {format_timeout(worker_field(worker, 'timeout_seconds'))}s"
+    worker = _require_worker_record(worker)
+    return f"worker timed out after {format_timeout(worker.timeout_seconds)}s"
 
 
 def mark_worker_timeout(worker, reason, now, *, manual_retry_required=False):
-    status = worker_field(worker, "timeout_policy") or WORKER_STATUS_TIMEOUT
+    worker = _require_worker_record(worker)
+    status = worker.timeout_policy
     transition = WorkerTransition.timed_out(
-        _worker_id(worker),
+        worker.worker_id,
         reason,
         status=status,
         timed_out_at=now(),
         retry_available=worker_retry_available(worker, WORKER_STATUS_TIMEOUT),
         manual_retry_required=manual_retry_required,
-        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+        timeout_started_at=_timeout_started_at_or_unset(worker),
     )
     return transition
 
@@ -2077,21 +2176,23 @@ def format_timeout(timeout):
 
 
 def apply_worker_result(worker, result, *, prompt_ids=()):
+    worker = _require_worker_record(worker)
     transition = WorkerTransition.result_applied(
-        _worker_id(worker),
+        worker.worker_id,
         result,
         prompt_ids=prompt_ids,
-        timeout_started_at=_existing_or_unset(worker, "timeout_started_at"),
+        timeout_started_at=_timeout_started_at_or_unset(worker),
     )
     return transition
 
 
 def _worker_id(worker):
-    return worker_field(worker, "id")
+    return _require_worker_record(worker).worker_id
 
 
-def _existing_or_unset(worker, field_name):
-    return worker_field(worker, field_name) if worker_has_field(worker, field_name) else UNSET_TRANSITION_FIELD
+def _timeout_started_at_or_unset(worker):
+    worker = _require_worker_record(worker)
+    return worker.timeout_started_at if worker.has_field("timeout_started_at") else UNSET_TRANSITION_FIELD
 
 
 def refresh_run_summary(run, *, include_unprompted_when_no_prompts=False):
@@ -2116,10 +2217,11 @@ def run_status_from_workers(workers, *, include_unprompted_when_no_prompts=False
 def worker_output_refs_in_dependency_order(workers):
     ordered = []
     for worker in workers_in_dependency_order(workers):
-        worker_id = worker_field(worker, "id")
+        worker = _require_worker_record(worker)
+        worker_id = worker.worker_id
         if _worker_status(worker) != WORKER_STATUS_DONE:
             continue
-        for output_ref in worker_field(worker, "output_refs", []):
+        for output_ref in worker.output_refs:
             if isinstance(output_ref, str) and output_ref.startswith("assistant:"):
                 ordered.append(f"{worker_id}:{output_ref.split(':', 1)[1]}")
             else:
@@ -2146,7 +2248,7 @@ def has_partial_worker_success(run):
 
 
 def worker_prompt(worker):
-    prompt = worker_field(worker, "prompt")
+    prompt = _require_worker_record(worker).prompt
     if prompt is None:
         return None
     return str(prompt)

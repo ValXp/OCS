@@ -1,3 +1,5 @@
+import ast
+import inspect
 from collections.abc import Mapping, MutableMapping
 import unittest
 
@@ -25,6 +27,8 @@ from opencode_session.worker_state import (
     WorkerLifecycleDimensions,
     WorkerLifecycleStatus,
     WorkerRecord,
+    WorkerTransitionName,
+    WorkerTransitionSpec,
     apply_worker_transition,
     deserialize_worker_record,
     is_executable_worker,
@@ -36,8 +40,10 @@ from opencode_session.worker_state import (
     normalize_worker_snapshot,
     refresh_run_summary,
     require_internal_worker,
+    schedule_worker_retry,
     serialize_worker_snapshot,
     status_priority,
+    worker_has_prompt,
     worker_lifecycle_source_states,
     worker_lifecycle_state,
     worker_lifecycle_state_for_dimensions,
@@ -45,6 +51,8 @@ from opencode_session.worker_state import (
     worker_lifecycle_target_states,
     worker_field,
     worker_output_field,
+    worker_retry_available,
+    worker_timeout_reason,
     worker_timeout_lifecycle_state,
     worker_record_for_mutation,
 )
@@ -193,6 +201,123 @@ class WorkerStateContractTest(unittest.TestCase):
                 )
                 self.assertEqual(metadata.source_states, expected_source_states)
                 self.assertEqual(metadata.target_states, expected_target_states)
+
+    def test_transition_specs_have_typed_callable_boundaries(self):
+        annotations = WorkerTransitionSpec.__annotations__
+        for field_name in (
+            "payload_type",
+            "payload_factory",
+            "applier",
+            "target_resolver",
+            "legality_checker",
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertNotEqual(annotations[field_name], object)
+
+        for spec in WORKER_TRANSITION_DEFINITIONS.values():
+            with self.subTest(transition=spec.name):
+                self.assertIsInstance(spec.payload_type, type)
+                self.assertTrue(callable(spec.payload_factory))
+                self.assertTrue(callable(spec.applier))
+                if spec.target_resolver is not None:
+                    self.assertTrue(callable(spec.target_resolver))
+                if spec.legality_checker is not None:
+                    self.assertTrue(callable(spec.legality_checker))
+
+        with self.assertRaisesRegex(ValueError, "missing payload type"):
+            WorkerTransitionSpec(
+                WorkerTransitionName.ACTIVE,
+                frozenset(),
+                object(),
+                lambda: None,
+                lambda reducer, transition: {},
+            )
+        with self.assertRaisesRegex(ValueError, "missing payload factory"):
+            WorkerTransitionSpec(
+                WorkerTransitionName.ACTIVE,
+                frozenset(),
+                object,
+                object(),
+                lambda reducer, transition: {},
+            )
+
+    def test_core_worker_state_invariants_use_worker_record_accessors(self):
+        import opencode_session.worker_state as worker_state_module
+
+        tree = ast.parse(inspect.getsource(worker_state_module))
+        core_functions = {
+            "_cleanup_updated_transition_payload",
+            "_provisioned_transition_payload",
+            "_snapshot_worker_id",
+            "_timeout_started_at_or_unset",
+            "_worker_id",
+            "apply_worker_result",
+            "ensure_worker",
+            "latest_prompt_ids_are_retry_marker",
+            "mark_dependency_blocked",
+            "mark_worker_aborted",
+            "mark_worker_active",
+            "mark_worker_failed",
+            "mark_worker_timeout",
+            "retry_available",
+            "schedule_worker_retry",
+            "worker_has_prompt",
+            "worker_output_refs_in_dependency_order",
+            "worker_prompt",
+            "worker_retry_available",
+            "worker_timeout_reason",
+        }
+        offenders = []
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in core_functions:
+                continue
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Call):
+                    continue
+                if isinstance(child.func, ast.Name) and child.func.id == "worker_field":
+                    offenders.append(f"{node.name}:{child.lineno}: worker_field")
+                if isinstance(child.func, ast.Attribute) and child.func.attr == "field":
+                    offenders.append(f"{node.name}:{child.lineno}: field")
+
+        self.assertEqual([], offenders)
+
+    def test_worker_record_accessors_back_core_retry_timeout_and_prompt_fields(self):
+        worker = normalize_worker(
+            {
+                "id": "review",
+                "agent": "plan",
+                "model": "openai/gpt-5.5",
+                "session_id": "ses_review",
+                "prompt": "Review",
+                "lifecycle_state": "failed_retry",
+                "retry_count": "1",
+                "retry_limit": "2",
+                "retryable_failures": ["provider"],
+                "failure_category": "provider",
+                "timeout_seconds": 45,
+                "timeout_started_at": "2026-07-04T00:00:00Z",
+            },
+            "review",
+        )
+
+        self.assertEqual(worker.worker_id, "review")
+        self.assertEqual(worker.session_id, "ses_review")
+        self.assertEqual(worker.agent, "plan")
+        self.assertEqual(worker.model, "openai/gpt-5.5")
+        self.assertTrue(worker.has_prompt)
+        self.assertTrue(worker_has_prompt(worker))
+        self.assertEqual(worker.retry_count, 1)
+        self.assertEqual(worker.retry_limit, 2)
+        self.assertTrue(worker.retry_available("provider"))
+        self.assertTrue(worker_retry_available(worker, "provider"))
+        self.assertEqual(worker_timeout_reason(worker), "worker timed out after 45s")
+
+        transition = schedule_worker_retry(worker, "provider", "provider failed")
+
+        self.assertEqual(transition.worker_id, "review")
+        self.assertEqual(transition.payload.retry_count, 2)
+        self.assertEqual(transition.payload.timeout_started_at, "2026-07-04T00:00:00Z")
 
     def test_normalize_worker_applies_defaults_and_derives_next_action(self):
         worker = normalize_worker(
