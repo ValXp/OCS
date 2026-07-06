@@ -98,6 +98,41 @@ class DisposableValidationHarnessTest(unittest.TestCase):
         self.assertIn("delete verification failed", result["cleanup"]["errors"][0]["error"])
         self.assertIs(result["checks"]["cleanup"], result["cleanup"])
 
+    def test_unexpected_exception_still_closes_resources_and_deletes_sessions(self):
+        client = FakeCleanupClient()
+        result = {"status": "active", "ok": False, "checks": {}, "cleanup": {"status": "queued"}}
+        closed = []
+
+        class Resource:
+            def close(self):
+                closed.append("resource")
+
+        def validation_body(harness):
+            harness.track_session("ses_leftover")
+            harness.track_resource(Resource())
+            raise ValueError("boom")
+
+        with self.assertRaisesRegex(ValueError, "boom"):
+            DisposableValidationHarness(
+                client,
+                result,
+                default_exit_code=69,
+                cleanup_failure_message="cleanup failed",
+            ).run(
+                validation_body,
+                failure_types=(RuntimeError,),
+                json_output=False,
+                compact_formatter=self._unexpected_success_output,
+                failure_prefix="validation failed",
+                print_error=self._unexpected_error,
+                cleanup_summary_formatter=self._cleanup_summary,
+            )
+
+        self.assertEqual(closed, ["resource"])
+        self.assertEqual(client.calls, [("DELETE", "ses_leftover"), ("GET", "ses_leftover")])
+        self.assertEqual(result["cleanup"]["status"], "failed")
+        self.assertIs(result["checks"]["cleanup"], result["cleanup"])
+
     def _unexpected_success_output(self, result):
         raise AssertionError(f"unexpected success output for {result!r}")
 

@@ -103,6 +103,11 @@ class SessionEventWatcherTest(unittest.TestCase):
         self.assertTrue(closed)
         self.assertFalse(watcher.thread.is_alive())
 
+    def test_background_watcher_thread_is_daemon(self):
+        watcher = BackgroundSessionEventWatcher(StoppableEventClient(), "/api/event", "ses_target")
+
+        self.assertTrue(watcher.thread.daemon)
+
 
 if __name__ == "__main__":
     unittest.main()

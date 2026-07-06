@@ -112,11 +112,13 @@ class SmokeValidation:
             raise SmokeFailure("session creation response did not include a session id")
         harness.track_session(self.session_id)
         self.result["session_id"] = self.session_id
-        self.event_collector = SmokeEventCollector(
-            self.client,
-            self.session_id,
-            self.capabilities["route_availability"]["events"]["path"],
-            self.args.event_limit,
+        self.event_collector = harness.track_resource(
+            SmokeEventCollector(
+                self.client,
+                self.session_id,
+                self.capabilities["route_availability"]["events"]["path"],
+                self.args.event_limit,
+            )
         )
         self.event_collector.start()
         self.event_collector.wait_open(self.args.event_timeout)
@@ -192,6 +194,9 @@ class SmokeEventCollector:
             if event_type and event_type not in event_types:
                 event_types.append(event_type)
         return event_types
+
+    def close(self):
+        return self.watcher.close()
 
 
 def smoke_blocker_summary(client, session_id):

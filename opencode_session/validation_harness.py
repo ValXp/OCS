@@ -25,6 +25,7 @@ class DisposableValidationHarness:
         self.default_exit_code = default_exit_code
         self.cleanup_failure_message = cleanup_failure_message
         self.session_ids = []
+        self.cleanup_callbacks = []
         self.failure = None
         self.exit_code = default_exit_code
         self.result.setdefault("checks", {})
@@ -47,6 +48,12 @@ class DisposableValidationHarness:
             self.session_ids.append(session_id)
         return session_id
 
+    def track_resource(self, resource):
+        close = getattr(resource, "close", None)
+        if callable(close):
+            self.cleanup_callbacks.append(close)
+        return resource
+
     def run_checks(self, checks):
         for check in checks:
             record = check.run(self)
@@ -64,23 +71,26 @@ class DisposableValidationHarness:
         print_error,
         cleanup_summary_formatter,
     ):
+        cleanup = None
         try:
-            if callable(validation_body):
-                validation_body(self)
+            try:
+                if callable(validation_body):
+                    validation_body(self)
+                else:
+                    self.run_checks(validation_body)
+            except failure_types as error:
+                self.record_failure(error)
+            except OpenCodeApiError as error:
+                self.record_failure(error)
             else:
-                self.run_checks(validation_body)
-        except failure_types as error:
-            self.record_failure(error)
-        except OpenCodeApiError as error:
-            self.record_failure(error)
-        else:
-            self.result["status"] = "done"
-            self.result["ok"] = True
-            self.exit_code = 0
+                self.result["status"] = "done"
+                self.result["ok"] = True
+                self.exit_code = 0
+        finally:
+            cleanup = self.cleanup()
+            self.result["cleanup"] = cleanup
+            self.result["checks"]["cleanup"] = cleanup
 
-        cleanup = cleanup_disposable_sessions(self.client, self.session_ids).record
-        self.result["cleanup"] = cleanup
-        self.result["checks"]["cleanup"] = cleanup
         if cleanup["status"] != "done" and self.failure is None:
             self.record_failure(
                 DisposableValidationError(
@@ -98,6 +108,24 @@ class DisposableValidationHarness:
         else:
             print(compact_formatter(self.result))
         return 0
+
+    def cleanup(self):
+        resource_errors = self._close_resources()
+        cleanup = cleanup_disposable_sessions(self.client, self.session_ids).record
+        if resource_errors:
+            cleanup["status"] = "failed"
+            cleanup.setdefault("errors", []).extend(resource_errors)
+        return cleanup
+
+    def _close_resources(self):
+        errors = []
+        while self.cleanup_callbacks:
+            close = self.cleanup_callbacks.pop()
+            try:
+                close()
+            except Exception as error:  # pragma: no cover - defensive cleanup reporting
+                errors.append({"session_id": None, "error": f"resource cleanup failed: {error}"})
+        return errors
 
     def record_failure(self, error):
         self.failure = error

@@ -45,7 +45,7 @@ class BackgroundSessionEventWatcher:
         self.opened = threading.Event()
         self.closed = threading.Event()
         self.items = queue.Queue()
-        self.thread = threading.Thread(target=self._run)
+        self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
         self.thread.start()
