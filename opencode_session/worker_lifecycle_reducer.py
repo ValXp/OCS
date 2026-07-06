@@ -1,5 +1,5 @@
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from opencode_session.status import short_status
 from opencode_session.worker_attempt_log import _append_attempt, _finalize_attempt
@@ -35,77 +35,132 @@ UNSET_TRANSITION_FIELD = object()
 
 
 @dataclass(frozen=True)
-class WorkerTransitionSpec:
-    set_fields: dict = field(default_factory=dict)
-    delete_fields: tuple = ()
-    set_if_missing_fields: dict = field(default_factory=dict)
-    merge_unique_fields: dict = field(default_factory=dict)
-    append_attempt: dict = field(default_factory=dict)
-    finalize_attempt: dict = field(default_factory=dict)
-    replace_worker: bool = False
-    preserve_accepted_abort: bool = True
+class _ProvisionedTransition:
+    session_id: object = None
+    agent: object = None
+    model: object = None
+
+
+@dataclass(frozen=True)
+class _ActiveTransition:
+    timeout_started_at: object = UNSET_TRANSITION_FIELD
+    clear_prompt_ids: bool = False
+
+
+@dataclass(frozen=True)
+class _AttemptStartedTransition:
+    attempt: dict
+
+
+@dataclass(frozen=True)
+class _FailedTransition:
+    category: str
+    reason: str
+    retryable: bool = True
+    retry_available: bool = False
+    timeout_started_at: object = UNSET_TRANSITION_FIELD
+    prompt_ids: tuple = ()
+
+
+@dataclass(frozen=True)
+class _DependencyBlockedTransition:
+    blockers: tuple
+
+
+@dataclass(frozen=True)
+class _AbortedTransition:
+    abort: object
+
+
+@dataclass(frozen=True)
+class _RetryScheduledTransition:
+    category: str
+    reason: str
+    retry_count: int
+    timeout_started_at: object = UNSET_TRANSITION_FIELD
+    prompt_ids: tuple = ()
+
+
+@dataclass(frozen=True)
+class _TimedOutTransition:
+    reason: str
+    status: str
+    timed_out_at: object
+    retry_available: bool = False
+    manual_retry_required: bool = False
+    timeout_started_at: object = UNSET_TRANSITION_FIELD
+
+
+@dataclass(frozen=True)
+class _ResultAppliedTransition:
+    result: dict
+    prompt_ids: tuple = ()
+    timeout_started_at: object = UNSET_TRANSITION_FIELD
+
+
+@dataclass(frozen=True)
+class _CleanupUpdatedTransition:
+    cleanup: object = None
+
+
+@dataclass(frozen=True)
+class _SnapshotAppliedTransition:
+    worker: dict
+    state_fields: tuple = WORKER_SNAPSHOT_STATE_FIELDS
+    set_if_missing_fields: tuple = ("session_id",)
+    removable_fields: tuple = REMOVABLE_WORKER_TRANSITION_FIELDS
+
+
+@dataclass(frozen=True)
+class _AttemptFinalization:
+    attempt_id: str
+    fields: dict
 
 
 @dataclass(frozen=True)
 class WorkerTransition:
-    """Lifecycle command applied to the latest worker snapshot."""
+    """Named lifecycle transition applied by WorkerLifecycleReducer."""
 
     worker_id: str
     name: str
-    spec: WorkerTransitionSpec
-
-    @property
-    def set_fields(self):
-        return self.spec.set_fields
-
-    @classmethod
-    def _from_spec(cls, worker_id, name, spec):
-        return cls(worker_id, name, spec)
+    payload: object = None
+    attempt_finalization: _AttemptFinalization | None = None
 
     def with_finalized_attempt(self, attempt_id, fields):
-        return self._from_spec(
+        return WorkerTransition(
             self.worker_id,
             self.name,
-            _transition_spec(
-                set_fields=self.spec.set_fields,
-                delete_fields=self.spec.delete_fields,
-                set_if_missing_fields=self.spec.set_if_missing_fields,
-                merge_unique_fields=self.spec.merge_unique_fields,
-                append_attempt=self.spec.append_attempt,
-                finalize_attempt={"id": attempt_id, "fields": fields},
-                replace_worker=self.spec.replace_worker,
-                preserve_accepted_abort=self.spec.preserve_accepted_abort,
-            ),
+            self.payload,
+            _AttemptFinalization(attempt_id, deepcopy(fields or {})),
         )
 
     @classmethod
     def provisioned(cls, worker):
         worker_id = worker["id"]
-        return cls._from_spec(
+        return cls(
             worker_id,
             "provisioned",
-            _provisioned_transition_spec(worker_id, worker),
+            _ProvisionedTransition(
+                session_id=deepcopy(worker.get("session_id")),
+                agent=_copy_present(worker.get("agent")),
+                model=_copy_present(worker.get("model")),
+            ),
         )
 
     @classmethod
     def active(cls, worker_id, *, timeout_started_at=UNSET_TRANSITION_FIELD, clear_prompt_ids=False):
-        return cls._from_spec(
+        return cls(
             worker_id,
             "active",
-            _active_transition_spec(
-                worker_id,
-                timeout_started_at=timeout_started_at,
+            _ActiveTransition(
+                timeout_started_at=_copy_transition_value(timeout_started_at),
                 clear_prompt_ids=clear_prompt_ids,
             ),
         )
 
     @classmethod
     def attempt_started(cls, worker_id, attempt):
-        return cls._from_spec(
-            worker_id,
-            "attempt_started",
-            _transition_spec(append_attempt=attempt),
-        )
+        return cls(worker_id, "attempt_started", _AttemptStartedTransition(deepcopy(attempt or {})))
 
     @classmethod
     def failed(
@@ -119,35 +174,26 @@ class WorkerTransition:
         timeout_started_at=UNSET_TRANSITION_FIELD,
         prompt_ids=(),
     ):
-        return cls._from_spec(
+        return cls(
             worker_id,
             "failed",
-            _failed_transition_spec(
-                worker_id,
+            _FailedTransition(
                 category,
                 reason,
                 retryable=retryable,
                 retry_available=retry_available,
-                timeout_started_at=timeout_started_at,
-                prompt_ids=prompt_ids,
+                timeout_started_at=_copy_transition_value(timeout_started_at),
+                prompt_ids=_filtered_prompt_ids(prompt_ids),
             ),
         )
 
     @classmethod
     def dependency_blocked(cls, worker_id, blockers):
-        return cls._from_spec(
-            worker_id,
-            "dependency_blocked",
-            _dependency_blocked_transition_spec(worker_id, blockers),
-        )
+        return cls(worker_id, "dependency_blocked", _DependencyBlockedTransition(tuple(blockers)))
 
     @classmethod
     def aborted(cls, worker_id, abort):
-        return cls._from_spec(
-            worker_id,
-            "aborted",
-            _aborted_transition_spec(worker_id, abort),
-        )
+        return cls(worker_id, "aborted", _AbortedTransition(deepcopy(abort)))
 
     @classmethod
     def retry_scheduled(
@@ -160,16 +206,15 @@ class WorkerTransition:
         timeout_started_at=UNSET_TRANSITION_FIELD,
         prompt_ids=(),
     ):
-        return cls._from_spec(
+        return cls(
             worker_id,
             "retry_scheduled",
-            _retry_scheduled_transition_spec(
-                worker_id,
+            _RetryScheduledTransition(
                 category,
                 reason,
                 retry_count=retry_count,
-                timeout_started_at=timeout_started_at,
-                prompt_ids=prompt_ids,
+                timeout_started_at=_copy_transition_value(timeout_started_at),
+                prompt_ids=_filtered_prompt_ids(prompt_ids),
             ),
         )
 
@@ -185,81 +230,290 @@ class WorkerTransition:
         manual_retry_required=False,
         timeout_started_at=UNSET_TRANSITION_FIELD,
     ):
-        return cls._from_spec(
+        return cls(
             worker_id,
             "timed_out",
-            _timed_out_transition_spec(
-                worker_id,
+            _TimedOutTransition(
                 reason,
                 status=status,
-                timed_out_at=timed_out_at,
+                timed_out_at=deepcopy(timed_out_at),
                 retry_available=retry_available,
                 manual_retry_required=manual_retry_required,
-                timeout_started_at=timeout_started_at,
+                timeout_started_at=_copy_transition_value(timeout_started_at),
             ),
         )
 
     @classmethod
     def result_applied(cls, worker_id, result, *, prompt_ids=(), timeout_started_at=UNSET_TRANSITION_FIELD):
-        return cls._from_spec(
+        return cls(
             worker_id,
             "result_applied",
-            _result_applied_transition_spec(
-                worker_id,
-                result,
-                prompt_ids=prompt_ids,
-                timeout_started_at=timeout_started_at,
+            _ResultAppliedTransition(
+                deepcopy(result or {}),
+                prompt_ids=_filtered_prompt_ids(prompt_ids),
+                timeout_started_at=_copy_transition_value(timeout_started_at),
             ),
         )
 
     @classmethod
     def cleanup_updated(cls, worker):
         worker_id = worker["id"]
-        return cls._from_spec(
-            worker_id,
-            "cleanup_updated",
-            _cleanup_updated_transition_spec(worker_id, worker),
-        )
+        return cls(worker_id, "cleanup_updated", _CleanupUpdatedTransition(deepcopy(worker.get("cleanup"))))
 
     @classmethod
     def snapshot_applied(cls, worker):
         worker_id = worker["id"]
-        return cls._from_spec(
+        return cls(
             worker_id,
             "snapshot_applied",
-            _snapshot_applied_transition_spec(worker_id, worker),
+            _SnapshotAppliedTransition(
+                deepcopy(worker),
+                state_fields=tuple(WORKER_SNAPSHOT_STATE_FIELDS),
+                set_if_missing_fields=("session_id",),
+                removable_fields=tuple(REMOVABLE_WORKER_TRANSITION_FIELDS),
+            ),
         )
 
 
-def apply_worker_transition_spec(record, spec):
-    latest_worker = record.to_snapshot()
-    set_fields = deepcopy(spec.set_fields or {})
-    set_if_missing_fields = deepcopy(spec.set_if_missing_fields or {})
-    merge_unique_fields = deepcopy(spec.merge_unique_fields or {})
-    if spec.preserve_accepted_abort and _accepted_abort(latest_worker) and not _accepted_abort(set_fields):
-        merged = _transition_for_aborted_worker(latest_worker, set_fields, merge_unique_fields)
-    else:
-        merged = {} if spec.replace_worker else deepcopy(latest_worker)
-        merged.update(set_fields)
-        for field_name in spec.delete_fields:
-            merged.pop(field_name, None)
-        _merge_unique_fields(merged, latest_worker, merge_unique_fields)
-        for field_name, value in set_if_missing_fields.items():
-            if not merged.get(field_name):
-                merged[field_name] = deepcopy(value)
-        if "abort" not in set_fields and "abort" in latest_worker:
-            merged["abort"] = deepcopy(latest_worker["abort"])
-    _append_attempt(merged, spec.append_attempt)
-    _finalize_attempt(merged, spec.finalize_attempt)
-    return WorkerRecord.from_worker(merged, record.worker_id).to_worker()
+class WorkerLifecycleReducer:
+    def __init__(self, record):
+        self.record = record
+        self.latest_worker = record.to_snapshot()
+
+    def apply(self, transition):
+        if transition.name == "provisioned":
+            worker = self.provisioned(transition)
+        elif transition.name == "active":
+            worker = self.active(transition)
+        elif transition.name == "attempt_started":
+            worker = self.attempt_started(transition)
+        elif transition.name == "failed":
+            worker = self.failed(transition)
+        elif transition.name == "dependency_blocked":
+            worker = self.dependency_blocked(transition)
+        elif transition.name == "aborted":
+            worker = self.aborted(transition)
+        elif transition.name == "retry_scheduled":
+            worker = self.retry_scheduled(transition)
+        elif transition.name == "timed_out":
+            worker = self.timed_out(transition)
+        elif transition.name == "result_applied":
+            worker = self.result_applied(transition)
+        elif transition.name == "cleanup_updated":
+            worker = self.cleanup_updated(transition)
+        elif transition.name == "snapshot_applied":
+            worker = self.snapshot_applied(transition)
+        else:
+            raise ValueError(f"unknown worker transition: {transition.name}")
+        _finalize_worker_attempt(worker, transition.attempt_finalization)
+        return WorkerRecord.from_worker(worker, self.record.worker_id or transition.worker_id).to_worker()
+
+    def provisioned(self, transition):
+        payload = transition.payload
+        worker = self._copy_latest()
+        if self._has_accepted_abort():
+            return worker
+        worker["id"] = transition.worker_id
+        if payload.agent is not None:
+            worker["agent"] = deepcopy(payload.agent)
+        if payload.model is not None:
+            worker["model"] = deepcopy(payload.model)
+        if payload.session_id and not worker.get("session_id"):
+            worker["session_id"] = deepcopy(payload.session_id)
+        return worker
+
+    def active(self, transition):
+        payload = transition.payload
+        worker = self._copy_latest()
+        if self._has_accepted_abort():
+            return worker
+        _clear_current_status_fields(worker)
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_ACTIVE_WAIT))
+        _set_if_not_unset(worker, "timeout_started_at", payload.timeout_started_at)
+        if payload.clear_prompt_ids:
+            worker["prompt_ids"] = []
+        return worker
+
+    def attempt_started(self, transition):
+        worker = self._copy_latest()
+        _append_attempt(worker, transition.payload.attempt)
+        return worker
+
+    def failed(self, transition):
+        payload = transition.payload
+        worker = self._copy_latest()
+        if self._has_accepted_abort():
+            self._merge_prompt_ids(worker, payload.prompt_ids)
+            return worker
+        lifecycle_state = (
+            WORKER_LIFECYCLE_FAILED_RETRY
+            if payload.retryable and payload.retry_available
+            else WORKER_LIFECYCLE_FAILED_TERMINAL
+        )
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, lifecycle_state))
+        worker.update(
+            {
+                "error": payload.reason,
+                "failure_category": payload.category,
+                "failure_reason": payload.reason,
+                "last_failure_category": payload.category,
+                "last_failure_reason": payload.reason,
+            }
+        )
+        _set_if_not_unset(worker, "timeout_started_at", payload.timeout_started_at)
+        worker.pop("manual_retry_required", None)
+        if payload.retryable:
+            worker.pop("failure_retryable", None)
+        else:
+            worker["failure_retryable"] = False
+        self._merge_prompt_ids(worker, payload.prompt_ids)
+        return worker
+
+    def dependency_blocked(self, transition):
+        worker = self._copy_latest()
+        if self._has_accepted_abort():
+            return worker
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_BLOCKED_DEPENDENCY))
+        worker["blockers"] = list(transition.payload.blockers)
+        return worker
+
+    def aborted(self, transition):
+        payload = transition.payload
+        worker = self._copy_latest()
+        if self._has_accepted_abort() and not _abort_is_accepted(payload.abort):
+            return worker
+        worker["id"] = transition.worker_id
+        worker["abort"] = deepcopy(payload.abort)
+        if _abort_is_accepted(payload.abort):
+            worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_ABORTED))
+        return worker
+
+    def retry_scheduled(self, transition):
+        payload = transition.payload
+        worker = self._copy_latest()
+        if self._has_accepted_abort():
+            self._merge_prompt_ids(worker, payload.prompt_ids)
+            return worker
+        _clear_current_status_fields(worker)
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, WORKER_LIFECYCLE_ACTIVE_RETRY))
+        worker.update(
+            {
+                "retry_count": payload.retry_count,
+                "last_failure_category": payload.category,
+                "last_failure_reason": payload.reason,
+            }
+        )
+        _set_if_not_unset(worker, "timeout_started_at", payload.timeout_started_at)
+        self._merge_prompt_ids(worker, payload.prompt_ids)
+        return worker
+
+    def timed_out(self, transition):
+        payload = transition.payload
+        worker = self._copy_latest()
+        if self._has_accepted_abort():
+            return worker
+        worker.update(
+            worker_lifecycle_set_fields(
+                transition.worker_id,
+                _timeout_lifecycle_state(payload.status, payload.retry_available),
+            )
+        )
+        worker.update(
+            {
+                "error": payload.reason,
+                "failure_category": WORKER_STATUS_TIMEOUT,
+                "failure_reason": payload.reason,
+                "last_failure_category": WORKER_STATUS_TIMEOUT,
+                "last_failure_reason": payload.reason,
+                "timed_out_at": payload.timed_out_at,
+                "output_refs": [],
+            }
+        )
+        if payload.status == WORKER_STATUS_BLOCKED:
+            worker["blockers"] = [WORKER_STATUS_TIMEOUT]
+        _set_if_not_unset(worker, "timeout_started_at", payload.timeout_started_at)
+        if payload.manual_retry_required:
+            worker["manual_retry_required"] = True
+        else:
+            worker.pop("manual_retry_required", None)
+        return worker
+
+    def result_applied(self, transition):
+        payload = transition.payload
+        worker = self._copy_latest()
+        if self._has_accepted_abort():
+            self._merge_prompt_ids(worker, payload.prompt_ids)
+            return worker
+        status = short_status(payload.result["status"])
+        worker.update(worker_lifecycle_set_fields(transition.worker_id, _result_lifecycle_state(status)))
+        worker["result"] = deepcopy(payload.result)
+        _set_if_not_unset(worker, "timeout_started_at", payload.timeout_started_at)
+        if status == WORKER_STATUS_DONE:
+            _clear_current_status_fields(worker)
+            assistant_message_id = payload.result["message_ids"].get("assistant")
+            worker["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
+        else:
+            worker["failure_category"] = None
+            worker["failure_reason"] = None
+        self._merge_prompt_ids(worker, payload.prompt_ids)
+        return worker
+
+    def cleanup_updated(self, transition):
+        worker = self._copy_latest()
+        worker["id"] = transition.worker_id
+        worker["cleanup"] = deepcopy(transition.payload.cleanup)
+        return worker
+
+    def snapshot_applied(self, transition):
+        payload = transition.payload
+        if self._has_accepted_abort() and not _accepted_abort(_snapshot_transition_fields(transition)):
+            worker = self._copy_latest()
+            if "cleanup" in payload.state_fields and "cleanup" in payload.worker:
+                worker["cleanup"] = deepcopy(payload.worker.get("cleanup"))
+            prompt_ids = payload.worker.get("prompt_ids")
+            if isinstance(prompt_ids, list):
+                self._merge_prompt_ids(worker, tuple(prompt_ids), merge_empty=True)
+            return worker
+        worker = self._copy_latest()
+        worker["id"] = transition.worker_id
+        for field_name in payload.state_fields:
+            if field_name in payload.worker:
+                worker[field_name] = deepcopy(payload.worker[field_name])
+        for field_name in payload.removable_fields:
+            if field_name not in payload.worker:
+                worker.pop(field_name, None)
+        prompt_ids = payload.worker.get("prompt_ids")
+        if isinstance(prompt_ids, list):
+            self._merge_prompt_ids(worker, tuple(prompt_ids), merge_empty=True)
+        for field_name in payload.set_if_missing_fields:
+            if payload.worker.get(field_name) and not worker.get(field_name):
+                worker[field_name] = deepcopy(payload.worker[field_name])
+        return worker
+
+    def _copy_latest(self):
+        return deepcopy(self.latest_worker)
+
+    def _has_accepted_abort(self):
+        return _accepted_abort(self.latest_worker)
+
+    def _merge_prompt_ids(self, worker, prompt_ids, *, merge_empty=False):
+        if not prompt_ids and not merge_empty:
+            return
+        source_worker = {} if latest_prompt_ids_are_retry_marker(self.latest_worker) else self.latest_worker
+        _merge_unique_list_field(worker, source_worker, {"prompt_ids": list(prompt_ids)}, "prompt_ids")
 
 
-def _transition_for_aborted_worker(latest_worker, set_fields, merge_unique_fields):
-    merged = deepcopy(latest_worker)
-    _merge_unique_fields(merged, latest_worker, merge_unique_fields)
-    if "cleanup" in set_fields:
-        merged["cleanup"] = deepcopy(set_fields["cleanup"])
-    return merged
+def apply_worker_transition_to_record(record, transition):
+    return WorkerLifecycleReducer(record).apply(transition)
+
+
+def _snapshot_transition_fields(transition):
+    payload = transition.payload
+    fields = {"id": transition.worker_id}
+    for field_name in payload.state_fields:
+        if field_name in payload.worker:
+            fields[field_name] = deepcopy(payload.worker[field_name])
+    return fields
 
 
 def _accepted_abort(worker):
@@ -268,12 +522,8 @@ def _accepted_abort(worker):
     return isinstance(abort, dict) and abort.get("accepted") and status == WORKER_STATUS_ABORTED
 
 
-def _merge_unique_fields(target, latest_worker, merge_unique_fields):
-    for field_name, values in merge_unique_fields.items():
-        source_worker = latest_worker
-        if field_name == "prompt_ids" and latest_prompt_ids_are_retry_marker(latest_worker):
-            source_worker = {}
-        _merge_unique_list_field(target, source_worker, {field_name: list(values)}, field_name)
+def _abort_is_accepted(abort):
+    return isinstance(abort, dict) and abort.get("accepted")
 
 
 def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
@@ -286,213 +536,6 @@ def _merge_unique_list_field(target, latest_worker, worker_record, field_name):
             if value not in merged_values:
                 merged_values.append(deepcopy(value))
     target[field_name] = merged_values
-
-
-def _transition_spec(
-    *,
-    set_fields=None,
-    delete_fields=(),
-    set_if_missing_fields=None,
-    merge_unique_fields=None,
-    append_attempt=None,
-    finalize_attempt=None,
-    replace_worker=False,
-    preserve_accepted_abort=True,
-):
-    return WorkerTransitionSpec(
-        set_fields=deepcopy(set_fields or {}),
-        delete_fields=tuple(delete_fields),
-        set_if_missing_fields=deepcopy(set_if_missing_fields or {}),
-        merge_unique_fields=deepcopy(merge_unique_fields or {}),
-        append_attempt=deepcopy(append_attempt or {}),
-        finalize_attempt=deepcopy(finalize_attempt or {}),
-        replace_worker=replace_worker,
-        preserve_accepted_abort=preserve_accepted_abort,
-    )
-
-
-def _provisioned_transition_spec(worker_id, worker):
-    set_fields = {"id": worker_id}
-    for field_name in ("agent", "model"):
-        if worker.get(field_name) is not None:
-            set_fields[field_name] = deepcopy(worker[field_name])
-    set_if_missing_fields = {}
-    if worker.get("session_id"):
-        set_if_missing_fields["session_id"] = deepcopy(worker["session_id"])
-    return _transition_spec(set_fields=set_fields, set_if_missing_fields=set_if_missing_fields)
-
-
-def _active_transition_spec(worker_id, *, timeout_started_at=UNSET_TRANSITION_FIELD, clear_prompt_ids=False):
-    set_fields, delete_fields = _cleared_current_status_fields()
-    set_fields.update(worker_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_ACTIVE_WAIT))
-    _set_if_not_unset(set_fields, "timeout_started_at", timeout_started_at)
-    if clear_prompt_ids:
-        set_fields["prompt_ids"] = []
-    return _transition_spec(set_fields=set_fields, delete_fields=delete_fields)
-
-
-def _failed_transition_spec(
-    worker_id,
-    category,
-    reason,
-    *,
-    retryable=True,
-    retry_available=False,
-    timeout_started_at=UNSET_TRANSITION_FIELD,
-    prompt_ids=(),
-):
-    lifecycle_state = WORKER_LIFECYCLE_FAILED_RETRY if retryable and retry_available else WORKER_LIFECYCLE_FAILED_TERMINAL
-    set_fields = worker_lifecycle_set_fields(worker_id, lifecycle_state)
-    set_fields.update(
-        {
-            "error": reason,
-            "failure_category": category,
-            "failure_reason": reason,
-            "last_failure_category": category,
-            "last_failure_reason": reason,
-        }
-    )
-    _set_if_not_unset(set_fields, "timeout_started_at", timeout_started_at)
-    delete_fields = ["manual_retry_required"]
-    if retryable:
-        delete_fields.append("failure_retryable")
-    else:
-        set_fields["failure_retryable"] = False
-    return _transition_spec(
-        set_fields=set_fields,
-        delete_fields=tuple(delete_fields),
-        merge_unique_fields=_prompt_ids_merge(prompt_ids),
-    )
-
-
-def _dependency_blocked_transition_spec(worker_id, blockers):
-    set_fields = worker_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_BLOCKED_DEPENDENCY)
-    set_fields["blockers"] = list(blockers)
-    return _transition_spec(set_fields=set_fields)
-
-
-def _aborted_transition_spec(worker_id, abort):
-    set_fields = {"id": worker_id, "abort": deepcopy(abort)}
-    if isinstance(abort, dict) and abort.get("accepted"):
-        set_fields.update(worker_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_ABORTED))
-    return _transition_spec(set_fields=set_fields)
-
-
-def _retry_scheduled_transition_spec(
-    worker_id,
-    category,
-    reason,
-    *,
-    retry_count,
-    timeout_started_at=UNSET_TRANSITION_FIELD,
-    prompt_ids=(),
-):
-    set_fields, delete_fields = _cleared_current_status_fields()
-    set_fields.update(worker_lifecycle_set_fields(worker_id, WORKER_LIFECYCLE_ACTIVE_RETRY))
-    set_fields.update(
-        {
-            "retry_count": retry_count,
-            "last_failure_category": category,
-            "last_failure_reason": reason,
-        }
-    )
-    _set_if_not_unset(set_fields, "timeout_started_at", timeout_started_at)
-    return _transition_spec(
-        set_fields=set_fields,
-        delete_fields=delete_fields,
-        merge_unique_fields=_prompt_ids_merge(prompt_ids),
-    )
-
-
-def _timed_out_transition_spec(
-    worker_id,
-    reason,
-    *,
-    status,
-    timed_out_at,
-    retry_available=False,
-    manual_retry_required=False,
-    timeout_started_at=UNSET_TRANSITION_FIELD,
-):
-    lifecycle_state = _timeout_lifecycle_state(status, retry_available)
-    set_fields = worker_lifecycle_set_fields(worker_id, lifecycle_state)
-    set_fields.update(
-        {
-            "error": reason,
-            "failure_category": WORKER_STATUS_TIMEOUT,
-            "failure_reason": reason,
-            "last_failure_category": WORKER_STATUS_TIMEOUT,
-            "last_failure_reason": reason,
-            "timed_out_at": timed_out_at,
-            "output_refs": [],
-        }
-    )
-    if status == WORKER_STATUS_BLOCKED:
-        set_fields["blockers"] = [WORKER_STATUS_TIMEOUT]
-    _set_if_not_unset(set_fields, "timeout_started_at", timeout_started_at)
-    delete_fields = []
-    if manual_retry_required:
-        set_fields["manual_retry_required"] = True
-    else:
-        delete_fields.append("manual_retry_required")
-    return _transition_spec(set_fields=set_fields, delete_fields=tuple(delete_fields))
-
-
-def _result_applied_transition_spec(
-    worker_id,
-    result,
-    *,
-    prompt_ids=(),
-    timeout_started_at=UNSET_TRANSITION_FIELD,
-):
-    status = short_status(result["status"])
-    set_fields = worker_lifecycle_set_fields(worker_id, _result_lifecycle_state(status))
-    set_fields["result"] = deepcopy(result)
-    _set_if_not_unset(set_fields, "timeout_started_at", timeout_started_at)
-    delete_fields = ()
-    if status == WORKER_STATUS_DONE:
-        clear_fields, delete_fields = _cleared_current_status_fields()
-        set_fields.update(clear_fields)
-        assistant_message_id = result["message_ids"].get("assistant")
-        set_fields["output_refs"] = [f"assistant:{assistant_message_id}"] if assistant_message_id else []
-    else:
-        set_fields["failure_category"] = None
-        set_fields["failure_reason"] = None
-    return _transition_spec(
-        set_fields=set_fields,
-        delete_fields=delete_fields,
-        merge_unique_fields=_prompt_ids_merge(prompt_ids),
-    )
-
-
-def _cleanup_updated_transition_spec(worker_id, worker):
-    return _transition_spec(set_fields={"id": worker_id, "cleanup": deepcopy(worker.get("cleanup"))})
-
-
-def _snapshot_applied_transition_spec(
-    worker_id,
-    worker,
-    *,
-    state_fields=None,
-    set_if_missing_fields=("session_id",),
-    removable_fields=REMOVABLE_WORKER_TRANSITION_FIELDS,
-):
-    set_fields = {"id": worker_id}
-    selected_state_fields = state_fields or WORKER_SNAPSHOT_STATE_FIELDS
-    for field_name in selected_state_fields:
-        if field_name in worker:
-            set_fields[field_name] = deepcopy(worker[field_name])
-    prompt_ids = worker.get("prompt_ids")
-    return _transition_spec(
-        set_fields=set_fields,
-        delete_fields=tuple(field_name for field_name in removable_fields if field_name not in worker),
-        set_if_missing_fields={
-            field_name: deepcopy(worker[field_name])
-            for field_name in set_if_missing_fields
-            if worker.get(field_name)
-        },
-        merge_unique_fields={"prompt_ids": tuple(prompt_ids)} if isinstance(prompt_ids, list) else {},
-    )
 
 
 def _timeout_lifecycle_state(status, retry_available):
@@ -517,19 +560,34 @@ def _result_lifecycle_state(status):
     return WORKER_LIFECYCLE_FAILED_TERMINAL
 
 
-def _cleared_current_status_fields():
-    return {
-        "blockers": [],
-        "failure_category": None,
-        "failure_reason": None,
-    }, REMOVABLE_WORKER_TRANSITION_FIELDS
-
-
-def _prompt_ids_merge(prompt_ids):
-    prompt_ids = tuple(prompt_id for prompt_id in prompt_ids if prompt_id is not None)
-    return {"prompt_ids": prompt_ids} if prompt_ids else {}
+def _clear_current_status_fields(worker):
+    worker["blockers"] = []
+    worker["failure_category"] = None
+    worker["failure_reason"] = None
+    for field_name in REMOVABLE_WORKER_TRANSITION_FIELDS:
+        worker.pop(field_name, None)
 
 
 def _set_if_not_unset(fields, name, value):
     if value is not UNSET_TRANSITION_FIELD:
-        fields[name] = value
+        fields[name] = deepcopy(value)
+
+
+def _copy_present(value):
+    return None if value is None else deepcopy(value)
+
+
+def _copy_transition_value(value):
+    if value is UNSET_TRANSITION_FIELD:
+        return value
+    return deepcopy(value)
+
+
+def _filtered_prompt_ids(prompt_ids):
+    return tuple(prompt_id for prompt_id in prompt_ids if prompt_id is not None)
+
+
+def _finalize_worker_attempt(worker, finalization):
+    if finalization is None:
+        return
+    _finalize_attempt(worker, {"id": finalization.attempt_id, "fields": finalization.fields})

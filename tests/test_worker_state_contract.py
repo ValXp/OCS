@@ -147,8 +147,8 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["lifecycle_state"], "active_wait")
         self.assertEqual(worker["next_eligible_action"], "wait")
         self.assertEqual(worker["timeout_started_at"], "2026-07-04T00:00:00Z")
-        self.assertNotIn("status", transition.set_fields)
-        self.assertNotIn("next_eligible_action", transition.set_fields)
+        self.assertEqual(transition.name, "active")
+        self.assertFalse(hasattr(transition, "spec"))
 
     def test_mark_worker_active_clears_stale_current_status_metadata(self):
         worker = normalize_worker(
@@ -176,7 +176,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker["last_failure_category"], "api")
         self.assertEqual(worker["last_failure_reason"], "previous failure")
 
-    def test_worker_transition_applies_lifecycle_patch_without_snapshot_whitelist(self):
+    def test_worker_transition_applies_failure_without_snapshot_whitelist(self):
         latest_workers = {
             "review": {
                 "id": "review",
@@ -203,6 +203,54 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(merged["error"], "provider failed")
         self.assertEqual(merged["prompt_ids"], ["msg_previous", "msg_failed"])
         self.assertNotIn("failure_retryable", merged)
+
+    def test_worker_transition_uses_named_payload_not_patch_spec(self):
+        transition = WorkerTransition.failed(
+            "review",
+            "provider",
+            "provider failed",
+            retryable=True,
+            retry_available=False,
+            prompt_ids=("msg_failed",),
+        )
+
+        self.assertEqual(transition.name, "failed")
+        self.assertEqual(transition.payload.category, "provider")
+        self.assertEqual(transition.payload.reason, "provider failed")
+        self.assertFalse(hasattr(transition, "spec"))
+
+    def test_accepted_abort_preserves_late_result_but_keeps_prompt_ids(self):
+        worker = normalize_worker(
+            {
+                "status": "active",
+                "session_id": "ses_build",
+                "prompt_ids": ["msg_initial"],
+            },
+            "build",
+        )
+        apply_worker_transition_to_worker(
+            worker,
+            mark_worker_aborted(worker, {"session_id": "ses_build", "accepted": True}),
+        )
+
+        apply_worker_transition_to_worker(
+            worker,
+            apply_worker_result(
+                worker,
+                {
+                    "status": "done",
+                    "message_ids": {"user": "msg_user", "assistant": "msg_assistant"},
+                },
+                prompt_ids=("msg_user",),
+            ),
+        )
+
+        self.assertEqual(worker["status"], "aborted")
+        self.assertEqual(worker["next_eligible_action"], "none")
+        self.assertEqual(worker["abort"], {"session_id": "ses_build", "accepted": True})
+        self.assertEqual(worker["prompt_ids"], ["msg_initial", "msg_user"])
+        self.assertNotIn("result", worker)
+        self.assertEqual(worker["output_refs"], [])
 
     def test_mark_dependency_blocked_records_blockers_and_resolution_action(self):
         worker = normalize_worker({}, "review")

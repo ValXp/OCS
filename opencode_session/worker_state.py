@@ -22,7 +22,7 @@ from opencode_session.worker_lifecycle import (
 from opencode_session.worker_lifecycle_reducer import (
     UNSET_TRANSITION_FIELD,
     WorkerTransition,
-    apply_worker_transition_spec,
+    apply_worker_transition_to_record,
 )
 from opencode_session.worker_snapshot_codec import WorkerRecord, deserialize_worker_record, serialize_worker_snapshot
 
@@ -41,7 +41,7 @@ def normalize_worker_snapshot(worker, worker_id):
 
 def _apply_worker_transition_to_record(worker, transition):
     record = WorkerRecord.from_worker(worker, transition.worker_id)
-    return apply_worker_transition_spec(record, transition.spec)
+    return apply_worker_transition_to_record(record, transition)
 
 
 def apply_worker_transition_to_worker(worker, transition):
