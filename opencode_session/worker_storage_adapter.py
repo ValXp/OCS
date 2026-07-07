@@ -8,8 +8,9 @@ from opencode_session.worker_state import (
     WORKER_RECORD_CANONICAL_FIELD_NAMES,
     WORKER_LIFECYCLE_QUEUED,
     WORKER_LIFECYCLE_STATES,
-    WORKER_LIST_FIELDS,
-    WORKER_OPTIONAL_LIST_FIELDS,
+    WORKER_STORAGE_INT_FIELD_NAMES,
+    WORKER_STORAGE_LIST_FIELD_NAMES,
+    WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
     WORKER_STATUS_ABORTED,
     WORKER_STATUS_FAILED,
     WORKER_STATUS_TIMEOUT,
@@ -185,21 +186,23 @@ def _remove_legacy_public_worker_state(fields):
 
 
 def _coerce_persisted_worker_retry_budget(fields):
-    for field_name in ("retry_count", "retry_limit"):
+    for field_name in WORKER_STORAGE_INT_FIELD_NAMES:
         if field_name in fields:
             fields[field_name] = _coerced_storage_int(fields[field_name])
 
 
 def _coerce_persisted_worker_lists(fields):
-    for field_name in (*WORKER_LIST_FIELDS, *WORKER_OPTIONAL_LIST_FIELDS):
+    for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
         if field_name in fields and not isinstance(fields[field_name], list):
             fields[field_name] = []
 
 
 def _coerce_persisted_worker_timeout_policy(fields):
-    if "timeout_policy" in fields:
-        timeout_policy = short_status(fields["timeout_policy"])
-        fields["timeout_policy"] = (
+    for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES:
+        if field_name not in fields:
+            continue
+        timeout_policy = short_status(fields[field_name])
+        fields[field_name] = (
             timeout_policy if timeout_policy in WORKER_TIMEOUT_POLICY_STATUSES else WORKER_STATUS_TIMEOUT
         )
 

@@ -5,6 +5,7 @@ from opencode_session.worker_storage_adapter import (
     migrate_persisted_worker_snapshot,
     normalize_worker_snapshot_for_storage,
 )
+from opencode_session.worker_snapshot_transition import worker_snapshot_transition_patch
 from opencode_session.run_record import upsert_worker_record
 from opencode_session.schema_worker import (
     WORKER_REQUIRED_FIELD_NAMES as SCHEMA_WORKER_REQUIRED_FIELD_NAMES,
@@ -19,6 +20,14 @@ from opencode_session.worker_state import (
     WORKER_RECORD_UPDATE_FIELD_NAMES,
     WORKER_REQUIRED_FIELD_NAMES,
     WORKER_RUN_UPSERT_FIELD_NAMES,
+    WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES,
+    WORKER_SNAPSHOT_PROMPT_ID_FIELD_NAMES,
+    WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES,
+    WORKER_SNAPSHOT_REPLAY_FIELD_NAMES,
+    WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES,
+    WORKER_STORAGE_INT_FIELD_NAMES,
+    WORKER_STORAGE_LIST_FIELD_NAMES,
+    WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
     WorkerRecord,
     worker_default_snapshot_fields,
 )
@@ -116,6 +125,38 @@ class WorkerStateContractTest(unittest.TestCase):
             tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.run_upsert),
         )
         self.assertEqual(
+            WORKER_STORAGE_INT_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "int"),
+        )
+        self.assertEqual(
+            WORKER_STORAGE_LIST_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "list"),
+        )
+        self.assertEqual(
+            WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_policy"),
+        )
+        self.assertEqual(
+            WORKER_SNAPSHOT_REPLAY_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_replay_field),
+        )
+        self.assertEqual(
+            WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_set_if_missing),
+        )
+        self.assertEqual(
+            WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.removable_transition_field),
+        )
+        self.assertEqual(
+            WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_accepted_abort_passthrough),
+        )
+        self.assertEqual(
+            WORKER_SNAPSHOT_PROMPT_ID_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_prompt_ids),
+        )
+        self.assertEqual(
             SCHEMA_WORKER_REQUIRED_FIELD_NAMES,
             tuple(WorkerRequiredFields.__annotations__),
         )
@@ -137,6 +178,87 @@ class WorkerStateContractTest(unittest.TestCase):
 
         defaults["dependencies"].append("mutated")
         self.assertEqual(WorkerRecord.default_snapshot_fields("review")["dependencies"], [])
+
+    def test_storage_migration_coercion_uses_field_spec_validators(self):
+        legacy_worker = {
+            "id": "review",
+            "lifecycle_state": "active_wait",
+            "unknown_plugin_state": {"attempt": 2},
+        }
+        for field_name in WORKER_STORAGE_INT_FIELD_NAMES:
+            legacy_worker[field_name] = "2"
+        for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
+            legacy_worker[field_name] = "not-a-list"
+        for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES:
+            legacy_worker[field_name] = "failed"
+
+        migrated = migrate_persisted_worker_snapshot(legacy_worker, "review")
+
+        for field_name in WORKER_STORAGE_INT_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(migrated[field_name], 2)
+        for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(migrated[field_name], [])
+        for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(migrated[field_name], "failed")
+        self.assertEqual(migrated["unknown_plugin_state"], {"attempt": 2})
+
+    def test_snapshot_replay_patch_uses_field_spec_policy(self):
+        worker = WorkerRecord.default_fields("review")
+        worker.update_canonical_fields(
+            session_id="ses_review",
+            lifecycle_state="failed_terminal",
+            retry_count=1,
+            timeout_started_at="2026-07-06T00:00:00Z",
+            timed_out_at="2026-07-06T00:01:00Z",
+            failure_category="provider",
+            failure_reason="provider failed",
+            last_failure_category="provider",
+            last_failure_reason="provider failed",
+            blockers=["provider"],
+            output_refs=["assistant:msg_review"],
+            error="provider failed",
+            failure_retryable=False,
+            manual_retry_required=True,
+            cleanup={"requested": True, "deleted": False},
+            abort={"accepted": False},
+            attempts=[{"id": "attempt-1"}],
+            result={"status": "failed"},
+        )
+        worker.remember_prompt_id("prompt-review")
+
+        patch = worker_snapshot_transition_patch(worker)
+        snapshot = worker.to_snapshot()
+        expected_patch_fields = {
+            "id",
+            *(field_name for field_name in WORKER_SNAPSHOT_REPLAY_FIELD_NAMES if field_name in snapshot),
+        }
+
+        self.assertEqual(set(patch.fields), expected_patch_fields)
+        for field_name in WORKER_SNAPSHOT_REPLAY_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(patch.fields[field_name], snapshot[field_name])
+        for field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES - expected_patch_fields:
+            with self.subTest(non_replayed_field_name=field_name):
+                self.assertNotIn(field_name, patch.fields)
+        self.assertEqual(
+            patch.set_if_missing_fields,
+            {field_name: snapshot[field_name] for field_name in WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES},
+        )
+        self.assertEqual(patch.prompt_ids, ("prompt-review",))
+        self.assertEqual(patch.accepted_abort_prompt_ids, ("prompt-review",))
+        self.assertEqual(
+            patch.accepted_abort_fields,
+            {field_name: snapshot[field_name] for field_name in WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES},
+        )
+
+    def test_snapshot_replay_absent_removals_use_field_spec_policy(self):
+        patch = worker_snapshot_transition_patch({"id": "review"}, "review")
+
+        self.assertEqual(patch.remove_fields, WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES)
+        self.assertEqual(patch.accepted_abort_fields, {})
 
     def test_run_worker_upsert_uses_field_spec_upsert_projection(self):
         upsert_values = {

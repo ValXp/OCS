@@ -545,6 +545,10 @@ class WorkerFieldSpec:
     record_update: bool = False
     run_upsert: bool = False
     removable_transition_field: bool = False
+    snapshot_replay_field: bool = False
+    snapshot_set_if_missing: bool = False
+    snapshot_accepted_abort_passthrough: bool = False
+    snapshot_prompt_ids: bool = False
 
     def default_value(self, worker_id):
         if self.default_from_worker_id:
@@ -555,7 +559,12 @@ class WorkerFieldSpec:
 WORKER_FIELD_SPECS = (
     WorkerFieldSpec("id", default_from_worker_id=True, validator="id"),
     WorkerFieldSpec("role", record_update=True, run_upsert=True),
-    WorkerFieldSpec("session_id", record_update=True, run_upsert=True),
+    WorkerFieldSpec(
+        "session_id",
+        record_update=True,
+        run_upsert=True,
+        snapshot_set_if_missing=True,
+    ),
     WorkerFieldSpec("agent", record_update=True, run_upsert=True),
     WorkerFieldSpec("model", record_update=True, run_upsert=True),
     WorkerFieldSpec(
@@ -571,6 +580,7 @@ WORKER_FIELD_SPECS = (
         validator="list",
         record_update=True,
         run_upsert=True,
+        snapshot_prompt_ids=True,
     ),
     WorkerFieldSpec(
         "retry_count",
@@ -578,6 +588,7 @@ WORKER_FIELD_SPECS = (
         validator="int",
         record_update=True,
         run_upsert=True,
+        snapshot_replay_field=True,
     ),
     WorkerFieldSpec(
         "retry_limit",
@@ -601,25 +612,27 @@ WORKER_FIELD_SPECS = (
         record_update=True,
         run_upsert=True,
     ),
-    WorkerFieldSpec("timeout_started_at", record_update=True),
-    WorkerFieldSpec("timed_out_at", record_update=True),
+    WorkerFieldSpec("timeout_started_at", record_update=True, snapshot_replay_field=True),
+    WorkerFieldSpec("timed_out_at", record_update=True, snapshot_replay_field=True),
     WorkerFieldSpec(
         "lifecycle_state",
         default=WORKER_LIFECYCLE_QUEUED,
         validator="lifecycle_state",
         record_update=True,
         run_upsert=True,
+        snapshot_replay_field=True,
     ),
-    WorkerFieldSpec("failure_category", record_update=True),
-    WorkerFieldSpec("failure_reason", record_update=True),
-    WorkerFieldSpec("last_failure_category", record_update=True),
-    WorkerFieldSpec("last_failure_reason", record_update=True),
+    WorkerFieldSpec("failure_category", record_update=True, snapshot_replay_field=True),
+    WorkerFieldSpec("failure_reason", record_update=True, snapshot_replay_field=True),
+    WorkerFieldSpec("last_failure_category", record_update=True, snapshot_replay_field=True),
+    WorkerFieldSpec("last_failure_reason", record_update=True, snapshot_replay_field=True),
     WorkerFieldSpec(
         "blockers",
         default=[],
         validator="list",
         record_update=True,
         run_upsert=True,
+        snapshot_replay_field=True,
     ),
     WorkerFieldSpec(
         "output_refs",
@@ -627,33 +640,49 @@ WORKER_FIELD_SPECS = (
         validator="list",
         record_update=True,
         run_upsert=True,
+        snapshot_replay_field=True,
     ),
     WorkerFieldSpec("name", required=False),
     WorkerFieldSpec("title", required=False),
     WorkerFieldSpec("prompt", required=False, record_update=True, run_upsert=True),
-    WorkerFieldSpec("error", required=False, record_update=True, removable_transition_field=True),
+    WorkerFieldSpec(
+        "error",
+        required=False,
+        record_update=True,
+        removable_transition_field=True,
+        snapshot_replay_field=True,
+    ),
     WorkerFieldSpec(
         "failure_retryable",
         required=False,
         record_update=True,
         removable_transition_field=True,
+        snapshot_replay_field=True,
     ),
     WorkerFieldSpec(
         "manual_retry_required",
         required=False,
         record_update=True,
         removable_transition_field=True,
+        snapshot_replay_field=True,
     ),
-    WorkerFieldSpec("cleanup", required=False, record_update=True),
-    WorkerFieldSpec("abort", required=False, record_update=True),
+    WorkerFieldSpec(
+        "cleanup",
+        required=False,
+        record_update=True,
+        snapshot_replay_field=True,
+        snapshot_accepted_abort_passthrough=True,
+    ),
+    WorkerFieldSpec("abort", required=False, record_update=True, snapshot_replay_field=True),
     WorkerFieldSpec(
         "attempts",
         default=[],
         required=False,
         validator="list",
         record_update=True,
+        snapshot_replay_field=True,
     ),
-    WorkerFieldSpec("result", required=False, record_update=True),
+    WorkerFieldSpec("result", required=False, record_update=True, snapshot_replay_field=True),
 )
 WORKER_FIELD_SPEC_BY_NAME = {spec.name: spec for spec in WORKER_FIELD_SPECS}
 WORKER_REQUIRED_FIELD_NAMES = tuple(
@@ -677,6 +706,28 @@ WORKER_RUN_UPSERT_FIELD_NAMES = tuple(
 )
 REMOVABLE_WORKER_TRANSITION_FIELDS = tuple(
     spec.name for spec in WORKER_FIELD_SPECS if spec.removable_transition_field
+)
+WORKER_STORAGE_INT_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "int"
+)
+WORKER_STORAGE_LIST_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "list"
+)
+WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_policy"
+)
+WORKER_SNAPSHOT_REPLAY_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_replay_field
+)
+WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_set_if_missing
+)
+WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES = REMOVABLE_WORKER_TRANSITION_FIELDS
+WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_accepted_abort_passthrough
+)
+WORKER_SNAPSHOT_PROMPT_ID_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_prompt_ids
 )
 
 
