@@ -13,6 +13,7 @@ _PersistRunMutation = Callable[[_RemoteMutationRun, _RunMutation], _RemoteMutati
 _RunUpdate = Callable[[_RemoteMutationRun], None]
 _IntentFactory = Callable[[_RemoteMutationRun], "RemoteJournalRecord"]
 _RemoteCall = Callable[[_RemoteMutationRun, "RemoteJournalRecord"], Any]
+_RemoteSucceededRecordFactory = Callable[[Any, "RemoteJournalRecord"], "RemoteJournalRecord"]
 _ResultHandler = Callable[[Any, "RemoteJournalRecord"], Optional["RemoteMutationResult"]]
 
 
@@ -296,6 +297,8 @@ class RemoteMutationRunner:
         *,
         intent_factory: _IntentFactory,
         call_remote: _RemoteCall,
+        remote_succeeded_record: Optional[_RemoteSucceededRecordFactory] = None,
+        remote_succeeded_missing_intent_policy: str = MISSING_INTENT_IGNORE,
         apply_result: Optional[_ResultHandler] = None,
     ) -> RemoteMutationExecution:
         recorded = self.transaction.record_intent_from(run, intent_factory)
@@ -307,6 +310,19 @@ class RemoteMutationRunner:
             self.transaction.mark_uncertain_best_effort(run, remote_error)
             raise
 
+        succeeded_record = intent
+        if remote_succeeded_record is not None:
+            try:
+                succeeded_record = self.transaction._validated_record(remote_succeeded_record(remote_result, intent))
+            except Exception:
+                self.transaction.mark_remote_succeeded(run, intent)
+                raise
+        run = self.transaction.mark_remote_succeeded(
+            run,
+            succeeded_record,
+            missing_intent_policy=remote_succeeded_missing_intent_policy,
+        )
+
         result = RemoteMutationResult.finalize()
         if apply_result is not None:
             result = apply_result(remote_result, intent)
@@ -314,16 +330,11 @@ class RemoteMutationRunner:
                 result = RemoteMutationResult.finalize()
         if not isinstance(result, RemoteMutationResult):
             raise TypeError("remote mutation result must be a RemoteMutationResult")
-        if result.outbox_action != REMOTE_MUTATION_RESULT_KEEP_PENDING:
-            succeeded_record = intent
-            missing_intent_policy = MISSING_INTENT_IGNORE
-            if result.outbox_action == REMOTE_MUTATION_RESULT_RECORD_APPLIED:
-                succeeded_record = result.applied_record
-                missing_intent_policy = result.missing_intent_policy
+        if result.outbox_action == REMOTE_MUTATION_RESULT_RECORD_APPLIED and result.applied_record != succeeded_record:
             run = self.transaction.mark_remote_succeeded(
                 run,
-                succeeded_record,
-                missing_intent_policy=missing_intent_policy,
+                result.applied_record,
+                missing_intent_policy=result.missing_intent_policy,
             )
         run = self.transaction.apply_result(run, result)
         return RemoteMutationExecution(run=run, remote_result=remote_result, intent=intent)

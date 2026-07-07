@@ -89,6 +89,7 @@ class WorkerSessionCreationJournal:
 
     def run_creation(self, run, worker, *, call_remote, agent=None, model=None, cleanup_requested=False):
         intent_id = self.id_factory()
+        created_session_result = None
 
         def intent_from_run(latest_run):
             latest_worker = _coerce_worker_record(latest_run, worker)
@@ -102,15 +103,26 @@ class WorkerSessionCreationJournal:
                 intent_recorded_at=self.now(),
             )
 
+        def created_session_mutation_result(session_outcome, intent):
+            nonlocal created_session_result
+            if created_session_result is None:
+                created_session_result = self._created_session_result(
+                    intent,
+                    session_outcome.created_session_id,
+                    agent=agent,
+                    model=model,
+                )
+            return created_session_result
+
+        def remote_succeeded_session_record(session_outcome, intent):
+            if session_outcome.created_session_id is None:
+                return intent
+            return created_session_mutation_result(session_outcome, intent).applied_record
+
         def apply_created_session(session_outcome, intent):
             if session_outcome.created_session_id is None:
                 return RemoteMutationResult.keep_pending()
-            return self._created_session_result(
-                intent,
-                session_outcome.created_session_id,
-                agent=agent,
-                model=model,
-            )
+            return created_session_mutation_result(session_outcome, intent)
 
         transaction = self.transactions.transaction(intent_id, WORKER_SESSION_CREATE_OPERATION)
 
@@ -118,6 +130,8 @@ class WorkerSessionCreationJournal:
             run,
             intent_factory=intent_from_run,
             call_remote=call_remote,
+            remote_succeeded_record=remote_succeeded_session_record,
+            remote_succeeded_missing_intent_policy=MISSING_INTENT_RECORD_APPLIED,
             apply_result=apply_created_session,
         )
         return execution.run, _latest_worker(execution.run, worker), execution.remote_result, execution.intent

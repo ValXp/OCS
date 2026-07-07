@@ -405,7 +405,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
             ["persist", ("intent", "ses_latest"), ("remote", "ses_latest", "msg_1"), "persist", "persist"],
         )
 
-    def test_runner_can_leave_intent_pending_after_remote_result(self):
+    def test_runner_can_leave_remote_success_pending_after_remote_result(self):
         run = {"name": "demo"}
 
         def persist_run_mutation(run, mutator):
@@ -433,7 +433,55 @@ class RemoteMutationJournalTest(unittest.TestCase):
                 {
                     "id": "mutation-1",
                     "kind": "prompt",
-                    "outbox_state": OUTBOX_STATE_INTENT,
+                    "outbox_state": OUTBOX_STATE_REMOTE_SUCCEEDED,
+                    "session_id": "ses_1",
+                }
+            ],
+        )
+
+    def test_runner_records_remote_success_before_local_apply_result_failure(self):
+        run = {"name": "demo"}
+        calls = []
+
+        def persist_run_mutation(run, mutator):
+            calls.append("persist")
+            mutator(run)
+            return run
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+        transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
+
+        def call_remote(latest_run, intent):
+            calls.append(("remote", latest_run["journal"][0]["outbox_state"]))
+            return {"message_id": "msg_1"}
+
+        def apply_result(remote_result, intent):
+            calls.append(("apply", run["journal"][0]["outbox_state"]))
+            raise RuntimeError("local result failed")
+
+        with self.assertRaisesRegex(RuntimeError, "local result failed"):
+            transaction.runner().execute(
+                run,
+                intent_factory=lambda latest_run: intent_record(),
+                call_remote=call_remote,
+                apply_result=apply_result,
+            )
+
+        self.assertEqual(
+            calls,
+            ["persist", ("remote", OUTBOX_STATE_INTENT), "persist", ("apply", OUTBOX_STATE_REMOTE_SUCCEEDED)],
+        )
+        self.assertEqual(
+            run["journal"],
+            [
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "outbox_state": OUTBOX_STATE_REMOTE_SUCCEEDED,
                     "session_id": "ses_1",
                 }
             ],
