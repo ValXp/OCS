@@ -368,6 +368,9 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(patch.prompt_ids, ("prompt-review",))
         self.assertEqual(patch.accepted_abort_prompt_ids, ("prompt-review",))
         self.assertEqual(patch.accepted_abort_fields, {"cleanup": {"requested": True, "deleted": False}})
+        self.assertIn("active_wait", patch.source_lifecycle_states)
+        self.assertIn("failed_terminal", patch.source_lifecycle_states)
+        self.assertNotIn("aborted", patch.source_lifecycle_states)
 
     def test_snapshot_replay_absent_removals_clear_stale_transient_failure_fields(self):
         patch = worker_snapshot_transition_patch(WorkerRecord.default_fields("review"))

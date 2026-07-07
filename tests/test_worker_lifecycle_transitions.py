@@ -503,15 +503,18 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             worker_snapshot_transition(hydrate_worker_record(done_snapshot, worker.worker_id))
         )
         after_done = deepcopy(worker)
-        worker.apply_transition(
-            worker_snapshot_transition(
-                hydrate_worker_record(
-                    {"id": worker.worker_id, "lifecycle_state": "active_wait", "prompt_ids": ["msg_stale"]},
-                    worker.worker_id,
-                )
+        stale_transition = worker_snapshot_transition(
+            hydrate_worker_record(
+                {"id": worker.worker_id, "lifecycle_state": "active_wait", "prompt_ids": ["msg_stale"]},
+                worker.worker_id,
             )
         )
 
+        result = reduce_worker_transition(worker, stale_transition)
+        worker.apply_transition(stale_transition)
+
+        self.assertTrue(result.skipped)
+        self.assertTrue(result.stale_snapshot_recovery)
         output = worker.to_output_dict()
         self.assertEqual(output["status"], "done")
         self.assertEqual(output["next_eligible_action"], "collect")

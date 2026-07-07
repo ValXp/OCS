@@ -47,12 +47,6 @@ _WorkerTransitionTargetResolver = Callable[
     ["WorkerTransition", "WorkerTransitionPayload"],
     Optional[str],
 ]
-_WorkerAcceptedAbortPolicy = Callable[
-    ["WorkerRecord", "WorkerTransition", "WorkerTransitionPayload", Optional[str]],
-    Optional["WorkerRecord"],
-]
-
-
 class WorkerTransitionName(str, Enum):
     PROVISIONED = "provisioned"
     ACTIVE = "active"
@@ -413,7 +407,6 @@ class _WorkerTransitionSpec:
     target_states: FrozenSet[str] = dataclass_field(default_factory=frozenset)
     public_lifecycle_transition: bool = True
     target_uses_payload: bool = False
-    accepted_abort_policy: Optional[_WorkerAcceptedAbortPolicy] = None
 
     def __post_init__(self):
         if not isinstance(self.name, WorkerTransitionName):
@@ -423,8 +416,6 @@ class _WorkerTransitionSpec:
         for field_name in ("payload_factory", "reducer", "target_resolver"):
             if not callable(getattr(self, field_name)):
                 raise TypeError(f"worker transition {field_name} must be callable")
-        if self.accepted_abort_policy is not None and not callable(self.accepted_abort_policy):
-            raise TypeError("worker transition accepted_abort_policy must be callable")
         object.__setattr__(self, "source_states", frozenset(self.source_states))
         object.__setattr__(self, "target_states", frozenset(self.target_states))
 
@@ -483,7 +474,6 @@ def _transition_spec(
     target_states=(),
     public_lifecycle_transition: bool = True,
     target_uses_payload: bool = False,
-    accepted_abort_policy: Optional[_WorkerAcceptedAbortPolicy] = None,
 ) -> _WorkerTransitionSpec:
     return _WorkerTransitionSpec(
         name,
@@ -495,7 +485,6 @@ def _transition_spec(
         target_states=target_states,
         public_lifecycle_transition=public_lifecycle_transition,
         target_uses_payload=target_uses_payload,
-        accepted_abort_policy=accepted_abort_policy,
     )
 
 
@@ -602,6 +591,7 @@ class WorkerSnapshotTransitionPatch:
     stale_recovery_allowed: bool = False
     accepted_abort_fields: dict = dataclass_field(default_factory=dict)
     accepted_abort_prompt_ids: Optional[tuple] = None
+    source_lifecycle_states: FrozenSet[str] = dataclass_field(default_factory=frozenset)
 
     def __post_init__(self):
         fields = deepcopy(dict(self.fields or {}))
@@ -619,6 +609,13 @@ class WorkerSnapshotTransitionPatch:
             )
         if patch_lifecycle_state is not None and patch_lifecycle_state not in WORKER_LIFECYCLE_STATES:
             raise ValueError(f"snapshot patch lifecycle_state must be normalized: {patch_lifecycle_state}")
+        source_lifecycle_states = self.source_lifecycle_states or worker_snapshot_replay_source_lifecycle_states(
+            target_lifecycle_state
+        )
+        invalid_source_states = sorted(set(source_lifecycle_states) - WORKER_LIFECYCLE_STATES)
+        if invalid_source_states:
+            invalid = ", ".join(invalid_source_states)
+            raise ValueError(f"snapshot patch source lifecycle_state must be normalized: {invalid}")
         object.__setattr__(self, "worker_id", worker_id)
         object.__setattr__(self, "fields", fields)
         object.__setattr__(self, "target_lifecycle_state", target_lifecycle_state)
@@ -626,6 +623,7 @@ class WorkerSnapshotTransitionPatch:
         object.__setattr__(self, "set_if_missing_fields", deepcopy(dict(self.set_if_missing_fields or {})))
         object.__setattr__(self, "remove_fields", tuple(self.remove_fields or ()))
         object.__setattr__(self, "stale_recovery_allowed", bool(self.stale_recovery_allowed))
+        object.__setattr__(self, "source_lifecycle_states", frozenset(source_lifecycle_states))
         object.__setattr__(self, "accepted_abort_fields", deepcopy(dict(self.accepted_abort_fields or {})))
         object.__setattr__(
             self,
@@ -957,10 +955,9 @@ def _require_transition_payload(transition, payload_type):
 def _reduce_worker_transition_payload(latest_worker, transition):
     latest_worker = _require_worker_record(latest_worker)
     spec, payload, target_state = _worker_transition_reduction_context(transition)
-    worker = _reduce_accepted_abort_transition(latest_worker, transition, spec, payload, target_state)
-    if worker is not None:
-        return _require_worker_record(worker)
-    return _reduce_worker_transition_payload_from_context(latest_worker, transition, spec, payload, target_state)
+    worker = _reduce_worker_transition_payload_from_context(latest_worker, transition, spec, payload, target_state)
+    worker = _accepted_abort_terminal_invariant(latest_worker, worker, transition, payload)
+    return _require_worker_record(worker)
 
 
 def _worker_transition_reduction_context(transition):
@@ -984,42 +981,39 @@ def _set_transition_lifecycle_state(worker, transition, lifecycle_state):
     worker._set_canonical_field("lifecycle_state", lifecycle_state)
 
 
-def _reduce_accepted_abort_transition(latest_worker, transition, spec, payload, target_state):
+def _accepted_abort_terminal_invariant(latest_worker, worker, transition, payload):
     if not _accepted_abort(latest_worker):
-        return None
-    if spec.accepted_abort_policy is not None:
-        return spec.accepted_abort_policy(latest_worker, transition, payload, target_state)
-    if spec.public_lifecycle_transition:
-        return _accepted_abort_terminal_worker(latest_worker, transition, payload, target_state)
-    return None
+        return worker
+    if _accepted_abort_transition_keeps_reduced_worker(transition, payload):
+        return worker
+    terminal_worker = _transition_worker_copy(latest_worker)
+    _apply_accepted_abort_transition_passthrough(terminal_worker, latest_worker, transition, payload)
+    return terminal_worker
 
 
-def _accepted_abort_terminal_worker(latest_worker, _transition, _payload, _target_state):
-    return _transition_worker_copy(latest_worker)
+def _accepted_abort_transition_keeps_reduced_worker(transition, payload):
+    if transition.name is WorkerTransitionName.ABORTED:
+        return _abort_is_accepted(payload.abort)
+    if transition.name is WorkerTransitionName.CLEANUP_UPDATED:
+        return True
+    if transition.name is WorkerTransitionName.SNAPSHOT_APPLIED:
+        return _accepted_abort_fields(payload.patch.fields.get("abort"), payload.patch.fields.get("lifecycle_state"))
+    return False
 
 
-def _accepted_abort_prompt_ids_terminal_worker(latest_worker, transition, payload, target_state):
-    worker = _accepted_abort_terminal_worker(latest_worker, transition, payload, target_state)
-    _merge_worker_prompt_ids(worker, latest_worker, payload.prompt_ids)
-    return worker
+def _apply_accepted_abort_transition_passthrough(worker, latest_worker, transition, payload):
+    if transition.name is WorkerTransitionName.SNAPSHOT_APPLIED:
+        _apply_accepted_abort_snapshot_passthrough(worker, latest_worker, payload.patch)
+        return
+    prompt_ids = getattr(payload, "prompt_ids", ())
+    _merge_worker_prompt_ids(worker, latest_worker, prompt_ids)
 
 
-def _accepted_abort_aborted_worker(latest_worker, transition, payload, target_state):
-    if _abort_is_accepted(payload.abort):
-        return None
-    return _accepted_abort_terminal_worker(latest_worker, transition, payload, target_state)
-
-
-def _accepted_abort_snapshot_worker(latest_worker, transition, payload, target_state):
-    patch = payload.patch
-    if _accepted_abort_fields(patch.fields.get("abort"), patch.fields.get("lifecycle_state")):
-        return None
-    worker = _accepted_abort_terminal_worker(latest_worker, transition, payload, target_state)
+def _apply_accepted_abort_snapshot_passthrough(worker, latest_worker, patch):
     for field_name, value in patch.accepted_abort_fields.items():
         worker._set_field_value(field_name, value)
     if patch.accepted_abort_prompt_ids is not None:
         _merge_worker_prompt_ids(worker, latest_worker, patch.accepted_abort_prompt_ids, merge_empty=True)
-    return worker
 
 
 def _reduce_provisioned_transition(latest_worker, transition, payload, target_state):
@@ -1241,7 +1235,6 @@ _WORKER_TRANSITION_SPECS = (
         payload_factory=_failed_transition_payload,
         reducer=_reduce_failed_transition,
         target_resolver=_failed_transition_target,
-        accepted_abort_policy=_accepted_abort_prompt_ids_terminal_worker,
         source_states=_lifecycle_state_set(
             WORKER_LIFECYCLE_QUEUED,
             WORKER_LIFECYCLE_ACTIVE_WAIT,
@@ -1272,7 +1265,6 @@ _WORKER_TRANSITION_SPECS = (
         payload_factory=_aborted_transition_payload,
         reducer=_reduce_aborted_transition,
         target_resolver=_constant_transition_target(WORKER_LIFECYCLE_ABORTED),
-        accepted_abort_policy=_accepted_abort_aborted_worker,
         source_states=_lifecycle_state_set(
             WORKER_LIFECYCLE_QUEUED,
             WORKER_LIFECYCLE_ACTIVE_WAIT,
@@ -1293,7 +1285,6 @@ _WORKER_TRANSITION_SPECS = (
         payload_factory=_retry_scheduled_transition_payload,
         reducer=_reduce_retry_scheduled_transition,
         target_resolver=_constant_transition_target(WORKER_LIFECYCLE_ACTIVE_RETRY),
-        accepted_abort_policy=_accepted_abort_prompt_ids_terminal_worker,
         source_states=_lifecycle_state_set(
             WORKER_LIFECYCLE_ACTIVE_WAIT,
             WORKER_LIFECYCLE_FAILED_RETRY,
@@ -1325,7 +1316,6 @@ _WORKER_TRANSITION_SPECS = (
         payload_factory=_result_applied_transition_payload,
         reducer=_reduce_result_applied_transition,
         target_resolver=_result_applied_transition_target,
-        accepted_abort_policy=_accepted_abort_prompt_ids_terminal_worker,
         source_states=_lifecycle_state_set(WORKER_LIFECYCLE_ACTIVE_WAIT),
         target_states=_lifecycle_state_set(
             WORKER_LIFECYCLE_BLOCKED_DEPENDENCY,
@@ -1351,7 +1341,6 @@ _WORKER_TRANSITION_SPECS = (
         payload_factory=_snapshot_applied_transition_payload,
         reducer=_reduce_snapshot_applied_transition,
         target_resolver=_snapshot_applied_transition_target,
-        accepted_abort_policy=_accepted_abort_snapshot_worker,
         source_states=WORKER_LIFECYCLE_STATES,
         public_lifecycle_transition=False,
         target_uses_payload=True,
@@ -1395,6 +1384,16 @@ _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE = {
     )
     for source_state in WORKER_LIFECYCLE_STATES
 }
+
+
+def worker_snapshot_replay_source_lifecycle_states(target_lifecycle_state):
+    if target_lifecycle_state is None:
+        return WORKER_LIFECYCLE_STATES
+    return frozenset(
+        source_state
+        for source_state, target_states in _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE.items()
+        if target_lifecycle_state in target_states
+    )
 
 
 def _worker_transition_spec(name):
@@ -1446,16 +1445,26 @@ def _validate_transition_target_lifecycle_state(name, target_state):
 
 
 def worker_transition_is_legal(latest_worker, transition):
-    metadata = _worker_transition_metadata(transition.name)
     source_state = worker_lifecycle_state(latest_worker)
-    if source_state not in metadata.source_states:
+    if _accepted_abort_terminal_invariant_applies(latest_worker, transition):
+        return True
+    return source_state in _transition_source_lifecycle_states(transition)
+
+
+def _transition_source_lifecycle_states(transition):
+    metadata = _worker_transition_metadata(transition.name)
+    if transition.name is WorkerTransitionName.SNAPSHOT_APPLIED:
+        payload = _require_transition_payload(transition, _SnapshotAppliedTransition)
+        return payload.patch.source_lifecycle_states
+    return metadata.source_states
+
+
+def _accepted_abort_terminal_invariant_applies(latest_worker, transition):
+    if not _accepted_abort(latest_worker):
         return False
     if transition.name is WorkerTransitionName.SNAPSHOT_APPLIED:
-        target_state = worker_transition_target_lifecycle_state(transition)
-        if target_state is None:
-            return True
-        return target_state in _WORKER_SNAPSHOT_TARGET_STATES_BY_SOURCE.get(source_state, frozenset())
-    return True
+        return True
+    return _worker_transition_metadata(transition.name).public_lifecycle_transition
 
 
 def apply_worker_transition_payload(reducer, transition):
@@ -2141,27 +2150,15 @@ def _reduce_worker_transition_to_result(record, transition):
     if not isinstance(transition.name, WorkerTransitionName):
         raise ValueError(f"unknown worker transition: {transition.name}")
     latest_worker = record.to_worker()
-    spec = _worker_transition_spec(transition.name)
-    metadata = spec.metadata
-    payload = UNSET_TRANSITION_FIELD
-    target_state = UNSET_TRANSITION_FIELD
-    worker = None
-    if _accepted_abort(latest_worker):
-        payload = _require_transition_payload(transition, spec.payload_type)
-        target_state = _resolve_transition_target_lifecycle_state(spec, transition, payload)
-        worker = _reduce_accepted_abort_transition(latest_worker, transition, spec, payload, target_state)
-    if worker is None and not worker_transition_is_legal(latest_worker, transition):
+    metadata = _worker_transition_metadata(transition.name)
+    if not worker_transition_is_legal(latest_worker, transition):
         return WorkerTransitionResult(
             applied=False,
             worker=_unchanged_transition_worker(latest_worker, record, transition),
             reason=_illegal_transition_reason(latest_worker, transition, metadata),
             stale_snapshot_recovery=_is_stale_snapshot_recovery(transition),
         )
-    if worker is None:
-        if payload is UNSET_TRANSITION_FIELD:
-            payload = _require_transition_payload(transition, spec.payload_type)
-            target_state = _resolve_transition_target_lifecycle_state(spec, transition, payload)
-        worker = _reduce_worker_transition_payload_from_context(latest_worker, transition, spec, payload, target_state)
+    worker = _reduce_worker_transition_payload(latest_worker, transition)
     _finalize_worker_attempt(worker, transition.attempt_finalization)
     return WorkerTransitionResult(
         applied=True,

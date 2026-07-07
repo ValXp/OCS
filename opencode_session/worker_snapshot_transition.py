@@ -9,6 +9,7 @@ from opencode_session.worker_state import (
     WorkerRecord,
     WorkerSnapshotTransitionPatch,
     WorkerTransition,
+    worker_snapshot_replay_source_lifecycle_states,
 )
 
 
@@ -26,6 +27,9 @@ def worker_snapshot_transition_patch(worker, worker_id=None):
         worker_id,
         fields,
         target_lifecycle_state=fields.get("lifecycle_state"),
+        source_lifecycle_states=worker_snapshot_replay_source_lifecycle_states(
+            fields.get("lifecycle_state")
+        ),
         prompt_ids=prompt_ids,
         set_if_missing_fields={
             field_name: deepcopy(snapshot[field_name])
