@@ -1479,7 +1479,7 @@ def is_dependency_blockable_worker(worker):
 _UNSET_WORKER_UPDATE = object()
 
 
-@dataclass(init=False)
+@dataclass(init=False, slots=True)
 class WorkerRecord:
     """Hydrated worker domain object with explicit serialization boundaries."""
 
@@ -1514,15 +1514,14 @@ class WorkerRecord:
     abort: Optional[dict] = None
     attempts: list = dataclass_field(default_factory=list)
     result: Optional[dict] = None
-    _extras: dict = dataclass_field(default_factory=dict, repr=False)
     _present_optional_fields: set = dataclass_field(default_factory=set, repr=False)
 
     __iter__ = None
 
-    def __init__(self, worker_id, fields=None, *, allow_extra_fields=False):
+    def __init__(self, worker_id, fields=None):
         self._reset_fields(worker_id)
         if fields is not None:
-            self._merge_fields(fields, allow_extra_fields=allow_extra_fields)
+            self._merge_fields(fields)
         if not self.id:
             self._set_canonical_field("id", worker_id)
 
@@ -1536,7 +1535,6 @@ class WorkerRecord:
 
     def _reset_fields(self, worker_id):
         defaults = self.default_snapshot_fields(worker_id)
-        self._extras = {}
         self._present_optional_fields = set()
         for field_name in WORKER_REQUIRED_FIELD_NAMES:
             setattr(self, field_name, deepcopy(defaults[field_name]))
@@ -1550,7 +1548,7 @@ class WorkerRecord:
             if field_name not in self._present_optional_fields:
                 return default
             return getattr(self, field_name)
-        return self._extras.get(field_name, default)
+        return default
 
     def _list_field(self, field_name: str) -> list:
         value = self._raw_field(field_name)
@@ -1585,15 +1583,13 @@ class WorkerRecord:
         if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             self._present_optional_fields.add(field_name)
 
-    def _set_field_value(self, field_name, value, *, allow_extra_fields=False):
+    def _set_field_value(self, field_name, value):
         if field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
             raise ValueError(f"worker public field '{field_name}' is output-only; use lifecycle_state")
         if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES:
             self._set_canonical_field(field_name, value)
             return
-        if not allow_extra_fields:
-            raise ValueError(f"unknown worker field: {field_name}")
-        self._extras[field_name] = deepcopy(value)
+        raise ValueError(f"unknown worker field: {field_name}")
 
     def _compat_field(self, field_name: str, default: object = None) -> object:
         return self._raw_field(field_name, default)
@@ -1603,7 +1599,7 @@ class WorkerRecord:
             return True
         if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             return field_name in self._present_optional_fields
-        return field_name in self._extras
+        return False
 
     def _remove_field(self, field_name):
         if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
@@ -1612,32 +1608,28 @@ class WorkerRecord:
         elif field_name in WORKER_REQUIRED_FIELD_NAMES:
             default_value = self.default_snapshot_fields(self.worker_id)[field_name]
             self._set_canonical_field(field_name, default_value)
-        else:
-            self._extras.pop(field_name, None)
         return self
 
-    def _merge_fields(self, fields=None, *, allow_extra_fields=False, **kwargs):
+    def _merge_fields(self, fields=None, **kwargs):
         if fields is not None:
             for field_name, value in _worker_fields(fields).items():
-                self._set_field_value(field_name, value, allow_extra_fields=allow_extra_fields)
+                self._set_field_value(field_name, value)
         if kwargs:
             for field_name, value in kwargs.items():
-                self._set_field_value(field_name, value, allow_extra_fields=allow_extra_fields)
+                self._set_field_value(field_name, value)
         return self
 
     def replace_fields(self, fields):
         worker_id = self.worker_id
-        allow_extra_fields = isinstance(fields, WorkerRecord)
         self._reset_fields(worker_id)
-        self._merge_fields(fields, allow_extra_fields=allow_extra_fields)
+        self._merge_fields(fields)
         return self
 
     @classmethod
-    def from_worker(cls, worker, worker_id=None, *, allow_extra_fields=False):
-        source_is_record = isinstance(worker, WorkerRecord)
+    def from_worker(cls, worker, worker_id=None):
         fields = _worker_fields(worker)
         resolved_worker_id = fields.get("id") or worker_id
-        return cls(resolved_worker_id, fields, allow_extra_fields=allow_extra_fields or source_is_record)
+        return cls(resolved_worker_id, fields)
 
     @classmethod
     def default_snapshot_fields(cls, worker_id):
@@ -1821,12 +1813,6 @@ class WorkerRecord:
         for field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             if field_name in self._present_optional_fields:
                 normalized[field_name] = self._canonical_field_value(field_name, getattr(self, field_name))
-        for field_name in self._extras:
-            if field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
-                raise ValueError(f"worker public field '{field_name}' is output-only; use lifecycle_state")
-            if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES:
-                raise ValueError(f"worker extra field conflicts with canonical field: {field_name}")
-        normalized.update(deepcopy(self._extras))
         return normalized
 
     def to_output_dict(self):
@@ -1836,7 +1822,7 @@ class WorkerRecord:
 
     def to_worker(self):
         normalized = self.to_snapshot()
-        return type(self).from_worker(require_internal_worker(normalized), self.worker_id, allow_extra_fields=True)
+        return type(self).from_worker(require_internal_worker(normalized), self.worker_id)
 
     def set_session(self, session_id, *, agent=None, model=None):
         self._set_canonical_field("session_id", session_id)

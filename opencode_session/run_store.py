@@ -55,15 +55,19 @@ class RunStore:
 
     def update_run(self, name, mutator):
         with self._locked_run(name):
-            run = self._read_run_unlocked(name)
+            persisted_run = self._read_run_data_unlocked(name)
+            run = _normalize_for_store(persisted_run, fallback_name=name)
             replacement = mutator(run)
             if replacement is not None:
                 run = replacement
             run = _normalize_for_store(run, fallback_name=name)
-            self._write_run_unlocked(run)
+            self._write_run_unlocked(run, persisted_run=persisted_run)
         return run
 
     def _read_run_unlocked(self, name):
+        return _normalize_for_store(self._read_run_data_unlocked(name), fallback_name=name)
+
+    def _read_run_data_unlocked(self, name):
         path = self._run_path(name)
         try:
             with path.open("r", encoding="utf-8") as file:
@@ -74,11 +78,11 @@ class RunStore:
             raise RunStoreError(f"run record for '{name}' is corrupted: invalid JSON in {path}: {error}") from error
         if not isinstance(data, dict):
             raise RunStoreError(f"run record for '{name}' is corrupted: expected JSON object in {path}")
-        return _normalize_for_store(data, fallback_name=name)
+        return data
 
-    def _write_run_unlocked(self, run):
+    def _write_run_unlocked(self, run, *, persisted_run=None):
         self.root.mkdir(parents=True, exist_ok=True)
-        stored_run = _normalize_for_storage(run, fallback_name=run["name"])
+        stored_run = _normalize_for_storage(run, fallback_name=run["name"], persisted_run=persisted_run)
         path = self._run_path(stored_run["name"])
         temporary_path = path.with_suffix(path.suffix + ".tmp")
         with temporary_path.open("w", encoding="utf-8") as file:
@@ -129,9 +133,9 @@ def _normalize_for_store(run, *, fallback_name):
         raise RunStoreError(str(error), kind=error.kind) from error
 
 
-def _normalize_for_storage(run, *, fallback_name):
+def _normalize_for_storage(run, *, fallback_name, persisted_run=None):
     try:
-        return normalize_run_for_storage(run, fallback_name=fallback_name)
+        return normalize_run_for_storage(run, fallback_name=fallback_name, persisted_run=persisted_run)
     except RunRecordError as error:
         raise RunStoreError(str(error), kind=error.kind) from error
 

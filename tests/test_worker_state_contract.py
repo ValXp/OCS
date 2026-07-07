@@ -574,45 +574,52 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
 
-    def test_worker_record_hydration_exposes_canonical_fields_and_round_trips_unknown_fields(self):
-        record = hydrate_worker_record(
-            {
-                "id": "review",
-                "role": "reviewer",
-                "prompt": "Review the change",
-                "lifecycle_state": "active_wait",
-                "custom_persisted": {"kept": True},
-                "status": "done",
-                "next_eligible_action": "collect",
-            },
-            "review",
-        )
+    def test_worker_record_hydration_exposes_only_canonical_runtime_fields(self):
+        persisted = {
+            "id": "review",
+            "role": "reviewer",
+            "prompt": "Review the change",
+            "lifecycle_state": "active_wait",
+            "custom_persisted": {"kept": True},
+            "status": "done",
+            "next_eligible_action": "collect",
+        }
+
+        migrated = migrate_persisted_worker_snapshot(persisted, "review")
+        record = hydrate_worker_record(persisted, "review")
 
         self.assertEqual(record.worker_id, "review")
         self.assertEqual(record.role, "reviewer")
         self.assertEqual(record.prompt, "Review the change")
         self.assertEqual(record.lifecycle_state, "active_wait")
-        self.assertEqual(record.to_snapshot()["custom_persisted"], {"kept": True})
+        self.assertEqual(migrated["custom_persisted"], {"kept": True})
+        self.assertNotIn("custom_persisted", record.to_snapshot())
+        self.assertIsNone(worker_field(record, "custom_persisted"))
         self.assertIsNone(worker_field(record, "status"))
         self.assertIsNone(worker_field(record, "next_eligible_action"))
 
-    def test_worker_record_unknown_persisted_fields_round_trip_through_extras(self):
-        record = hydrate_worker_record(
-            {
-                "id": "review",
-                "role": "reviewer",
-                "unknown_plugin_state": {"attempt": 2},
-            },
-            "review",
-        )
+    def test_unknown_persisted_fields_stay_at_storage_boundary(self):
+        persisted = {
+            "id": "review",
+            "role": "reviewer",
+            "unknown_plugin_state": {"attempt": 2},
+        }
 
-        snapshot = record.to_snapshot()
+        snapshot = normalize_worker_snapshot_for_storage(persisted, "review")
         round_tripped = hydrate_worker_record(snapshot, "review")
 
         self.assertEqual(snapshot["unknown_plugin_state"], {"attempt": 2})
-        self.assertEqual(round_tripped.to_snapshot()["unknown_plugin_state"], {"attempt": 2})
-        self.assertEqual(worker_field(round_tripped, "unknown_plugin_state"), {"attempt": 2})
+        self.assertNotIn("unknown_plugin_state", round_tripped.to_snapshot())
+        self.assertIsNone(worker_field(round_tripped, "unknown_plugin_state"))
         self.assertNotIn("unknown_plugin_state", WorkerRecord.default_snapshot_fields("review"))
+
+    def test_worker_record_has_no_arbitrary_runtime_fields(self):
+        record = WorkerRecord.default_fields("review")
+
+        with self.assertRaises(AttributeError):
+            record.unknown_plugin_state = {"attempt": 2}
+
+        self.assertFalse(hasattr(record, "_extras"))
 
     def test_worker_record_mutation_updates_hydrated_object_without_sync(self):
         worker = WorkerRecord.default_fields("review")

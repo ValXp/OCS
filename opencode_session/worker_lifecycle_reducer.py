@@ -40,7 +40,6 @@ class WorkerLifecycleReducer:
             worker=WorkerRecord.from_worker(
                 worker,
                 self.record.worker_id or transition.worker_id,
-                allow_extra_fields=True,
             ).to_worker(),
         )
 

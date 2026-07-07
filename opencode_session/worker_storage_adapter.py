@@ -1,9 +1,11 @@
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 
 from opencode_session.status import short_status
 from opencode_session.worker_state import (
     PUBLIC_WORKER_STATE_FIELD_NAMES,
+    WORKER_RECORD_CANONICAL_FIELD_NAMES,
     WORKER_LIFECYCLE_QUEUED,
     WORKER_LIFECYCLE_STATES,
     WORKER_LIST_FIELDS,
@@ -54,6 +56,32 @@ PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION = 1
 _LEGACY_LIFECYCLE_PROJECTION_WORKER_ID = "__legacy_worker__"
 
 
+@dataclass(frozen=True)
+class _PersistedWorkerSnapshot:
+    fields: dict
+
+    @property
+    def runtime_fields(self):
+        return {
+            field_name: deepcopy(value)
+            for field_name, value in self.fields.items()
+            if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES
+        }
+
+    @property
+    def unknown_fields(self):
+        return {
+            field_name: deepcopy(value)
+            for field_name, value in self.fields.items()
+            if field_name not in WORKER_RECORD_CANONICAL_FIELD_NAMES
+        }
+
+    def to_storage_fields(self, runtime_fields=None):
+        fields = deepcopy(runtime_fields) if runtime_fields is not None else self.runtime_fields
+        fields.update(self.unknown_fields)
+        return fields
+
+
 def _worker_fields(worker):
     if isinstance(worker, WorkerRecord):
         return worker.to_snapshot()
@@ -87,7 +115,7 @@ def _legacy_worker_record_for_lifecycle_projection(worker):
         fields["timeout_policy"] = (
             timeout_policy if timeout_policy in WORKER_TIMEOUT_POLICY_STATUSES else WORKER_STATUS_TIMEOUT
         )
-    return WorkerRecord.from_worker(fields, fields["id"], allow_extra_fields=True)
+    return WorkerRecord.from_worker(_PersistedWorkerSnapshot(fields).runtime_fields, fields["id"])
 
 
 def _coerce_legacy_retry_budget_for_lifecycle_projection(fields):
@@ -137,6 +165,19 @@ def migrate_persisted_worker_snapshot(
     *,
     run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION,
 ):
+    return _migrated_persisted_worker_snapshot(
+        worker,
+        worker_id,
+        run_schema_version=run_schema_version,
+    ).to_storage_fields()
+
+
+def _migrated_persisted_worker_snapshot(
+    worker,
+    worker_id=None,
+    *,
+    run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION,
+):
     fields = _worker_fields(worker)
     schema_version = _coerced_schema_version(run_schema_version)
     if schema_version <= PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION:
@@ -157,7 +198,7 @@ def _migrate_v1_persisted_worker_snapshot(fields, worker_id=None):
     _coerce_persisted_worker_retry_budget(fields)
     _coerce_persisted_worker_lists(fields)
     _coerce_persisted_worker_timeout_policy(fields)
-    return fields
+    return _PersistedWorkerSnapshot(fields)
 
 
 def _repair_persisted_worker_identity(fields, worker_id):
@@ -200,10 +241,10 @@ def _coerce_persisted_worker_timeout_policy(fields):
 
 
 def hydrate_worker_record(worker, worker_id, *, run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION):
+    snapshot = _migrated_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version)
     return WorkerRecord.from_worker(
-        migrate_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version),
+        snapshot.runtime_fields,
         worker_id,
-        allow_extra_fields=True,
     ).to_worker()
 
 
@@ -212,12 +253,25 @@ def normalize_worker_snapshot_for_storage(
     worker_id,
     *,
     run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION,
+    persisted_worker=None,
 ):
-    return WorkerRecord.from_worker(
-        migrate_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version),
+    snapshot = _migrated_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version)
+    runtime_snapshot = WorkerRecord.from_worker(
+        snapshot.runtime_fields,
         worker_id,
-        allow_extra_fields=True,
     ).to_snapshot()
+    if persisted_worker is not None and not isinstance(persisted_worker, WorkerRecord):
+        persisted_snapshot = _migrated_persisted_worker_snapshot(
+            persisted_worker,
+            worker_id,
+            run_schema_version=run_schema_version,
+        )
+        storage_snapshot = deepcopy(runtime_snapshot)
+        storage_snapshot.update(persisted_snapshot.unknown_fields)
+        return storage_snapshot
+    if isinstance(worker, WorkerRecord):
+        return runtime_snapshot
+    return snapshot.to_storage_fields(runtime_snapshot)
 
 
 def _coerced_schema_version(value):

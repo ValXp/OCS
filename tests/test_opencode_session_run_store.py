@@ -76,6 +76,38 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertNotIn("status", stored["workers"]["planner"])
         self.assertNotIn("next_eligible_action", stored["workers"]["planner"])
 
+    def test_store_preserves_unknown_worker_snapshot_fields_at_storage_boundary(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_path = Path(store) / "demo.json"
+            run_path.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "directory": directory,
+                        "workers": {
+                            "planner": {
+                                "id": "planner",
+                                "role": "plan",
+                                "lifecycle_state": "queued",
+                                "unknown_plugin_state": {"attempt": 2},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_store = RunStore(store)
+            loaded = run_store.load_run("demo")
+
+            run_store.upsert_worker("demo", "planner", role="plan", lifecycle_state="active_wait")
+            stored = json.loads(run_path.read_text(encoding="utf-8"))
+
+        worker = loaded["workers"]["planner"]
+        self.assertIsNone(worker_field(worker, "unknown_plugin_state"))
+        self.assertNotIn("unknown_plugin_state", worker.to_snapshot())
+        self.assertEqual(stored["workers"]["planner"]["unknown_plugin_state"], {"attempt": 2})
+        self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "active_wait")
+
     def test_worker_lifecycle_upsert_persists_canonical_lifecycle(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)

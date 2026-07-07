@@ -116,14 +116,25 @@ def normalize_run(run, *, fallback_name):
     return normalized
 
 
-def normalize_run_for_storage(run, *, fallback_name):
+def normalize_run_for_storage(run, *, fallback_name, persisted_run=None):
+    persisted_workers = _worker_snapshots(persisted_run if persisted_run is not None else run)
     normalized = normalize_run(run, fallback_name=fallback_name)
     run_schema_version = _worker_snapshot_schema_version(normalized)
     normalized["workers"] = {
-        worker_id: normalize_worker_snapshot_for_storage(worker, worker_id, run_schema_version=run_schema_version)
+        worker_id: normalize_worker_snapshot_for_storage(
+            worker,
+            worker_id,
+            run_schema_version=run_schema_version,
+            persisted_worker=persisted_workers.get(worker_id),
+        )
         for worker_id, worker in normalized["workers"].items()
     }
     return normalized
+
+
+def _worker_snapshots(run):
+    workers = run.get("workers") if isinstance(run, dict) else None
+    return workers if isinstance(workers, dict) else {}
 
 
 def _worker_snapshot_schema_version(run):
