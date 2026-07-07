@@ -10,6 +10,13 @@ from opencode_session.multi_worker_execution_outcome import (
     DependencyOrderedSerialExecutionUnsupported,
 )
 from opencode_session.multi_worker_orchestration import (
+    EXECUTION_POLICY_CONTINUE,
+    EXECUTION_POLICY_FAIL_FAST,
+    DependencyOrderedSerialCleanupRequest,
+    DependencyOrderedSerialExecutionRequest,
+    DependencyOrderedSerialPlanningRequest,
+    DependencyOrderedSerialRecoveryRequest,
+    DependencyOrderedSerialRunFlowRequest,
     plan_dependency_ordered_serial_step,
 )
 from opencode_session.run_persistence import persist_worker_transitions
@@ -215,6 +222,81 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(second_step.worker_id, "review")
         self.assertEqual(third_step.worker_id, "deploy")
         self.assertIsNone(final_step.worker_id)
+
+
+class DependencyOrderedSerialPhaseBoundaryTest(unittest.TestCase):
+    def test_phase_requests_return_explicit_results_without_service_callbacks(self):
+        with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_docs"]) as scenario:
+            scenario.add_worker("build", role="build", prompt="Build", status="failed")
+            scenario.add_worker("docs", role="write", prompt="Draft docs")
+            scenario.add_worker("review", role="review", prompt="Review", dependencies=["build"])
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append((session_id, prompt))
+                return {
+                    "message_ids": {"user": "msg_docs_user", "assistant": "msg_docs_assistant"},
+                    "status": "done",
+                }
+
+            service = scenario.service(executor=execute_prompt)
+            recovery = service.recovery_phase.recover(DependencyOrderedSerialRecoveryRequest(scenario.load_run()))
+            planning = service.planning_phase.plan(DependencyOrderedSerialPlanningRequest(recovery.run))
+            execution = service.execution_phase.execute(
+                DependencyOrderedSerialExecutionRequest(
+                    planning.run,
+                    planning.serial_step,
+                    cleanup_requested=False,
+                    execution_policy=EXECUTION_POLICY_CONTINUE,
+                )
+            )
+            cleanup = service.cleanup_phase.cleanup(
+                DependencyOrderedSerialCleanupRequest(
+                    execution.cleanup_context.client,
+                    execution.run,
+                    execution.cleanup_context.created_session_ids_by_worker,
+                )
+            )
+
+        self.assertIsNone(recovery.error)
+        self.assertEqual(planning.serial_step.worker_id, "docs")
+        self.assertEqual(worker_output_field(planning.run["workers"]["review"], "status"), "blocked")
+        self.assertEqual(executions, [("ses_docs", "Draft docs")])
+        self.assertIsNone(execution.cleanup_context.created_session_ids_by_worker)
+        self.assertEqual(worker_output_field(cleanup.run["workers"]["docs"], "status"), "done")
+        self.assertEqual(worker_output_field(cleanup.run["workers"]["review"], "status"), "blocked")
+
+    def test_run_flow_request_preserves_dependency_ordered_serial_execution(self):
+        with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_build", "ses_review"]) as scenario:
+            scenario.add_worker("build", role="build", prompt="Build")
+            scenario.add_worker("review", role="review", prompt="Review", dependencies=["build"])
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                executions.append((session_id, prompt))
+                return {
+                    "message_ids": {
+                        "user": f"msg_{session_id}_user",
+                        "assistant": f"msg_{session_id}_assistant",
+                    },
+                    "status": "done",
+                }
+
+            service = scenario.service(executor=execute_prompt)
+            outcome = service.run_flow.start(
+                DependencyOrderedSerialRunFlowRequest(
+                    scenario.load_run(),
+                    cleanup_requested=False,
+                    execution_policy=EXECUTION_POLICY_FAIL_FAST,
+                )
+            )
+            run = scenario.load_run()
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(executions, [("ses_build", "Build"), ("ses_review", "Review")])
+        self.assertEqual(run["status"], "done")
+        self.assertEqual(worker_output_field(run["workers"]["build"], "status"), "done")
+        self.assertEqual(worker_output_field(run["workers"]["review"], "status"), "done")
 
 
 class DependencyOrderedSerialExecutionOutcomeTest(unittest.TestCase):

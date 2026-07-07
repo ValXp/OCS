@@ -14,7 +14,6 @@ LONG_SOURCE_FILE_DECOMPOSITION_PLAN = PROJECT_ROOT / "docs" / "ocs" / "architect
 # its ceiling, without forcing skipped decomposition work.
 GRANDFATHERED_LONG_SOURCE_FILES = {
     "opencode_session/api_profile.py": 337,
-    "opencode_session/multi_worker_orchestration.py": 500,
     "opencode_session/remote_journal.py": 732,
     "opencode_session/run_services.py": 418,
     "opencode_session/schema_event_adapter.py": 378,
@@ -31,7 +30,6 @@ GRANDFATHERED_LONG_SOURCE_FILES = {
 # worker_state decomposition stays non-blocking.
 LONG_SOURCE_FILE_RATCHET_TARGETS = {
     "opencode_session/api_profile.py": MAX_SOURCE_LINES,
-    "opencode_session/multi_worker_orchestration.py": MAX_SOURCE_LINES,
     "opencode_session/remote_journal.py": MAX_SOURCE_LINES,
     "opencode_session/run_services.py": MAX_SOURCE_LINES,
     "opencode_session/schema_event_adapter.py": MAX_SOURCE_LINES,

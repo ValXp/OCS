@@ -96,10 +96,10 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
 
             service = scenario.service(executor=execute_prompt)
             snapshots = []
-            original_plan = service._plan_serial_step
+            original_plan = service.planning_phase.plan
 
-            def record_plan(workers):
-                worker = workers["worker"]
+            def record_plan(request):
+                worker = request.run["workers"]["worker"]
                 snapshots.append(
                     (
                         worker_output_field(worker, "status"),
@@ -107,9 +107,9 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                         worker_field(worker, "retry_count"),
                     )
                 )
-                return original_plan(workers)
+                return original_plan(request)
 
-            service._plan_serial_step = record_plan
+            service.planning_phase.plan = record_plan
             outcome = service.start(scenario.request("worker"))
             run = scenario.load_run()
 
