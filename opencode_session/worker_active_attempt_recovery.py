@@ -7,6 +7,7 @@ from opencode_session.worker_attempt_policy import (
     apply_worker_attempt_transition,
     classify_worker_attempt_exception,
 )
+from opencode_session.worker_field_spec import WORKER_FIELD_SPEC_BY_NAME
 from opencode_session.worker_state import (
     WORKER_LIFECYCLE_ACTIVE_WAIT,
     is_worker_record,
@@ -92,13 +93,10 @@ def _attempt_recovery_fields(transition, *, finished_at):
 
 
 def _timeout_seconds(worker):
-    try:
-        timeout_seconds = float(worker.timeout_seconds)
-    except (TypeError, ValueError):
+    timeout_seconds = worker.timeout_seconds
+    if timeout_seconds is None:
         return None
-    if timeout_seconds < 0:
-        return None
-    return timeout_seconds
+    return WORKER_FIELD_SPEC_BY_NAME["timeout_seconds"].canonical_value(timeout_seconds)
 
 
 def _parse_instant(value):

@@ -11,6 +11,7 @@ from opencode_session.worker_field_spec import (
     WORKER_FIELD_SPEC_BY_NAME,
     WORKER_FIELD_SPECS,
     WORKER_FIELD_VALIDATOR_NAMES,
+    WORKER_FIELD_TIMEOUT_POLICY_STATUSES,
     WORKER_LIST_FIELDS,
     WORKER_OPTIONAL_LIST_FIELDS,
     WORKER_RECORD_CANONICAL_FIELD_NAMES,
@@ -26,6 +27,7 @@ from opencode_session.worker_field_spec import (
     WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES,
     WORKER_STORAGE_INT_FIELD_NAMES,
     WORKER_STORAGE_LIST_FIELD_NAMES,
+    WORKER_STORAGE_TIMEOUT_SECONDS_FIELD_NAMES,
     WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
     WorkerFieldSpec,
     WorkerFieldValidatorName,
@@ -572,14 +574,7 @@ WORKER_RETRYABLE_LIFECYCLE_STATES = _lifecycle_states_matching(retryable=True)
 WORKER_BLOCKED_LIFECYCLE_STATES = _lifecycle_states_matching(status=WORKER_STATUS_BLOCKED)
 WORKER_ABORTED_LIFECYCLE_STATES = _lifecycle_states_matching(status=WORKER_STATUS_ABORTED)
 
-WORKER_TIMEOUT_POLICY_STATUSES = frozenset(
-    (
-        WORKER_STATUS_TIMEOUT,
-        WORKER_STATUS_BLOCKED,
-        WORKER_STATUS_FAILED,
-        WORKER_STATUS_ABORTED,
-    )
-)
+WORKER_TIMEOUT_POLICY_STATUSES = frozenset(WORKER_FIELD_TIMEOUT_POLICY_STATUSES)
 UNSET_TRANSITION_FIELD = object()
 PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("status", "next_eligible_action"))
 
@@ -1599,30 +1594,9 @@ class WorkerRecord:
     def _canonical_field_value(self, field_name: str, value: JsonValue) -> JsonValue:
         field_name = _require_worker_field_name(field_name)
         spec = WORKER_FIELD_SPEC_BY_NAME.get(field_name)
-        value = deepcopy(value)
         if spec is None:
-            return value
-        if spec.validator == "id":
-            if not isinstance(value, str) or not value:
-                raise ValueError("worker id must be a non-empty string")
-            return value
-        if spec.validator == "lifecycle_state":
-            if value not in WORKER_LIFECYCLE_STATES:
-                raise ValueError(f"worker lifecycle_state must be canonical: {value}")
-            return value
-        if spec.validator == "int":
-            if type(value) is not int:
-                raise TypeError(f"worker {field_name} must be an int")
-            return value
-        if spec.validator == "list":
-            if not isinstance(value, list):
-                raise TypeError(f"worker {field_name} must be a list")
-            return value
-        if spec.validator == "timeout_policy":
-            if value not in WORKER_TIMEOUT_POLICY_STATUSES:
-                raise ValueError(f"worker timeout_policy must be canonical: {value}")
-            return value
-        return value
+            return deepcopy(value)
+        return spec.canonical_value(value)
 
     def _set_canonical_field(self, field_name: str, value: JsonValue) -> None:
         field_name = _require_worker_field_name(field_name)

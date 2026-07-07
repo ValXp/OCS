@@ -5,18 +5,26 @@ from opencode_session.worker_storage_adapter import (
     migrate_persisted_worker_snapshot,
     normalize_worker_snapshot_for_storage,
 )
+from opencode_session.worker_field_spec import (
+    WORKER_FIELD_LIFECYCLE_STATES,
+    WORKER_FIELD_SPEC_BY_NAME,
+    WORKER_FIELD_TIMEOUT_POLICY_STATUSES,
+)
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition_patch
 from opencode_session.run_record import upsert_worker_record
 from opencode_session.schema_worker import Worker, WorkerOutputRecord, WorkerRequiredFields, WorkerSnapshotRecord
 from opencode_session.worker_state import (
     WORKER_FIELD_SPECS,
+    WORKER_LIFECYCLE_STATES,
     WORKER_RECORD_CANONICAL_FIELD_NAMES,
     WORKER_RECORD_FIELD_NAMES,
     WORKER_RECORD_OPTIONAL_FIELD_NAMES,
     WORKER_REQUIRED_FIELD_NAMES as RUNTIME_WORKER_REQUIRED_FIELD_NAMES,
     WORKER_STORAGE_INT_FIELD_NAMES,
     WORKER_STORAGE_LIST_FIELD_NAMES,
+    WORKER_STORAGE_TIMEOUT_SECONDS_FIELD_NAMES,
     WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
+    WORKER_TIMEOUT_POLICY_STATUSES,
     WorkerRecord,
     worker_required_schema_annotations,
     worker_snapshot_schema_annotations,
@@ -118,13 +126,20 @@ class WorkerStateContractTest(unittest.TestCase):
             tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "list"),
         )
         self.assertEqual(
+            WORKER_STORAGE_TIMEOUT_SECONDS_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_seconds"),
+        )
+        self.assertEqual(
             WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
             tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_policy"),
         )
+        self.assertEqual(frozenset(WORKER_FIELD_LIFECYCLE_STATES), WORKER_LIFECYCLE_STATES)
+        self.assertEqual(frozenset(WORKER_FIELD_TIMEOUT_POLICY_STATUSES), WORKER_TIMEOUT_POLICY_STATUSES)
 
         legacy_worker = {"id": "review"}
         legacy_worker.update({field_name: "2" for field_name in WORKER_STORAGE_INT_FIELD_NAMES})
         legacy_worker.update({field_name: "not-a-list" for field_name in WORKER_STORAGE_LIST_FIELD_NAMES})
+        legacy_worker.update({field_name: "2.5" for field_name in WORKER_STORAGE_TIMEOUT_SECONDS_FIELD_NAMES})
         legacy_worker.update({field_name: "unknown-policy" for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES})
 
         migrated = migrate_persisted_worker_snapshot(legacy_worker, "review")
@@ -135,6 +150,9 @@ class WorkerStateContractTest(unittest.TestCase):
         for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
             with self.subTest(field_name=field_name):
                 self.assertEqual(migrated[field_name], [])
+        for field_name in WORKER_STORAGE_TIMEOUT_SECONDS_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(migrated[field_name], 2.5)
         for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES:
             with self.subTest(field_name=field_name):
                 self.assertEqual(migrated[field_name], "timeout")
@@ -218,6 +236,35 @@ class WorkerStateContractTest(unittest.TestCase):
             "review",
         )
         self.assertEqual(invalid_timeout_policy["timeout_policy"], "timeout")
+
+    def test_storage_migration_coerces_persisted_timeout_seconds(self):
+        cases = (
+            ("0.05", 0.05),
+            ("1.0", 1),
+            (2, 2),
+            (2.5, 2.5),
+            (None, None),
+            ("bad", None),
+            ("0", None),
+            (0, None),
+            ("-1", None),
+            (float("inf"), None),
+            (True, None),
+        )
+
+        for timeout_seconds, expected in cases:
+            with self.subTest(timeout_seconds=timeout_seconds):
+                migrated = migrate_persisted_worker_snapshot(
+                    {"id": "review", "timeout_seconds": timeout_seconds},
+                    "review",
+                )
+                worker = hydrate_worker_record(
+                    {"id": "review", "timeout_seconds": timeout_seconds},
+                    "review",
+                )
+
+                self.assertEqual(migrated["timeout_seconds"], expected)
+                self.assertEqual(worker.timeout_seconds, expected)
 
     def test_snapshot_replay_patch_projects_storage_replay_behavior(self):
         worker = WorkerRecord.default_fields("review")
@@ -461,6 +508,11 @@ class WorkerStateContractTest(unittest.TestCase):
             ({"retry_limit": None}, "retry_limit"),
             ({"dependencies": "build"}, "dependencies"),
             ({"attempts": "attempt-1"}, "attempts"),
+            ({"timeout_seconds": "0.05"}, "timeout_seconds"),
+            ({"timeout_seconds": 0}, "timeout_seconds"),
+            ({"timeout_seconds": -1}, "timeout_seconds"),
+            ({"timeout_seconds": float("inf")}, "timeout_seconds"),
+            ({"timeout_seconds": True}, "timeout_seconds"),
             ({"timeout_policy": "waiting"}, "timeout_policy"),
             ({"status": "done"}, "output-only"),
             ({"next_eligible_action": "collect"}, "output-only"),
@@ -471,6 +523,19 @@ class WorkerStateContractTest(unittest.TestCase):
             with self.subTest(fields=fields):
                 with self.assertRaisesRegex((TypeError, ValueError), message):
                     WorkerRecord("review", fields)
+
+    def test_worker_timeout_seconds_validator_lives_on_field_spec(self):
+        spec = WORKER_FIELD_SPEC_BY_NAME["timeout_seconds"]
+
+        self.assertEqual(spec.validator, "timeout_seconds")
+        self.assertIsNone(spec.canonical_value(None))
+        self.assertEqual(spec.canonical_value(1.0), 1)
+        self.assertEqual(spec.canonical_value(0.05), 0.05)
+
+        for timeout_seconds in ("0.05", 0, -1, float("inf"), True):
+            with self.subTest(timeout_seconds=timeout_seconds):
+                with self.assertRaisesRegex((TypeError, ValueError), "timeout_seconds"):
+                    spec.canonical_value(timeout_seconds)
 
     def test_worker_record_from_worker_rejects_raw_mapping(self):
         with self.assertRaisesRegex(TypeError, "internal worker must be WorkerRecord"):

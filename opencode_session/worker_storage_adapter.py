@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from opencode_session.status import short_status
 from opencode_session.worker_state import (
     PUBLIC_WORKER_STATE_FIELD_NAMES,
+    WORKER_FIELD_SPEC_BY_NAME,
     WORKER_RECORD_CANONICAL_FIELD_NAMES,
     WORKER_LIFECYCLE_QUEUED,
     WORKER_LIFECYCLE_STATES,
     WORKER_STORAGE_INT_FIELD_NAMES,
     WORKER_STORAGE_LIST_FIELD_NAMES,
+    WORKER_STORAGE_TIMEOUT_SECONDS_FIELD_NAMES,
     WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
     WORKER_STATUS_ABORTED,
     WORKER_STATUS_FAILED,
@@ -155,6 +157,7 @@ def _migrate_v1_persisted_worker_snapshot(fields, worker_id=None):
     _remove_legacy_public_worker_state(fields)
     _coerce_persisted_worker_retry_budget(fields)
     _coerce_persisted_worker_lists(fields)
+    _coerce_persisted_worker_timeout_seconds(fields)
     _coerce_persisted_worker_timeout_policy(fields)
     return _PersistedWorkerSnapshot(fields)
 
@@ -188,6 +191,12 @@ def _coerce_persisted_worker_lists(fields):
     for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
         if field_name in fields and not isinstance(fields[field_name], list):
             fields[field_name] = []
+
+
+def _coerce_persisted_worker_timeout_seconds(fields):
+    for field_name in WORKER_STORAGE_TIMEOUT_SECONDS_FIELD_NAMES:
+        if field_name in fields:
+            fields[field_name] = WORKER_FIELD_SPEC_BY_NAME[field_name].storage_value(fields[field_name])
 
 
 def _coerce_persisted_worker_timeout_policy(fields):
