@@ -76,6 +76,292 @@ class DependencyOrderedSerialStep:
     dependency_blocked_transitions: tuple
 
 
+@dataclass(frozen=True)
+class DependencyOrderedSerialRecoveryResult:
+    run: RunRecord
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DependencyOrderedSerialPlanningResult:
+    run: RunRecord
+    serial_step: DependencyOrderedSerialStep
+
+    def skipped_outcome(self, recovery_error, execution_policy):
+        if recovery_error is not None and execution_policy == EXECUTION_POLICY_FAIL_FAST:
+            return DependencyOrderedSerialRunStartOutcome(
+                self.run,
+                _exit_code_for_orchestration_run(self.run),
+                recovery_error,
+            )
+        if self.serial_step.worker_id is None:
+            return DependencyOrderedSerialRunStartOutcome(
+                self.run,
+                _exit_code_for_orchestration_run(self.run),
+                recovery_error,
+            )
+        return None
+
+
+@dataclass(frozen=True)
+class DependencyOrderedSerialExecutionResult:
+    run: RunRecord
+    client: Optional[object] = None
+    created_session_ids_by_worker: Optional[dict] = None
+    first_error: Optional[str] = None
+    terminal_error: Optional[str] = None
+    terminal_exit_code: Optional[int] = None
+    terminal_exit_code_from_run: bool = False
+
+    @classmethod
+    def completed(cls, run, client, created_session_ids_by_worker, first_error):
+        return cls(
+            run,
+            client=client,
+            created_session_ids_by_worker=created_session_ids_by_worker,
+            first_error=first_error,
+        )
+
+    @classmethod
+    def unsupported(cls, run, start_error, created_session_ids_by_worker):
+        return cls(
+            run,
+            created_session_ids_by_worker=created_session_ids_by_worker,
+            terminal_error=start_error,
+            terminal_exit_code=EX_UNSUPPORTED,
+        )
+
+    @classmethod
+    def api_failure(cls, run, client, created_session_ids_by_worker, error):
+        return cls(
+            run,
+            client=client,
+            created_session_ids_by_worker=created_session_ids_by_worker,
+            terminal_error=f"api failure: {error}",
+            terminal_exit_code=EX_UNAVAILABLE,
+        )
+
+    @classmethod
+    def fail_fast(cls, run, client, created_session_ids_by_worker, error):
+        return cls(
+            run,
+            client=client,
+            created_session_ids_by_worker=created_session_ids_by_worker,
+            terminal_error=error,
+            terminal_exit_code_from_run=True,
+        )
+
+    def finish_outcome(self, run, recovery_error):
+        if self.terminal_exit_code_from_run:
+            return DependencyOrderedSerialRunStartOutcome(
+                run,
+                _exit_code_for_orchestration_run(run),
+                self.terminal_error,
+            )
+        if self.terminal_exit_code is not None:
+            return DependencyOrderedSerialRunStartOutcome(run, self.terminal_exit_code, self.terminal_error)
+        return DependencyOrderedSerialRunStartOutcome(
+            run,
+            _exit_code_for_orchestration_run(run),
+            recovery_error or self.first_error,
+        )
+
+
+@dataclass(frozen=True)
+class DependencyOrderedSerialCleanupResult:
+    run: RunRecord
+    outcome: Optional[DependencyOrderedSerialRunStartOutcome] = None
+
+
+class DependencyOrderedSerialRecoveryPhase:
+    def __init__(self, store, *, now):
+        self.store = store
+        self.now = now
+
+    def recover(self, run):
+        recoveries = recover_expired_active_attempts(run.get("workers", {}), now=self.now)
+        if not recoveries:
+            return DependencyOrderedSerialRecoveryResult(run)
+        result = persist_worker_transitions(
+            self.store,
+            run,
+            [recovery.transition for recovery in recoveries],
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
+        first_error = next((recovery.error for recovery in recoveries if recovery.error is not None), None)
+        return DependencyOrderedSerialRecoveryResult(result.run, first_error)
+
+
+class DependencyOrderedSerialPlanningPhase:
+    def __init__(self, store, *, now, plan_serial_step):
+        self.store = store
+        self.now = now
+        self.plan_serial_step = plan_serial_step
+
+    def plan(self, run):
+        step = self.plan_serial_step(run.get("workers", {}))
+        if step.dependency_blocked_transitions:
+            result = persist_worker_transitions(
+                self.store,
+                run,
+                step.dependency_blocked_transitions,
+                refresh_run_summary=refresh_orchestration_run_summary,
+                now=self.now,
+            )
+            return DependencyOrderedSerialPlanningResult(result.run, step)
+        run = persist_run_summary(
+            self.store,
+            run,
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
+        return DependencyOrderedSerialPlanningResult(run, step)
+
+
+class DependencyOrderedSerialExecutionPhase:
+    def __init__(
+        self,
+        *,
+        capability_probe,
+        activate_run,
+        mark_prompted_workers_failed,
+        plan_next_serial_step,
+        worker_execution_executor,
+    ):
+        self.capability_probe = capability_probe
+        self.activate_run = activate_run
+        self.mark_prompted_workers_failed = mark_prompted_workers_failed
+        self.plan_next_serial_step = plan_next_serial_step
+        self.worker_execution_executor = worker_execution_executor
+
+    def execute(self, run, serial_step, *, cleanup_requested, execution_policy):
+        client = None
+        created_session_ids_by_worker = {} if cleanup_requested else None
+        try:
+            probe_outcome = self.capability_probe.probe(run)
+            if probe_outcome.start_error is not None:
+                run = self.mark_prompted_workers_failed(run, probe_outcome.start_error)
+                return DependencyOrderedSerialExecutionResult.unsupported(
+                    run,
+                    probe_outcome.start_error,
+                    created_session_ids_by_worker,
+                )
+
+            client = probe_outcome.client
+            run = self.activate_run(run)
+            run, first_error_outcome, fail_fast_outcome = self._execute_serial_workers(
+                run,
+                serial_step,
+                client,
+                probe_outcome.capabilities,
+                created_session_ids_by_worker,
+                execution_policy=execution_policy,
+            )
+            if fail_fast_outcome is not None:
+                return DependencyOrderedSerialExecutionResult.fail_fast(
+                    run,
+                    client,
+                    created_session_ids_by_worker,
+                    fail_fast_outcome.error,
+                )
+            first_error = first_error_outcome.error if first_error_outcome is not None else None
+            return DependencyOrderedSerialExecutionResult.completed(
+                run,
+                client,
+                created_session_ids_by_worker,
+                first_error,
+            )
+        except OpenCodeApiError as error:
+            run = self.mark_prompted_workers_failed(run, str(error))
+            return DependencyOrderedSerialExecutionResult.api_failure(
+                run,
+                client,
+                created_session_ids_by_worker,
+                error,
+            )
+
+    def _execute_serial_workers(
+        self,
+        run,
+        serial_step,
+        client,
+        capabilities,
+        created_session_ids_by_worker,
+        *,
+        execution_policy,
+    ):
+        first_error_outcome = None
+        fail_fast_outcome = None
+        worker_id = serial_step.worker_id
+        while worker_id is not None:
+            run, worker_outcome = self._execute_selected_worker(
+                run,
+                worker_id,
+                client,
+                capabilities,
+                created_session_ids_by_worker,
+            )
+            if worker_outcome is not None and worker_outcome.error is not None:
+                first_error_outcome = first_error_outcome or worker_outcome
+                if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                    fail_fast_outcome = worker_outcome
+
+            # Persist the replan before returning on fail-fast so dependents record their blockers.
+            planning = self.plan_next_serial_step(run)
+            run = planning.run
+            serial_step = planning.serial_step
+            if fail_fast_outcome is not None:
+                break
+            worker_id = serial_step.worker_id
+        return run, first_error_outcome, fail_fast_outcome
+
+    def _execute_selected_worker(self, run, worker_id, client, capabilities, created_session_ids_by_worker):
+        worker = _worker_by_id(run.get("workers", {}), worker_id)
+        if worker is None:
+            return run, None
+        outcome = self.worker_execution_executor.execute(
+            client,
+            run,
+            worker,
+            _worker_prompt(worker),
+            capabilities,
+            agent=worker.agent,
+            model=worker.model,
+            create_session=True,
+            cleanup_requested=created_session_ids_by_worker is not None,
+        )
+        run = outcome.run or run
+        if created_session_ids_by_worker is not None:
+            current_worker = run.get("workers", {}).get(worker.worker_id, worker)
+            remember_created_worker_sessions(created_session_ids_by_worker, current_worker, outcome.created_session_ids)
+        return run, outcome
+
+
+class DependencyOrderedSerialCleanupPhase:
+    def __init__(self, cleanup_executor, *, cleanup_planner=None):
+        self.cleanup_executor = cleanup_executor
+        self.cleanup_planner = cleanup_planner or CreatedWorkerCleanupPlanner()
+
+    def cleanup(self, client, run, created_session_ids_by_worker):
+        if created_session_ids_by_worker is None or client is None:
+            return DependencyOrderedSerialCleanupResult(run)
+        cleanup_plan = self.cleanup_planner.plan(created_session_ids_by_worker, run)
+        if not cleanup_plan.steps:
+            return DependencyOrderedSerialCleanupResult(run)
+        cleanup_result = self.cleanup_executor.cleanup(client, run, cleanup_plan)
+        if cleanup_result.error is not None:
+            return DependencyOrderedSerialCleanupResult(
+                cleanup_result.run,
+                DependencyOrderedSerialRunStartOutcome(
+                    cleanup_result.run,
+                    cleanup_result.exit_code,
+                    cleanup_result.error,
+                ),
+            )
+        return DependencyOrderedSerialCleanupResult(cleanup_result.run)
+
+
 class DependencyOrderedSerialRunOrchestrationService:
     """Run prompted workers one at a time after their dependencies are satisfied.
 
@@ -111,6 +397,20 @@ class DependencyOrderedSerialRunOrchestrationService:
             now=self.now,
             session_journal=self._worker_session_journal(),
         )
+        self.recovery_phase = DependencyOrderedSerialRecoveryPhase(self.store, now=self.now)
+        self.planning_phase = DependencyOrderedSerialPlanningPhase(
+            self.store,
+            now=self.now,
+            plan_serial_step=lambda workers: self._plan_serial_step(workers),
+        )
+        self.execution_phase = DependencyOrderedSerialExecutionPhase(
+            capability_probe=self.capability_probe,
+            activate_run=lambda run: self._activate_run(run),
+            mark_prompted_workers_failed=lambda run, error: self._mark_prompted_workers_failed(run, error),
+            plan_next_serial_step=lambda run: self.planning_phase.plan(run),
+            worker_execution_executor=self.worker_execution_executor,
+        )
+        self.cleanup_phase = DependencyOrderedSerialCleanupPhase(self.cleanup_executor)
 
     def start(self, request):
         run = self.store.load_run(request.name)
@@ -124,169 +424,29 @@ class DependencyOrderedSerialRunOrchestrationService:
         return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
 
     def _start_prompted_workers(self, run, *, cleanup=False, execution_policy=EXECUTION_POLICY_FAIL_FAST):
-        run, recovery_error = self._recover_active_attempts(run)
-        run, serial_step = self._persist_next_serial_step(run)
-        if recovery_error is not None and execution_policy == EXECUTION_POLICY_FAIL_FAST:
-            return DependencyOrderedSerialRunStartOutcome(
-                run,
-                _exit_code_for_orchestration_run(run),
-                recovery_error,
-            )
-        if serial_step.worker_id is None:
-            return DependencyOrderedSerialRunStartOutcome(
-                run,
-                _exit_code_for_orchestration_run(run),
-                recovery_error,
-            )
+        recovery = self.recovery_phase.recover(run)
+        planning = self.planning_phase.plan(recovery.run)
+        skipped_outcome = planning.skipped_outcome(recovery.error, execution_policy)
+        if skipped_outcome is not None:
+            return skipped_outcome
 
-        client = None
-        created_session_ids_by_worker = {} if cleanup else None
-
-        try:
-            probe_outcome = self.capability_probe.probe(run)
-            if probe_outcome.start_error is not None:
-                run = self._mark_prompted_workers_failed(run, probe_outcome.start_error)
-                return DependencyOrderedSerialRunStartOutcome(run, EX_UNSUPPORTED, probe_outcome.start_error)
-
-            client = probe_outcome.client
-            run = self._activate_run(run)
-            run, first_error_outcome, fail_fast_outcome = self._execute_serial_workers(
-                run,
-                serial_step,
-                client,
-                probe_outcome.capabilities,
-                created_session_ids_by_worker,
-                execution_policy=execution_policy,
-            )
-            if fail_fast_outcome is not None:
-                run, cleanup_error = self._cleanup_disposable_sessions(client, run, created_session_ids_by_worker)
-                return cleanup_error or self._execution_finished_outcome(run, fail_fast_outcome)
-        except OpenCodeApiError as error:
-            run = self._mark_prompted_workers_failed(run, str(error))
-            run, cleanup_error = self._cleanup_disposable_sessions(client, run, created_session_ids_by_worker)
-            if cleanup_error:
-                return cleanup_error
-            return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
-
-        run, cleanup_error = self._cleanup_disposable_sessions(client, run, created_session_ids_by_worker)
-        first_error = recovery_error or (first_error_outcome.error if first_error_outcome is not None else None)
-        return cleanup_error or DependencyOrderedSerialRunStartOutcome(
-            run,
-            _exit_code_for_orchestration_run(run),
-            first_error,
+        execution = self.execution_phase.execute(
+            planning.run,
+            planning.serial_step,
+            cleanup_requested=cleanup,
+            execution_policy=execution_policy,
         )
-
-    def _recover_active_attempts(self, run):
-        recoveries = recover_expired_active_attempts(run.get("workers", {}), now=self.now)
-        if not recoveries:
-            return run, None
-        result = persist_worker_transitions(
-            self.store,
-            run,
-            [recovery.transition for recovery in recoveries],
-            refresh_run_summary=refresh_orchestration_run_summary,
-            now=self.now,
+        cleanup_result = self.cleanup_phase.cleanup(
+            execution.client,
+            execution.run,
+            execution.created_session_ids_by_worker,
         )
-        first_error = next((recovery.error for recovery in recoveries if recovery.error is not None), None)
-        return result.run, first_error
-
-    def _persist_next_serial_step(self, run):
-        step = self._plan_serial_step(run.get("workers", {}))
-        if step.dependency_blocked_transitions:
-            result = persist_worker_transitions(
-                self.store,
-                run,
-                step.dependency_blocked_transitions,
-                refresh_run_summary=refresh_orchestration_run_summary,
-                now=self.now,
-            )
-            return result.run, step
-        run = persist_run_summary(
-            self.store,
-            run,
-            refresh_run_summary=refresh_orchestration_run_summary,
-            now=self.now,
-        )
-        return run, step
+        if cleanup_result.outcome is not None:
+            return cleanup_result.outcome
+        return execution.finish_outcome(cleanup_result.run, recovery.error)
 
     def _plan_serial_step(self, workers):
         return plan_dependency_ordered_serial_step(workers)
-
-    def _execute_serial_workers(
-        self,
-        run,
-        serial_step,
-        client,
-        capabilities,
-        created_session_ids_by_worker,
-        *,
-        execution_policy,
-    ):
-        first_error_outcome = None
-        fail_fast_outcome = None
-        worker_id = serial_step.worker_id
-        while worker_id is not None:
-            run, worker_outcome = self._execute_selected_worker(
-                run,
-                worker_id,
-                client,
-                capabilities,
-                created_session_ids_by_worker,
-            )
-            if worker_outcome is not None and worker_outcome.error is not None:
-                first_error_outcome = first_error_outcome or worker_outcome
-                if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                    fail_fast_outcome = worker_outcome
-
-            # Persist the replan before returning on fail-fast so dependents record their blockers.
-            run, serial_step = self._persist_next_serial_step(run)
-            if fail_fast_outcome is not None:
-                break
-            worker_id = serial_step.worker_id
-        return run, first_error_outcome, fail_fast_outcome
-
-    def _execute_selected_worker(self, run, worker_id, client, capabilities, created_session_ids_by_worker):
-        worker = _worker_by_id(run.get("workers", {}), worker_id)
-        if worker is None:
-            return run, None
-        outcome = self.worker_execution_executor.execute(
-            client,
-            run,
-            worker,
-            _worker_prompt(worker),
-            capabilities,
-            agent=worker.agent,
-            model=worker.model,
-            create_session=True,
-            cleanup_requested=created_session_ids_by_worker is not None,
-        )
-        run = outcome.run or run
-        if created_session_ids_by_worker is not None:
-            current_worker = run.get("workers", {}).get(worker.worker_id, worker)
-            remember_created_worker_sessions(created_session_ids_by_worker, current_worker, outcome.created_session_ids)
-        return run, outcome
-
-    def _cleanup_disposable_sessions(self, client, run, created_session_ids_by_worker):
-        if created_session_ids_by_worker is None or client is None:
-            return run, None
-        cleanup_plan = CreatedWorkerCleanupPlanner().plan(created_session_ids_by_worker, run)
-        if not cleanup_plan.steps:
-            return run, None
-        cleanup_result = self.cleanup_executor.cleanup(client, run, cleanup_plan)
-        if cleanup_result.error is not None:
-            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
-                cleanup_result.run,
-                cleanup_result.exit_code,
-                cleanup_result.error,
-            )
-        return cleanup_result.run, None
-
-    def _execution_finished_outcome(self, run, first_error_outcome):
-        return DependencyOrderedSerialRunStartOutcome(
-            run,
-            _exit_code_for_orchestration_run(run),
-            first_error_outcome.error if first_error_outcome is not None else None,
-        )
 
     def _activate_run(self, run):
         return self._persist_mutation(run, _mark_run_active)
