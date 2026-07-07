@@ -15,3 +15,33 @@ The ratchet target for every long-file exception is the normal source-file limit
 | `opencode_session/worker_state.py` | 2395 | 300 | Defer direct decomposition, then extract serialization/hydration, lifecycle transition policy, retry/timeout/blocker policy, and import-cycle seams in separate issue-sized steps. |
 
 When a file reaches 300 lines or less, remove it from the grandfathered list instead of keeping the exception. Any new long-file exception must add a target here and in `LONG_SOURCE_FILE_RATCHET_TARGETS`.
+
+## `worker_state` Direct-Import Guardrail
+
+Direct `worker_state` decomposition and known import-cycle removal are intentionally deferred. The architecture gate still freezes the current production importer set in `GRANDFATHERED_WORKER_STATE_DIRECT_IMPORTERS` so the debt cannot spread to new modules unnoticed.
+
+The gate fails when a new production module imports `opencode_session.worker_state` directly without an explicit exception. It also fails when an importer stops depending on `worker_state` until the stale exception is removed from the test and this table.
+
+| Importer | Current boundary debt |
+| --- | --- |
+| `opencode_session.cli_policy` | CLI policy still maps worker lifecycle outcomes from `worker_state`. |
+| `opencode_session.multi_worker_orchestration` | Multi-worker orchestration still mutates worker records through `worker_state`. |
+| `opencode_session.multi_worker_orchestration_contracts` | Orchestration contracts still expose worker state types/constants. |
+| `opencode_session.multi_worker_orchestration_phases` | Phase helpers still read worker prompts through `worker_state`. |
+| `opencode_session.run_formatting` | Run output formatting still uses legacy worker output projection. |
+| `opencode_session.run_persistence` | Run persistence still hydrates workers through `worker_state`. |
+| `opencode_session.run_prompt_worker` | Prompt-worker setup still imports queued lifecycle constants. |
+| `opencode_session.run_record` | Run record normalization still depends on worker hydration helpers. |
+| `opencode_session.run_services` | Run services still coordinate worker lifecycle mutations. |
+| `opencode_session.run_start_core` | Run start still creates and initializes worker records directly. |
+| `opencode_session.run_start_policy` | Start policy still marks worker failure through `worker_state`. |
+| `opencode_session.worker_active_attempt_recovery` | Active-attempt recovery still mutates worker records directly. |
+| `opencode_session.worker_attempt_log` | Attempt logging still uses `WorkerRecord` directly. |
+| `opencode_session.worker_attempt_policy` | Attempt policy still reads lifecycle helpers directly. |
+| `opencode_session.worker_cleanup_recovery` | Cleanup recovery still mutates worker records directly. |
+| `opencode_session.worker_dependencies` | Dependency helpers are part of the known deferred cycle. |
+| `opencode_session.worker_execution` | Worker execution still applies lifecycle updates directly. |
+| `opencode_session.worker_field_spec` | Field spec still reads canonical lifecycle values lazily. |
+| `opencode_session.worker_session_provisioning` | Session provisioning still hydrates and mutates worker records. |
+| `opencode_session.worker_snapshot_transition` | Snapshot transition helpers still consume worker transition APIs. |
+| `opencode_session.worker_storage_adapter` | Storage adapter still bridges persistence to `worker_state`. |

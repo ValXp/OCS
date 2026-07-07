@@ -44,6 +44,34 @@ GRANDFATHERED_IMPORT_CYCLES = {
     ),
 }
 
+WORKER_STATE_MODULE = "opencode_session.worker_state"
+
+# Existing direct worker_state consumers are grandfathered so worker_state debt
+# cannot spread while decomposition remains explicitly deferred.
+GRANDFATHERED_WORKER_STATE_DIRECT_IMPORTERS = {
+    "opencode_session.cli_policy",
+    "opencode_session.multi_worker_orchestration",
+    "opencode_session.multi_worker_orchestration_contracts",
+    "opencode_session.multi_worker_orchestration_phases",
+    "opencode_session.run_formatting",
+    "opencode_session.run_persistence",
+    "opencode_session.run_prompt_worker",
+    "opencode_session.run_record",
+    "opencode_session.run_services",
+    "opencode_session.run_start_core",
+    "opencode_session.run_start_policy",
+    "opencode_session.worker_active_attempt_recovery",
+    "opencode_session.worker_attempt_log",
+    "opencode_session.worker_attempt_policy",
+    "opencode_session.worker_cleanup_recovery",
+    "opencode_session.worker_dependencies",
+    "opencode_session.worker_execution",
+    "opencode_session.worker_field_spec",
+    "opencode_session.worker_session_provisioning",
+    "opencode_session.worker_snapshot_transition",
+    "opencode_session.worker_storage_adapter",
+}
+
 def _python_source_paths():
     return sorted(PACKAGE_ROOT.rglob("*.py"))
 
@@ -231,6 +259,25 @@ class ArchitectureQualityGateTest(unittest.TestCase):
         offenders = [cycle for cycle in cycles if cycle not in GRANDFATHERED_IMPORT_CYCLES]
 
         self.assertEqual([], [" -> ".join(cycle) for cycle in offenders])
+
+    def test_worker_state_direct_importers_do_not_spread_beyond_grandfathered_set(self):
+        direct_importers = {
+            importer
+            for importer, targets in _package_import_edges().items()
+            if importer != WORKER_STATE_MODULE and WORKER_STATE_MODULE in targets
+        }
+
+        offenders = []
+        for importer in sorted(direct_importers - GRANDFATHERED_WORKER_STATE_DIRECT_IMPORTERS):
+            offenders.append(
+                f"{importer} imports {WORKER_STATE_MODULE}; use a narrower boundary or add an explicit exception"
+            )
+        for importer in sorted(GRANDFATHERED_WORKER_STATE_DIRECT_IMPORTERS - direct_importers):
+            offenders.append(
+                f"{importer} no longer imports {WORKER_STATE_MODULE}; remove its grandfathered exception"
+            )
+
+        self.assertEqual([], offenders)
 
     def test_core_modules_do_not_depend_on_cli_command_handlers(self):
         offenders = []
