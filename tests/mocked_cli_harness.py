@@ -33,104 +33,8 @@ class FakeOpenCodeServer:
         self.thread = None
 
     def __enter__(self):
-        parent = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, format, *args):
-                return
-
-            def do_GET(self):
-                self._handle()
-
-            def do_POST(self):
-                self._handle()
-
-            def do_PATCH(self):
-                self._handle()
-
-            def do_DELETE(self):
-                self._handle()
-
-            def _handle(self):
-                payload = self._read_payload()
-                request = FakeRequest(self.command, self.path, payload, dict(self.headers.items()))
-                parent.requests.append((request.method, request.path, request.payload))
-                responder = parent._routes.get((request.method, request.path))
-                if responder is None:
-                    responder, params = parent._match_template_route(request.method, request.path)
-                    request.params = params
-                if responder is None:
-                    parent.unexpected_requests.append((request.method, request.path, request.payload))
-                    self._write_text(parent._format_unexpected_requests(), status=500)
-                    return
-                responder(self, request)
-
-            def _read_payload(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                if not length:
-                    if self.command in {"POST", "PATCH", "PUT"}:
-                        return {}
-                    return None
-                body = self.rfile.read(length).decode("utf-8")
-                if not body:
-                    return {}
-                try:
-                    return json.loads(body)
-                except json.JSONDecodeError:
-                    return body
-
-            def _write_json(self, payload, *, status=200):
-                body = json.dumps(payload).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                try:
-                    self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError):
-                    return
-
-            def _write_sse(
-                self,
-                events,
-                *,
-                status=200,
-                raw_body=None,
-                keep_open_seconds=0,
-                event_start_delay_seconds=0,
-            ):
-                self.send_response(status)
-                self.send_header("Content-Type", "text/event-stream")
-                self.end_headers()
-                if status != 200:
-                    return
-                if raw_body is not None:
-                    self.wfile.write(raw_body.encode("utf-8"))
-                    self.wfile.flush()
-                    return
-                if event_start_delay_seconds:
-                    time.sleep(event_start_delay_seconds)
-                for event in events:
-                    try:
-                        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        return
-                if keep_open_seconds:
-                    time.sleep(keep_open_seconds)
-
-            def _write_text(self, text, *, status=200):
-                body = text.encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                try:
-                    self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError):
-                    return
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenCodeRequestHandler)
+        self.server.fake_opencode_server = self
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.daemon = True
         self.thread.start()
@@ -206,6 +110,107 @@ class FakeOpenCodeServer:
             if params is not None:
                 return responder, params
         return None, {}
+
+
+class _FakeOpenCodeRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def do_GET(self):
+        self._handle()
+
+    def do_POST(self):
+        self._handle()
+
+    def do_PATCH(self):
+        self._handle()
+
+    def do_DELETE(self):
+        self._handle()
+
+    @property
+    def _fake_server(self):
+        return self.server.fake_opencode_server
+
+    def _handle(self):
+        payload = self._read_payload()
+        request = FakeRequest(self.command, self.path, payload, dict(self.headers.items()))
+        fake_server = self._fake_server
+        fake_server.requests.append((request.method, request.path, request.payload))
+        responder = fake_server._routes.get((request.method, request.path))
+        if responder is None:
+            responder, params = fake_server._match_template_route(request.method, request.path)
+            request.params = params
+        if responder is None:
+            fake_server.unexpected_requests.append((request.method, request.path, request.payload))
+            self._write_text(fake_server._format_unexpected_requests(), status=500)
+            return
+        responder(self, request)
+
+    def _read_payload(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            if self.command in {"POST", "PATCH", "PUT"}:
+                return {}
+            return None
+        body = self.rfile.read(length).decode("utf-8")
+        if not body:
+            return {}
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            return body
+
+    def _write_json(self, payload, *, status=200):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _write_sse(
+        self,
+        events,
+        *,
+        status=200,
+        raw_body=None,
+        keep_open_seconds=0,
+        event_start_delay_seconds=0,
+    ):
+        self.send_response(status)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        if status != 200:
+            return
+        if raw_body is not None:
+            self.wfile.write(raw_body.encode("utf-8"))
+            self.wfile.flush()
+            return
+        if event_start_delay_seconds:
+            time.sleep(event_start_delay_seconds)
+        for event in events:
+            try:
+                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+        if keep_open_seconds:
+            time.sleep(keep_open_seconds)
+
+    def _write_text(self, text, *, status=200):
+        body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
 
 def request_paths(requests):

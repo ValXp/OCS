@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
+from opencode_session.run_record import run_record_for_output
 from opencode_session.run_store import RunStoreError
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
 from opencode_session.worker_cleanup_recovery import (
@@ -13,7 +14,6 @@ from opencode_session.worker_cleanup_recovery import (
 )
 from opencode_session.worker_execution import (
     WorkerExecutionExecutor,
-    WorkerExecutionPersistenceBoundary,
     WorkerExecutionTimeout,
     execute_worker_attempts,
 )
@@ -435,7 +435,7 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIs(finalized_worker, provisioning.worker)
         self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
 
-    def test_worker_execution_routes_transitions_and_session_outbox_through_single_boundary(self):
+    def test_worker_execution_records_completed_run_outcome(self):
         run = {
             "name": "demo",
             "directory": "/workspace",
@@ -443,33 +443,14 @@ class WorkerExecutionTest(unittest.TestCase):
         }
         worker = run["workers"]["worker"]
         client = FakeClient(["ses_new"])
-        journal_snapshots = []
-        persisted_transition_names = []
-        boundary_instances = []
 
         def persist_run_mutation(run, mutator):
             mutator(run)
-            journal_snapshots.append(deepcopy(run.get(WORKER_SESSION_JOURNAL_FIELD)))
             return run
 
         def persist_worker_transition(run, worker, transition):
-            persisted_transition_names.append(transition.name.value)
             updated = apply_worker_transition(run.setdefault("workers", {}), transition)
             return run, updated
-
-        class RecordingBoundary(WorkerExecutionPersistenceBoundary):
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)
-                self.calls = []
-                boundary_instances.append(self)
-
-            def provision_session(self, *args, **kwargs):
-                self.calls.append("provision_session")
-                return super().provision_session(*args, **kwargs)
-
-            def apply_worker_transition(self, transition):
-                self.calls.append(("transition", transition.name.value if transition is not None else None))
-                return super().apply_worker_transition(transition)
 
         def execute_prompt(client, session_id, prompt, capabilities):
             client.requests.append(("execute", session_id, prompt))
@@ -485,7 +466,6 @@ class WorkerExecutionTest(unittest.TestCase):
             executor=execute_prompt,
             now=lambda: "2026-07-03T00:00:00Z",
             session_journal=journal,
-            persistence_boundary_factory=RecordingBoundary,
         )
 
         outcome = executor.execute(
@@ -500,38 +480,37 @@ class WorkerExecutionTest(unittest.TestCase):
         )
 
         self.assertEqual(outcome.kind, "completed")
-        self.assertEqual(len(boundary_instances), 1)
-        self.assertEqual(
-            boundary_instances[0].calls,
-            [
-                "provision_session",
-                ("transition", "provisioned"),
-                ("transition", "active"),
-                ("transition", "attempt_started"),
-                ("transition", "result_applied"),
-            ],
-        )
-        self.assertEqual(
-            persisted_transition_names,
-            ["provisioned", "active", "attempt_started", "result_applied"],
-        )
-        self.assertEqual(len(journal_snapshots), 3)
-        self.assertEqual(journal_snapshots[0][0]["status"], "intent")
-        self.assertEqual(journal_snapshots[1][0]["status"], "created")
-        self.assertIsNone(journal_snapshots[2])
+        self.assertEqual(outcome.created_session_ids, ["ses_new"])
+        self.assertIs(outcome.run, run)
+        self.assertIsNone(outcome.error)
+        self.assertIsNone(outcome.failure_category)
         self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
-        self.assertEqual(
+        self.assertCountEqual(
             client.requests,
             [
                 ("create", "/workspace", "build", "openai/gpt-5.5"),
                 ("execute", "ses_new", "Finish the worker task"),
             ],
         )
-        self.assertEqual(worker_field(run["workers"]["worker"], "session_id"), "ses_new")
+        worker = run["workers"]["worker"]
+        worker_output = run_record_for_output(run)["workers"]["worker"]
+        self.assertEqual(worker_output["status"], "done")
+        self.assertEqual(worker_output["next_eligible_action"], "collect")
+        self.assertEqual(worker_field(worker, "session_id"), "ses_new")
+        self.assertEqual(worker_field(worker, "agent"), "build")
+        self.assertEqual(worker_field(worker, "model"), "openai/gpt-5.5")
         self.assertEqual(
-            worker_field(run["workers"]["worker"], "cleanup"),
+            worker_field(worker, "cleanup"),
             {"requested": True, "deleted": False, "sessions": ["ses_new"]},
         )
+        attempt = self.assert_single_worker_attempt(worker, status="completed", session_id="ses_new")
+        self.assertEqual(attempt.get("id"), "attempt-1")
+        self.assertEqual(attempt.get("created_session_ids"), ["ses_new"])
+        self.assertEqual(attempt.get("started_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("finished_at"), "2026-07-03T00:00:00Z")
+        self.assertEqual(attempt.get("result_status"), "done")
+        self.assertEqual(attempt.get("user_message_id"), "msg_user")
+        self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
 
     def test_recoverable_created_worker_sessions_merges_cleanup_and_journal_transactions(self):
         run = {
