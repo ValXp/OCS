@@ -283,6 +283,7 @@ WORKER_LIFECYCLE_TIMEOUT_FAILED_RETRY = _lifecycle_table_value("state", "timeout
 WORKER_LIFECYCLE_TIMEOUT_FAILED_TERMINAL = _lifecycle_table_value("state", "timeout_failed_terminal")
 WORKER_LIFECYCLE_TIMEOUT_ABORTED = _lifecycle_table_value("state", "timeout_aborted")
 WORKER_LIFECYCLE_ABORTED = _lifecycle_table_value("state", "aborted")
+WORKER_LIFECYCLE_STATE_VALUES = _lifecycle_table_values("state")
 
 WorkerLifecycleStatus = _WorkerLifecycleEnum(
     "WorkerLifecycleStatus",
@@ -564,7 +565,7 @@ WORKER_LIFECYCLE_DIMENSIONS_BY_STATE = {
     lifecycle_state: metadata.dimensions for lifecycle_state, metadata in WORKER_LIFECYCLE_METADATA.items()
 }
 WORKER_LIFECYCLE_STATE_BY_DIMENSIONS = _worker_lifecycle_state_by_dimensions(WORKER_LIFECYCLE_METADATA)
-WORKER_LIFECYCLE_STATES = frozenset(WORKER_LIFECYCLE_METADATA)
+WORKER_LIFECYCLE_STATES = frozenset(WORKER_LIFECYCLE_STATE_VALUES)
 WORKER_TIMEOUT_ORIGIN_LIFECYCLE_STATES = _lifecycle_states_matching(timeout_origin=True)
 WORKER_LIFECYCLE_STATE_BY_STATUS_ALIAS = _status_aliases_by_lifecycle_metadata()
 WORKER_STATUS_PRIORITY_BY_STATUS = _status_values_by_lifecycle_metadata("status_priority")

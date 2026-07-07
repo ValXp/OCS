@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite
@@ -26,22 +27,6 @@ WORKER_FIELD_VALIDATOR_NAMES = frozenset(
         "timeout_policy",
     )
 )
-WORKER_FIELD_LIFECYCLE_STATES = (
-    "queued",
-    "active_wait",
-    "active_retry",
-    "blocked_dependency",
-    "blocked_timeout",
-    "done_collect",
-    "failed_retry",
-    "failed_terminal",
-    "timeout_retry",
-    "timeout_terminal",
-    "timeout_failed_retry",
-    "timeout_failed_terminal",
-    "timeout_aborted",
-    "aborted",
-)
 WORKER_FIELD_TIMEOUT_POLICY_STATUSES = (
     "timeout",
     "blocked",
@@ -49,6 +34,32 @@ WORKER_FIELD_TIMEOUT_POLICY_STATUSES = (
     "aborted",
 )
 _ACCEPTED_VALUE_VALIDATOR_NAMES = frozenset(("lifecycle_state", "timeout_policy"))
+
+
+def _worker_lifecycle_state_values():
+    from opencode_session.worker_state import WORKER_LIFECYCLE_STATE_VALUES
+
+    return WORKER_LIFECYCLE_STATE_VALUES
+
+
+class _WorkerLifecycleStates(Collection):
+    """Lazy view over worker_state's canonical lifecycle states."""
+
+    def __contains__(self, value):
+        return value in _worker_lifecycle_state_values()
+
+    def __iter__(self):
+        return iter(_worker_lifecycle_state_values())
+
+    def __len__(self):
+        return len(_worker_lifecycle_state_values())
+
+    def __bool__(self):
+        # WorkerFieldSpec.__post_init__ only needs to know the provider exists.
+        return True
+
+
+WORKER_FIELD_LIFECYCLE_STATES = _WorkerLifecycleStates()
 
 
 @dataclass(frozen=True)
@@ -60,7 +71,7 @@ class WorkerFieldSpec:
     default: JsonValue = None
     required: bool = True
     validator: WorkerFieldValidatorName = "any"
-    accepted_values: tuple = ()
+    accepted_values: Collection = ()
     default_from_worker_id: bool = False
     record_update: bool = False
     run_upsert: bool = False

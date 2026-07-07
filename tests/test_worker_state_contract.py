@@ -6,7 +6,6 @@ from opencode_session.worker_storage_adapter import (
     normalize_worker_snapshot_for_storage,
 )
 from opencode_session.worker_field_spec import (
-    WORKER_FIELD_LIFECYCLE_STATES,
     WORKER_FIELD_SPEC_BY_NAME,
     WORKER_FIELD_TIMEOUT_POLICY_STATUSES,
 )
@@ -133,7 +132,12 @@ class WorkerStateContractTest(unittest.TestCase):
             WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
             tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_policy"),
         )
-        self.assertEqual(frozenset(WORKER_FIELD_LIFECYCLE_STATES), WORKER_LIFECYCLE_STATES)
+        lifecycle_spec = WORKER_FIELD_SPEC_BY_NAME["lifecycle_state"]
+        for lifecycle_state in WORKER_LIFECYCLE_STATES:
+            with self.subTest(lifecycle_state=lifecycle_state):
+                self.assertEqual(lifecycle_spec.canonical_value(lifecycle_state), lifecycle_state)
+        with self.assertRaisesRegex(ValueError, "lifecycle_state"):
+            lifecycle_spec.canonical_value("unknown_lifecycle_state")
         self.assertEqual(frozenset(WORKER_FIELD_TIMEOUT_POLICY_STATUSES), WORKER_TIMEOUT_POLICY_STATUSES)
 
         legacy_worker = {"id": "review"}
