@@ -2,7 +2,7 @@ from copy import deepcopy
 import unittest
 
 from opencode_session.worker_storage_adapter import worker_snapshot_transition
-from opencode_session.worker_state import WorkerRecord, WorkerTransition, WorkerTransitionError
+from opencode_session.worker_state import WorkerRecord, WorkerTransition, WorkerTransitionError, reduce_worker_transition
 
 
 NOW = "2026-07-04T00:00:00Z"
@@ -173,6 +173,48 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         self.assertEqual(snapshot["last_failure_reason"], "previous failure")
         self.assertNotIn("error", snapshot)
         self.assertNotIn("failure_retryable", snapshot)
+
+    def test_reduce_worker_transition_returns_updated_worker_without_mutating_source(self):
+        worker = worker_record(
+            lifecycle_state="active_wait",
+            blockers=["dependency:build"],
+            error="previous failure",
+            failure_category="api",
+            failure_reason="previous failure",
+        )
+        original = deepcopy(worker)
+
+        result = reduce_worker_transition(
+            worker,
+            WorkerTransition.result_applied(
+                worker.worker_id,
+                {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}},
+                prompt_ids=("msg_user",),
+            ),
+        )
+
+        self.assertTrue(result.applied)
+        self.assertEqual(worker, original)
+        self.assertIsNot(result.worker, worker)
+        self.assertEqual(result.worker.to_output_dict()["status"], "done")
+        self.assertEqual(result.worker.prompt_ids, ["msg_user"])
+        self.assertEqual(result.worker.output_refs, ["assistant:msg_assistant"])
+        self.assertNotIn("error", result.worker.to_snapshot())
+
+    def test_reduce_worker_transition_skips_illegal_transition_without_mutating_source(self):
+        worker = worker_record(
+            lifecycle_state="done_collect",
+            result={"status": "done", "message_ids": {"assistant": "msg_done"}},
+            output_refs=["assistant:msg_done"],
+        )
+        original = deepcopy(worker)
+
+        result = reduce_worker_transition(worker, WorkerTransition.active(worker.worker_id))
+
+        self.assertTrue(result.skipped)
+        self.assertIn("illegal worker transition 'active'", result.reason)
+        self.assertEqual(worker, original)
+        self.assertEqual(result.worker, original)
 
     def test_retry_start_clears_retry_marker_prompt_ids(self):
         worker = worker_record(
