@@ -4,9 +4,11 @@ import unittest
 from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition
 from opencode_session.worker_state import (
+    WorkerLifecycleReducer,
     WorkerRecord,
     WorkerTransition,
     WorkerTransitionError,
+    apply_worker_transition_payload,
     reduce_worker_transition,
 )
 
@@ -255,6 +257,19 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         self.assertEqual(worker, original)
         self.assertEqual(result.worker, original)
 
+    def test_reduce_worker_transition_skips_illegal_transition_before_target_resolution(self):
+        worker = worker_record(
+            lifecycle_state="done_collect",
+            result={"status": "done", "message_ids": {"assistant": "msg_done"}},
+            output_refs=["assistant:msg_done"],
+        )
+
+        result = reduce_worker_transition(worker, WorkerTransition.result_applied(worker.worker_id, {}))
+
+        self.assertTrue(result.skipped)
+        self.assertIn("illegal worker transition 'result_applied'", result.reason)
+        self.assertEqual(result.worker, worker)
+
     def test_retry_start_clears_retry_marker_prompt_ids(self):
         worker = worker_record(
             lifecycle_state="failed_retry",
@@ -304,6 +319,148 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
         self.assertEqual(snapshot["prompt_ids"], ["msg_initial", "msg_user"])
         self.assertEqual(snapshot["output_refs"], [])
         self.assertNotIn("result", snapshot)
+
+    def test_accepted_abort_terminal_policy_handles_late_public_transitions(self):
+        cases = (
+            (
+                "provisioned",
+                lambda worker: WorkerTransition.provisioned(
+                    worker_record(
+                        worker.worker_id,
+                        session_id="ses_late",
+                        agent="late-agent",
+                        model="late-model",
+                    )
+                ),
+                (),
+            ),
+            ("active", lambda worker: WorkerTransition.active(worker.worker_id, timeout_started_at=NOW), ()),
+            (
+                "attempt_started",
+                lambda worker: WorkerTransition.attempt_started(
+                    worker.worker_id,
+                    {"id": "attempt-late", "status": "active"},
+                ),
+                (),
+            ),
+            (
+                "failed",
+                lambda worker: WorkerTransition.failed(
+                    worker.worker_id,
+                    "provider",
+                    "provider failed late",
+                    prompt_ids=("msg_failed",),
+                ),
+                ("msg_failed",),
+            ),
+            (
+                "dependency_blocked",
+                lambda worker: WorkerTransition.dependency_blocked(worker.worker_id, ["dependency:build"]),
+                (),
+            ),
+            (
+                "aborted_not_accepted",
+                lambda worker: WorkerTransition.aborted(worker.worker_id, {"accepted": False}),
+                (),
+            ),
+            (
+                "retry_scheduled",
+                lambda worker: WorkerTransition.retry_scheduled(
+                    worker.worker_id,
+                    "provider",
+                    "provider failed late",
+                    retry_count=1,
+                    prompt_ids=("msg_retry",),
+                ),
+                ("msg_retry",),
+            ),
+            (
+                "timed_out",
+                lambda worker: WorkerTransition.timed_out(
+                    worker.worker_id,
+                    "worker timed out late",
+                    status="failed",
+                    timed_out_at=NOW,
+                ),
+                (),
+            ),
+            (
+                "result_applied",
+                lambda worker: WorkerTransition.result_applied(
+                    worker.worker_id,
+                    {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+                    prompt_ids=("msg_result",),
+                ),
+                ("msg_result",),
+            ),
+        )
+
+        for name, transition_factory, merged_prompt_ids in cases:
+            with self.subTest(name=name):
+                worker = worker_record(
+                    lifecycle_state="active_wait",
+                    session_id="ses_build",
+                    prompt_ids=["msg_initial"],
+                    attempts=[{"id": "attempt-1", "status": "active"}],
+                )
+                worker.apply_transition(
+                    WorkerTransition.aborted(worker.worker_id, {"session_id": "ses_build", "accepted": True})
+                )
+                before = worker.to_snapshot()
+
+                result = reduce_worker_transition(worker, transition_factory(worker))
+
+                expected = deepcopy(before)
+                if merged_prompt_ids:
+                    expected["prompt_ids"] = ["msg_initial", *merged_prompt_ids]
+                self.assertTrue(result.applied)
+                self.assertEqual(worker.to_snapshot(), before)
+                self.assertEqual(result.worker.to_snapshot(), expected)
+                self.assertEqual(result.worker.to_output_dict()["status"], "aborted")
+                self.assertNotIn("result", result.worker.to_snapshot())
+
+    def test_accepted_abort_terminal_policy_replays_snapshot_passthrough_only(self):
+        worker = worker_record(
+            lifecycle_state="active_wait",
+            session_id="ses_build",
+            prompt_ids=["msg_initial"],
+        )
+        worker.apply_transition(WorkerTransition.aborted(worker.worker_id, {"session_id": "ses_build", "accepted": True}))
+        incoming = worker_record(
+            worker.worker_id,
+            lifecycle_state="done_collect",
+            prompt_ids=["msg_done"],
+            result={"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+            output_refs=["assistant:msg_assistant"],
+            cleanup={"requested": True, "deleted": True},
+        )
+
+        worker.apply_transition(worker_snapshot_transition(incoming))
+
+        output = worker.to_output_dict()
+        snapshot = worker.to_snapshot()
+        self.assertEqual(output["status"], "aborted")
+        self.assertEqual(output["next_eligible_action"], "none")
+        self.assertEqual(snapshot["abort"], {"session_id": "ses_build", "accepted": True})
+        self.assertEqual(snapshot["prompt_ids"], ["msg_initial", "msg_done"])
+        self.assertEqual(snapshot["cleanup"], {"requested": True, "deleted": True})
+        self.assertEqual(snapshot["output_refs"], [])
+        self.assertNotIn("result", snapshot)
+
+    def test_accepted_abort_terminal_policy_covers_payload_reducer_entrypoint(self):
+        worker = worker_record(
+            lifecycle_state="active_wait",
+            attempts=[{"id": "attempt-1", "status": "active"}],
+        )
+        worker.apply_transition(WorkerTransition.aborted(worker.worker_id, {"accepted": True}))
+        before = worker.to_snapshot()
+
+        snapshot = apply_worker_transition_payload(
+            WorkerLifecycleReducer(worker),
+            WorkerTransition.attempt_started(worker.worker_id, {"id": "attempt-late", "status": "active"}),
+        )
+
+        self.assertEqual(snapshot, before)
 
     def test_abort_only_changes_public_status_when_abort_is_accepted(self):
         worker = worker_record(lifecycle_state="active_wait")
