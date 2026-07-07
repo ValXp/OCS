@@ -4,11 +4,13 @@ from typing import Optional
 
 from opencode_session.remote_journal import (
     PersistedRemoteMutationJournal,
+    RecordedIntent,
     RemoteMutationApplication,
     RemoteMutationJournal,
     RemoteMutationOperation,
     RemoteMutationRecovery,
 )
+from opencode_session.run_store import RunStoreError
 
 
 PROMPT_OPERATION = RemoteMutationOperation(
@@ -79,7 +81,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
         def persist_run_mutation(run, mutator):
             calls.append("persist")
             if len(calls) == 1:
-                raise RuntimeError("forced cleanup failure")
+                raise RunStoreError("forced cleanup failure")
             mutator(run)
             return run
 
@@ -101,11 +103,30 @@ class RemoteMutationJournalTest(unittest.TestCase):
             run["journal"][0]["cleanup_failure"],
             {
                 "operation": "discard_remote_mutation",
-                "error_type": "RuntimeError",
+                "error_type": "RunStoreError",
                 "message": "forced cleanup failure",
                 "recorded_at": "2026-07-05T00:00:00Z",
             },
         )
+
+    def test_persisted_best_effort_cleanup_failure_propagates_non_persistence_error(self):
+        run = {"name": "demo", "journal": [{"id": "mutation-1", "kind": "prompt"}]}
+
+        def persist_run_mutation(run, mutator):
+            raise ValueError("not a persistence failure")
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+
+        with self.assertRaisesRegex(ValueError, "not a persistence failure"):
+            journal.discard_intent_best_effort(
+                run,
+                "mutation-1",
+                operation="discard_remote_mutation",
+            )
 
     def test_record_intent_from_builds_entry_against_latest_run(self):
         run = {"name": "demo", "workers": {"worker": {"session_id": "ses_old"}}}
@@ -121,7 +142,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
             now=lambda: "2026-07-05T00:00:00Z",
         )
 
-        journal.record_intent_from(
+        recorded = journal.record_intent_from(
             run,
             lambda latest_run: TestIntentRecord(
                 "mutation-1",
@@ -130,6 +151,9 @@ class RemoteMutationJournalTest(unittest.TestCase):
             ),
         )
 
+        self.assertIsInstance(recorded, RecordedIntent)
+        self.assertIs(recorded.run, run)
+        self.assertEqual(recorded.intent.session_id, "ses_latest")
         self.assertEqual(run["journal"][0]["session_id"], "ses_latest")
 
     def test_transaction_records_identity_and_lifecycle(self):
@@ -147,7 +171,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
         )
         transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
 
-        run = transaction.record_intent_from(
+        recorded = transaction.record_intent_from(
             run,
             lambda latest_run: TestIntentRecord(
                 "mutation-1",
@@ -156,6 +180,8 @@ class RemoteMutationJournalTest(unittest.TestCase):
                 message_id="msg_1",
             ),
         )
+        run = recorded.run
+        self.assertEqual(recorded.intent.message_id, "msg_1")
         run = transaction.mark_applied(run, TestAppliedRecord("mutation-1", "prompt", "applied"))
         self.assertEqual(
             run["journal"],
@@ -284,6 +310,48 @@ class RemoteMutationJournalTest(unittest.TestCase):
             ],
         )
 
+    def test_mark_uncertain_best_effort_returns_original_run_after_persistence_failure(self):
+        run = {"name": "demo", "journal": [{"id": "mutation-1", "kind": "prompt"}]}
+
+        def persist_run_mutation(run, mutator):
+            raise RunStoreError("forced uncertain persistence failure")
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+
+        updated_run = journal.mark_uncertain_best_effort(
+            run,
+            "mutation-1",
+            RuntimeError("remote rejected"),
+            operation="call_prompt",
+        )
+
+        self.assertIs(updated_run, run)
+        self.assertEqual(run["journal"], [{"id": "mutation-1", "kind": "prompt"}])
+
+    def test_mark_uncertain_best_effort_propagates_non_persistence_error(self):
+        run = {"name": "demo", "journal": [{"id": "mutation-1", "kind": "prompt"}]}
+
+        def persist_run_mutation(run, mutator):
+            raise ValueError("not a persistence failure")
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+
+        with self.assertRaisesRegex(ValueError, "not a persistence failure"):
+            journal.mark_uncertain_best_effort(
+                run,
+                "mutation-1",
+                RuntimeError("remote rejected"),
+                operation="call_prompt",
+            )
+
     def test_runner_keeps_journal_recoverable_after_local_apply_or_finalize_failure(self):
         run = {"name": "demo"}
         calls = []
@@ -291,7 +359,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
         def persist_run_mutation(run, mutator):
             calls.append("persist")
             if len(calls) == 2:
-                raise RuntimeError("forced finalize failure")
+                raise RunStoreError("forced finalize failure")
             mutator(run)
             return run
 
@@ -308,7 +376,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
 
             return RemoteMutationApplication(mutate_run=remember_message)
 
-        with self.assertRaisesRegex(RuntimeError, "forced finalize failure"):
+        with self.assertRaisesRegex(RunStoreError, "forced finalize failure"):
             transaction.runner().execute(
                 run,
                 intent_factory=lambda latest_run: TestIntentRecord("mutation-1", "prompt", "ses_1"),

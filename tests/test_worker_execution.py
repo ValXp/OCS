@@ -7,6 +7,7 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_start_core import RunStartCore
+from opencode_session.run_store import RunStoreError
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
 from opencode_session.worker_cleanup_recovery import (
     cleanup_created_worker_sessions,
@@ -249,7 +250,7 @@ class WorkerExecutionTest(unittest.TestCase):
         def persist_run_mutation(run, mutator):
             calls.append("persist")
             if len(calls) == 2:
-                raise RuntimeError("forced cleanup failure")
+                raise RunStoreError("forced cleanup failure")
             mutator(run)
             return run
 
@@ -273,7 +274,7 @@ class WorkerExecutionTest(unittest.TestCase):
             entry["cleanup_failure"],
             {
                 "operation": "discard_worker_session_create",
-                "error_type": "RuntimeError",
+                "error_type": "RunStoreError",
                 "message": "forced cleanup failure",
                 "recorded_at": "2026-07-05T00:00:00Z",
             },

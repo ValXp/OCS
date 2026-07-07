@@ -1,5 +1,10 @@
 from dataclasses import dataclass
 
+from opencode_session.run_store import RunStoreError
+
+
+_PERSISTENCE_ERRORS = (RunStoreError, OSError)
+
 
 @dataclass(frozen=True)
 class RemoteMutationOperation:
@@ -20,6 +25,12 @@ class RemoteMutationApplication:
 class RemoteMutationExecution:
     run: object
     remote_result: object
+    intent: object
+
+
+@dataclass(frozen=True)
+class RecordedIntent:
+    run: object
     intent: object
 
 
@@ -99,15 +110,9 @@ class RemoteMutationRunner:
         self.transaction = transaction
 
     def execute(self, run, *, intent_factory, call_remote, apply_result=None):
-        holder = {}
-
-        def record_intent(latest_run):
-            intent = intent_factory(latest_run)
-            holder["intent"] = intent
-            return intent
-
-        run = self.transaction.record_intent_from(run, record_intent)
-        intent = holder["intent"]
+        recorded = self.transaction.record_intent_from(run, intent_factory)
+        run = recorded.run
+        intent = recorded.intent
         try:
             remote_result = call_remote(run, intent)
         except Exception as remote_error:
@@ -268,10 +273,17 @@ class PersistedRemoteMutationJournal:
         )
 
     def record_intent_from(self, run, entry_factory):
-        def record(latest_run):
-            self.journal.record_intent(latest_run, entry_factory(latest_run))
+        intent = _UNSET
 
-        return self.persist_run_mutation(run, record)
+        def record(latest_run):
+            nonlocal intent
+            intent = entry_factory(latest_run)
+            self.journal.record_intent(latest_run, intent)
+
+        persisted_run = self.persist_run_mutation(run, record)
+        if intent is _UNSET:
+            raise RuntimeError("remote mutation persistence did not record an intent")
+        return RecordedIntent(run=persisted_run, intent=intent)
 
     def mark_applied(self, run, entry_id, record, *, mutate_run=None, append_if_missing=False):
         def persisted_mutation(latest_run):
@@ -310,13 +322,13 @@ class PersistedRemoteMutationJournal:
                 run,
                 lambda latest_run: self.journal.mark_uncertain(latest_run, entry_id, uncertainty),
             )
-        except Exception:
+        except _PERSISTENCE_ERRORS:
             return run
 
     def _finalize_best_effort(self, run, entry_id, *, operation):
         try:
             return self.finalize(run, entry_id)
-        except Exception as cleanup_error:
+        except _PERSISTENCE_ERRORS as cleanup_error:
             return self.record_cleanup_failure_best_effort(
                 run,
                 entry_id,
@@ -336,8 +348,11 @@ class PersistedRemoteMutationJournal:
                 run,
                 lambda latest_run: self.journal.mark_cleanup_failure(latest_run, entry_id, cleanup_failure),
             )
-        except Exception:
+        except _PERSISTENCE_ERRORS:
             return run
+
+
+_UNSET = object()
 
 
 def _string_list(value):
