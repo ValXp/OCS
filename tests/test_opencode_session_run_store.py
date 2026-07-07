@@ -263,6 +263,23 @@ class RunStoreConcurrencyTest(unittest.TestCase):
         self.assertNotIn("status", stored["workers"]["build"])
         self.assertNotIn("next_eligible_action", stored["workers"]["build"])
 
+    def test_worker_snapshot_persistence_rejects_raw_worker_mapping(self):
+        with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
+            run_store = RunStore(store)
+            run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
+            run = run_store.load_run("demo")
+            raw_worker = run["workers"]["build"].to_snapshot()
+
+            with self.assertRaisesRegex(TypeError, "worker snapshot updates require WorkerRecord"):
+                persist_worker_snapshot_update(
+                    run_store,
+                    run,
+                    raw_worker,
+                    refresh_run_summary=refresh_run_summary,
+                    now=lambda: "2026-07-03T00:00:00Z",
+                )
+
     def test_worker_patch_preserves_concurrent_prompt_id_on_other_worker(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
             run_store = RunStore(store)

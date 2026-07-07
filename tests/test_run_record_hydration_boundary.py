@@ -10,6 +10,7 @@ from opencode_session.commands.rendering import render_command_result
 from opencode_session.run_record import normalize_run, normalize_run_for_storage, run_record_for_output
 from opencode_session.schema_run import HydratedRunRecord, PersistedRunRecord, RunRecord
 from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
+from opencode_session.worker_attempt_log import new_worker_attempt_record
 from opencode_session.worker_storage_adapter import migrate_persisted_worker_snapshot, normalize_worker_snapshot_for_storage
 from opencode_session.worker_state import WorkerRecord, worker_field, worker_output_field
 
@@ -168,6 +169,13 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
                     "next_eligible_action": "collect",
                 },
                 "review",
+            )
+
+    def test_worker_attempt_logging_rejects_raw_worker_mapping(self):
+        with self.assertRaisesRegex(TypeError, "worker attempts require WorkerRecord"):
+            new_worker_attempt_record(
+                {"id": "review", "session_id": "ses_review", "attempts": []},
+                started_at="2026-07-06T00:00:00Z",
             )
 
     def test_storage_normalization_serializes_plain_json_worker_snapshots(self):

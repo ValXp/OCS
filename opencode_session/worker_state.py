@@ -1310,7 +1310,10 @@ def _reduce_cleanup_updated_transition(latest_worker, transition, payload, targe
 def _reduce_snapshot_applied_transition(latest_worker, transition, payload, target_state):
     patch = payload.patch
     worker = _transition_worker_copy(latest_worker)
-    if _accepted_abort(latest_worker) and not _accepted_abort(patch.fields):
+    if _accepted_abort(latest_worker) and not _accepted_abort_fields(
+        patch.fields.get("abort"),
+        patch.fields.get("lifecycle_state"),
+    ):
         for field_name, value in patch.accepted_abort_fields.items():
             worker._set_field_value(field_name, value)
         if patch.accepted_abort_prompt_ids is not None:
@@ -1640,11 +1643,17 @@ def _require_worker_record(worker):
 
 
 def _worker_fields(worker):
-    if isinstance(worker, WorkerRecord):
-        return worker.to_snapshot()
-    if isinstance(worker, Mapping):
-        return dict(worker)
-    return {}
+    return _require_worker_record(worker).to_snapshot()
+
+
+def _worker_init_fields(fields):
+    if fields is None:
+        return {}
+    if isinstance(fields, WorkerRecord):
+        return _worker_fields(fields)
+    if isinstance(fields, Mapping):
+        return dict(fields)
+    raise TypeError("worker record fields must be a mapping or WorkerRecord")
 
 
 def worker_field(worker, field_name, default=None):
@@ -1710,13 +1719,7 @@ def worker_lifecycle_state(worker):
 
 
 def _canonical_lifecycle_state(worker):
-    if isinstance(worker, WorkerRecord):
-        return worker.lifecycle_state
-    if isinstance(worker, Mapping):
-        lifecycle_state = worker.get("lifecycle_state")
-        if lifecycle_state in WORKER_LIFECYCLE_STATES:
-            return lifecycle_state
-    return WORKER_LIFECYCLE_QUEUED
+    return _require_worker_record(worker).lifecycle_state
 
 
 def latest_prompt_ids_are_retry_marker(latest_worker):
@@ -1882,7 +1885,7 @@ class WorkerRecord:
 
     def _merge_fields(self, fields=None, **kwargs):
         if fields is not None:
-            for field_name, value in _worker_fields(fields).items():
+            for field_name, value in _worker_init_fields(fields).items():
                 self._set_field_value(field_name, value)
         if kwargs:
             for field_name, value in kwargs.items():
@@ -1897,7 +1900,7 @@ class WorkerRecord:
 
     @classmethod
     def from_worker(cls, worker, worker_id=None):
-        fields = _worker_fields(worker)
+        fields = _worker_init_fields(worker)
         resolved_worker_id = fields.get("id") or worker_id
         return cls(resolved_worker_id, fields)
 
@@ -2328,15 +2331,11 @@ def _merge_worker_prompt_ids(worker, latest_worker, prompt_ids, *, merge_empty=F
 
 
 def _accepted_abort(worker):
-    if isinstance(worker, WorkerRecord):
-        abort = worker.abort
-        lifecycle_state = worker.lifecycle_state
-    elif isinstance(worker, Mapping):
-        abort = worker.get("abort")
-        lifecycle_state = _canonical_lifecycle_state(worker)
-    else:
-        abort = None
-        lifecycle_state = None
+    worker = _require_worker_record(worker)
+    return _accepted_abort_fields(worker.abort, worker.lifecycle_state)
+
+
+def _accepted_abort_fields(abort, lifecycle_state):
     status = public_worker_state(lifecycle_state)[0]
     return isinstance(abort, dict) and abort.get("accepted") and status == WORKER_STATUS_ABORTED
 

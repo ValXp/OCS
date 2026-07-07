@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from collections.abc import Mapping
 
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition
 from opencode_session.worker_state import (
@@ -37,10 +36,10 @@ def persist_worker_snapshot_updates(store, run, workers, *, refresh_run_summary,
 def _snapshot_update_transition(worker):
     if isinstance(worker, WorkerRecord):
         worker_id = worker.worker_id
-    elif isinstance(worker, Mapping):
-        worker_id = worker.get("id")
-    else:
+    elif worker is None:
         return None
+    else:
+        raise TypeError("worker snapshot updates require WorkerRecord; hydrate raw mappings at the storage boundary")
     if not worker_id:
         return None
     return worker_snapshot_transition(worker, worker_id)

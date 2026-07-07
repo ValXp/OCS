@@ -1,43 +1,17 @@
-from collections.abc import MutableMapping
-from copy import deepcopy
+from opencode_session.worker_state import WorkerRecord
 
 
 def new_worker_attempt_record(worker, *, started_at, created_session_ids=()):
-    api = _attempt_api(worker)
-    if api is not None:
-        return api.new_attempt_record(
-            started_at=started_at,
-            created_session_ids=created_session_ids,
-        )
-    if not isinstance(worker, MutableMapping):
-        raise TypeError("worker attempts require WorkerRecord attempt methods")
-    attempts = worker.get("attempts")
-    attempts = attempts if isinstance(attempts, list) else []
-    return {
-        "id": f"attempt-{len(attempts) + 1}",
-        "session_id": worker.get("session_id"),
-        "created_session_ids": list(created_session_ids),
-        "status": "active",
-        "started_at": started_at,
-        "finished_at": None,
-    }
+    return _require_attempt_worker(worker).new_attempt_record(
+        started_at=started_at,
+        created_session_ids=created_session_ids,
+    )
 
 
 def _append_attempt(worker, attempt):
     if not attempt:
         return
-    api = _attempt_api(worker)
-    if api is not None:
-        api.append_attempt(attempt)
-        return
-    if not isinstance(worker, MutableMapping):
-        raise TypeError("worker attempts require WorkerRecord attempt methods")
-    attempts = worker.get("attempts")
-    attempts = attempts if isinstance(attempts, list) else []
-    attempt = deepcopy(attempt)
-    if any(isinstance(existing, dict) and existing.get("id") == attempt.get("id") for existing in attempts):
-        return
-    worker["attempts"] = [*deepcopy(attempts), attempt]
+    _require_attempt_worker(worker).append_attempt(attempt)
 
 
 def _finalize_attempt(worker, finalization):
@@ -45,30 +19,10 @@ def _finalize_attempt(worker, finalization):
         return
     attempt_id = finalization.get("id")
     fields = finalization.get("fields") if isinstance(finalization.get("fields"), dict) else {}
-    api = _attempt_api(worker)
-    if api is not None:
-        api.finalize_attempt(attempt_id, fields)
-        return
-    if not isinstance(worker, MutableMapping):
-        raise TypeError("worker attempts require WorkerRecord attempt methods")
-    attempts = worker.get("attempts")
-    attempts = attempts if isinstance(attempts, list) else []
-    finalized = []
-    found = False
-    for attempt in attempts:
-        if isinstance(attempt, dict) and attempt.get("id") == attempt_id:
-            updated = deepcopy(attempt)
-            updated.update(deepcopy(fields))
-            finalized.append(updated)
-            found = True
-        else:
-            finalized.append(deepcopy(attempt))
-    if found:
-        worker["attempts"] = finalized
+    _require_attempt_worker(worker).finalize_attempt(attempt_id, fields)
 
 
-def _attempt_api(worker):
-    for method_name in ("new_attempt_record", "append_attempt", "finalize_attempt"):
-        if not callable(getattr(worker, method_name, None)):
-            return None
-    return worker
+def _require_attempt_worker(worker):
+    if isinstance(worker, WorkerRecord):
+        return worker
+    raise TypeError("worker attempts require WorkerRecord; hydrate raw mappings at the storage boundary")
