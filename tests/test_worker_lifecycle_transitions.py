@@ -4,10 +4,12 @@ import unittest
 
 from opencode_session.worker_storage_adapter import worker_snapshot_transition
 from opencode_session.worker_state import (
+    WORKER_TRANSITION_DEFINITIONS,
     WorkerRecord,
     WorkerTransition,
     WorkerTransitionError,
     WorkerTransitionName,
+    WorkerTransitionSpec,
     apply_worker_result,
     apply_worker_transition_to_worker,
     mark_dependency_blocked,
@@ -19,6 +21,7 @@ from opencode_session.worker_state import (
     worker_field,
     worker_has_field,
     worker_output_field,
+    worker_transition_target_lifecycle_state,
     worker_transition_is_legal,
 )
 
@@ -471,6 +474,58 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
         assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
         self.assertEqual(worker_field(worker, "timeout_started_at"), "2026-07-04T00:00:00Z")
+
+    def test_transition_registry_entry_drives_create_legality_target_and_apply(self):
+        class RegistryPayload:
+            def __init__(self, marker):
+                self.marker = marker
+
+        calls = []
+        original_spec = WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE]
+
+        def build_payload(marker):
+            calls.append(("build", marker))
+            return RegistryPayload(marker)
+
+        def resolve_target(transition, payload):
+            calls.append(("target", transition.worker_id, payload.marker))
+            return "active_wait"
+
+        def apply_payload(reducer, transition, payload, target_state):
+            calls.append(("apply", transition.worker_id, payload.marker, target_state))
+            worker = reducer._copy_latest()
+            worker.update({"id": transition.worker_id, "lifecycle_state": target_state})
+            return worker
+
+        WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE] = WorkerTransitionSpec(
+            name=WorkerTransitionName.ACTIVE,
+            source_states=frozenset(("queued",)),
+            target_states=frozenset(("active_wait",)),
+            payload_type=RegistryPayload,
+            payload_constructor=build_payload,
+            target_resolver=resolve_target,
+            applier=apply_payload,
+        )
+        try:
+            queued = normalize_worker({"lifecycle_state": "queued"}, "review")
+            blocked = normalize_worker({"lifecycle_state": "blocked_dependency"}, "review")
+
+            transition = WorkerTransition.create(WorkerTransitionName.ACTIVE, "review", "from-registry")
+
+            self.assertIsInstance(transition.payload, RegistryPayload)
+            self.assertEqual(transition.payload.marker, "from-registry")
+            self.assertEqual(worker_transition_target_lifecycle_state(transition), "active_wait")
+            self.assertTrue(worker_transition_is_legal(queued, transition))
+            self.assertFalse(worker_transition_is_legal(blocked, transition))
+
+            apply_worker_transition_to_worker(queued, transition)
+
+            assert_worker_outcome(self, queued, status="active", action="wait", lifecycle="active_wait")
+            self.assertIn(("build", "from-registry"), calls)
+            self.assertIn(("target", "review", "from-registry"), calls)
+            self.assertIn(("apply", "review", "from-registry", "active_wait"), calls)
+        finally:
+            WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE] = original_spec
 
     def test_dynamic_transitions_apply_expected_public_outcomes(self):
         cases = (
