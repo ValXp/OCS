@@ -11,8 +11,15 @@ from opencode_session.multi_worker_orchestration import (
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_start_core import RunStartCapabilityProbe
 from opencode_session.run_store import RunStore, RunStoreError
+from opencode_session.worker_attempt_log import new_worker_attempt_record
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
-from opencode_session.worker_state import worker_field, worker_output_field
+from opencode_session.worker_state import (
+    WorkerTransition,
+    apply_worker_transition,
+    mark_worker_active,
+    worker_field,
+    worker_output_field,
+)
 
 try:
     from tests.multi_worker_orchestration_helpers import (
@@ -36,6 +43,9 @@ except ModuleNotFoundError:
         FakeClient,
         assert_single_worker_attempt,
     )
+
+
+LATER = "2026-07-03T00:00:01Z"
 
 
 class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
@@ -158,6 +168,102 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(attempt.get("result_status"), "done")
         self.assertEqual(attempt.get("user_message_id"), "msg_user")
         self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
+
+    def test_status_reconciles_stranded_active_attempt_as_timeout(self):
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
+            scenario.add_worker(
+                "worker",
+                prompt="Finish the worker task",
+                session_id="ses_initial",
+                timeout_seconds=0.05,
+            )
+            _seed_stranded_active_attempt(scenario.store)
+            service = RunCommandService(
+                scenario.store,
+                client_factory=lambda url: scenario.client,
+                capability_detector=lambda client: CAPABILITIES,
+                now=lambda: LATER,
+            )
+
+            run = service.load_run(RUN_NAME)
+
+        self.assertEqual(run["status"], "timeout")
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "none")
+        self.assertEqual(worker_field(worker, "failure_category"), "timeout")
+        self.assertEqual(worker_field(worker, "failure_reason"), "worker timed out after 0.05s")
+        self.assertEqual(worker_field(worker, "timeout_started_at"), NOW)
+        self.assertEqual(worker_field(worker, "timed_out_at"), LATER)
+        attempt = assert_single_worker_attempt(self, worker, status="failed", session_id="ses_initial")
+        self.assertEqual(attempt.get("finished_at"), LATER)
+        self.assertEqual(attempt.get("failure_category"), "timeout")
+        self.assertEqual(attempt.get("error"), "worker timed out after 0.05s")
+
+    def test_start_reconciles_stranded_active_attempt_before_planning(self):
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
+            scenario.add_worker(
+                "worker",
+                prompt="Finish the worker task",
+                session_id="ses_initial",
+                timeout_seconds=0.05,
+            )
+            _seed_stranded_active_attempt(scenario.store)
+            service = DependencyOrderedSerialRunOrchestrationService(
+                scenario.store,
+                client_factory=lambda url: scenario.client,
+                capability_detector=lambda client: CAPABILITIES,
+                executor=lambda *args, **kwargs: self.fail("worker should not execute before recovered timeout returns"),
+                now=lambda: LATER,
+            )
+
+            outcome = service.start(scenario.request("worker"))
+            run = scenario.load_run()
+
+        self.assertEqual(outcome.exit_code, 124)
+        self.assertEqual(outcome.error, "worker timed out after 0.05s")
+        self.assertEqual(scenario.client.requests, [])
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker_output_field(worker, "status"), "timeout")
+        self.assertEqual(worker_field(worker, "timed_out_at"), LATER)
+
+    def test_start_after_status_recovery_retries_manual_timeout_worker(self):
+        with DependencyOrderedSerialServiceScenario(self) as scenario:
+            scenario.add_worker(
+                "worker",
+                prompt="Finish the worker task",
+                session_id="ses_initial",
+                timeout_seconds=0.05,
+                retry_limit=1,
+                retryable_failures=["timeout"],
+            )
+            _seed_stranded_active_attempt(scenario.store)
+            status_service = RunCommandService(
+                scenario.store,
+                client_factory=lambda url: scenario.client,
+                capability_detector=lambda client: CAPABILITIES,
+                now=lambda: LATER,
+            )
+            status_run = status_service.load_run(RUN_NAME)
+            executions = []
+
+            def execute_prompt(client, session_id, prompt, capabilities, *, deadline=None):
+                executions.append((session_id, prompt))
+                return {"status": "done", "message_ids": {"user": "msg_retry", "assistant": "msg_done"}}
+
+            outcome = scenario.service(executor=execute_prompt).start(scenario.request("worker"))
+            run = scenario.load_run()
+
+        recovered_worker = status_run["workers"]["worker"]
+        self.assertEqual(worker_output_field(recovered_worker, "status"), "timeout")
+        self.assertEqual(worker_output_field(recovered_worker, "next_eligible_action"), "retry")
+        self.assertTrue(worker_field(recovered_worker, "manual_retry_required"))
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(executions, [("ses_initial", "Finish the worker task")])
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker_output_field(worker, "status"), "done")
+        attempts = worker_field(worker, "attempts")
+        self.assertEqual([attempt.get("status") for attempt in attempts], ["failed", "completed"])
 
     def test_start_persists_worker_session_creation_intent_before_remote_create(self):
         with DependencyOrderedSerialServiceScenario(self) as scenario:
@@ -358,6 +464,16 @@ def _has_created_session_journal(run):
         and entry.get("status") == "created"
         for entry in journal
     )
+
+
+def _seed_stranded_active_attempt(store):
+    def mutate(run):
+        worker = run["workers"]["worker"]
+        active_worker = apply_worker_transition(run["workers"], mark_worker_active(worker, now=lambda: NOW))
+        attempt = new_worker_attempt_record(active_worker, started_at=NOW, created_session_ids=[])
+        apply_worker_transition(run["workers"], WorkerTransition.attempt_started("worker", attempt))
+
+    store.update_run(RUN_NAME, mutate)
 
 
 if __name__ == "__main__":

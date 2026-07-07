@@ -20,6 +20,7 @@ from opencode_session.remote_journal import (
     RemoteMutationRecovery,
     RemoteMutationResult,
 )
+from opencode_session.run_persistence import persist_worker_transitions
 from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_record import RunRecordError, upsert_worker_record
 from opencode_session.run_store import RunStoreError
@@ -29,6 +30,7 @@ from opencode_session.schema_session import NormalizedAbortRecord
 from opencode_session.schema_worker import HydratedWorker
 from opencode_session.status import short_status
 from opencode_session.session_lifecycle import abort_record, is_session_not_found_error
+from opencode_session.worker_active_attempt_recovery import recover_expired_active_attempts
 from opencode_session.worker_state import (
     is_worker_record,
     mark_dependency_blocked,
@@ -123,7 +125,8 @@ class RunCommandService:
         return self.store.create_run(name, directory=directory, server_url=server_url)
 
     def load_run(self, name):
-        return self.store.load_run(name)
+        run = self.store.load_run(name)
+        return self._recover_active_attempts(run)
 
     def upsert_worker(self, name, worker_id, **changes):
         lifecycle_state = changes.pop("lifecycle_state", None)
@@ -317,6 +320,18 @@ class RunCommandService:
             run["updated_at"] = self.now()
 
         return self.store.update_run(name, update)
+
+    def _recover_active_attempts(self, run):
+        recoveries = recover_expired_active_attempts(run.get("workers", {}), now=self.now)
+        if not recoveries:
+            return run
+        return persist_worker_transitions(
+            self.store,
+            run,
+            [recovery.transition for recovery in recoveries],
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        ).run
 
 
 class RunWorkerSessionNotFound(Exception):

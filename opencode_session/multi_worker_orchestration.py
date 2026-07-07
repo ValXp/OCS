@@ -26,6 +26,7 @@ from opencode_session.run_start_core import (
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_run import RunRecord
+from opencode_session.worker_active_attempt_recovery import recover_expired_active_attempts
 from opencode_session.worker_execution import WorkerExecutionExecutor
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
 from opencode_session.worker_dependencies import analyze_worker_dependencies
@@ -123,9 +124,20 @@ class DependencyOrderedSerialRunOrchestrationService:
         return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
 
     def _start_prompted_workers(self, run, *, cleanup=False, execution_policy=EXECUTION_POLICY_FAIL_FAST):
+        run, recovery_error = self._recover_active_attempts(run)
         run, serial_step = self._persist_next_serial_step(run)
+        if recovery_error is not None and execution_policy == EXECUTION_POLICY_FAIL_FAST:
+            return DependencyOrderedSerialRunStartOutcome(
+                run,
+                _exit_code_for_orchestration_run(run),
+                recovery_error,
+            )
         if serial_step.worker_id is None:
-            return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
+            return DependencyOrderedSerialRunStartOutcome(
+                run,
+                _exit_code_for_orchestration_run(run),
+                recovery_error,
+            )
 
         client = None
         created_session_ids_by_worker = {} if cleanup else None
@@ -157,7 +169,26 @@ class DependencyOrderedSerialRunOrchestrationService:
             return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
 
         run, cleanup_error = self._cleanup_disposable_sessions(client, run, created_session_ids_by_worker)
-        return cleanup_error or self._execution_finished_outcome(run, first_error_outcome)
+        first_error = recovery_error or (first_error_outcome.error if first_error_outcome is not None else None)
+        return cleanup_error or DependencyOrderedSerialRunStartOutcome(
+            run,
+            _exit_code_for_orchestration_run(run),
+            first_error,
+        )
+
+    def _recover_active_attempts(self, run):
+        recoveries = recover_expired_active_attempts(run.get("workers", {}), now=self.now)
+        if not recoveries:
+            return run, None
+        result = persist_worker_transitions(
+            self.store,
+            run,
+            [recovery.transition for recovery in recoveries],
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
+        first_error = next((recovery.error for recovery in recoveries if recovery.error is not None), None)
+        return result.run, first_error
 
     def _persist_next_serial_step(self, run):
         step = self._plan_serial_step(run.get("workers", {}))
