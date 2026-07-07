@@ -237,8 +237,8 @@ class RunCommandService:
             admission = result.record
             admitted_worker_id = intent.fields["worker_id"]
             admitted_message_id = admission["message_id"]
-            return RemoteMutationResult(
-                mutate_run=lambda latest_run: _remember_prompt_id(
+            return RemoteMutationResult.finalize(
+                run_update=lambda latest_run: _remember_prompt_id(
                     latest_run,
                     admitted_worker_id,
                     admitted_message_id,
@@ -283,8 +283,8 @@ class RunCommandService:
         def apply_result(response, intent):
             aborted_worker_id = intent.fields["worker_id"]
             aborted_session_id = intent.fields["session_id"]
-            return RemoteMutationResult(
-                mutate_run=lambda latest_run: _apply_abort_worker(
+            return RemoteMutationResult.finalize(
+                run_update=lambda latest_run: _apply_abort_worker(
                     latest_run,
                     aborted_worker_id,
                     aborted_session_id,

@@ -8,6 +8,7 @@ from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
 )
+from opencode_session.remote_journal import OUTBOX_STATE_APPLIED, OUTBOX_STATE_INTENT
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_start_core import RunStartCapabilityProbe
 from opencode_session.run_store import RunStore, RunStoreError
@@ -304,7 +305,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         )
         entry = observed_intent["entry"]
         self.assertEqual(entry["kind"], "worker_session_create")
-        self.assertEqual(entry["status"], "intent")
+        self.assertEqual(entry["outbox_state"], OUTBOX_STATE_INTENT)
         self.assertEqual(entry["worker_id"], "worker")
         self.assertEqual(entry["directory"], scenario.directory)
         self.assertEqual(entry["agent"], "build")
@@ -355,7 +356,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(len(journal), 1)
         entry = journal[0]
         self.assertEqual(entry["kind"], "worker_session_create")
-        self.assertEqual(entry["status"], "created")
+        self.assertEqual(entry["outbox_state"], OUTBOX_STATE_APPLIED)
         self.assertEqual(entry["worker_id"], "worker")
         self.assertEqual(entry["session_id"], "ses_initial")
         self.assertEqual(entry["created_session_ids"], ["ses_initial"])
@@ -461,7 +462,7 @@ def _has_created_session_journal(run):
     return any(
         isinstance(entry, dict)
         and entry.get("kind") == "worker_session_create"
-        and entry.get("status") == "created"
+        and entry.get("outbox_state") == OUTBOX_STATE_APPLIED
         for entry in journal
     )
 

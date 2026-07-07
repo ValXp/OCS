@@ -6,7 +6,44 @@ from opencode_session.run_store import RunStoreError
 
 
 _PERSISTENCE_ERRORS = (RunStoreError, OSError)
-_RESERVED_RECORD_FIELDS = {"id", "kind"}
+_RECORD_IDENTITY_FIELDS = {"id", "kind"}
+OUTBOX_STATE_INTENT = "intent"
+OUTBOX_STATE_APPLIED = "applied"
+OUTBOX_STATE_UNCERTAIN = "uncertain"
+_PENDING_OUTBOX_STATES = frozenset(
+    {
+        OUTBOX_STATE_INTENT,
+        OUTBOX_STATE_APPLIED,
+        OUTBOX_STATE_UNCERTAIN,
+    }
+)
+_LEGACY_STATUS_OUTBOX_STATES = {
+    "intent": OUTBOX_STATE_INTENT,
+    "created": OUTBOX_STATE_APPLIED,
+    "applied": OUTBOX_STATE_APPLIED,
+    "uncertain": OUTBOX_STATE_UNCERTAIN,
+}
+_RESERVED_RECORD_FIELDS = {*_RECORD_IDENTITY_FIELDS, "outbox_state"}
+
+MISSING_INTENT_IGNORE = "ignore"
+MISSING_INTENT_RECORD_APPLIED = "record_applied"
+_MISSING_INTENT_POLICIES = frozenset(
+    {
+        MISSING_INTENT_IGNORE,
+        MISSING_INTENT_RECORD_APPLIED,
+    }
+)
+
+REMOTE_MUTATION_RESULT_FINALIZE = "finalize"
+REMOTE_MUTATION_RESULT_KEEP_PENDING = "keep_pending"
+REMOTE_MUTATION_RESULT_RECORD_APPLIED = "record_applied"
+_REMOTE_MUTATION_RESULT_ACTIONS = frozenset(
+    {
+        REMOTE_MUTATION_RESULT_FINALIZE,
+        REMOTE_MUTATION_RESULT_KEEP_PENDING,
+        REMOTE_MUTATION_RESULT_RECORD_APPLIED,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -66,16 +103,52 @@ class RemoteMutationOperation:
 
 @dataclass(frozen=True)
 class RemoteMutationResult:
-    journal_record: Optional[RemoteJournalRecord] = None
-    mutate_run: Optional[object] = None
-    append_if_missing: bool = False
-    finalize: bool = True
+    outbox_action: str = REMOTE_MUTATION_RESULT_FINALIZE
+    applied_record: Optional[RemoteJournalRecord] = None
+    run_update: Optional[object] = None
+    missing_intent_policy: str = MISSING_INTENT_IGNORE
+
+    @classmethod
+    def finalize(cls, *, run_update=None):
+        return cls(
+            outbox_action=REMOTE_MUTATION_RESULT_FINALIZE,
+            run_update=run_update,
+        )
+
+    @classmethod
+    def keep_pending(cls):
+        return cls(outbox_action=REMOTE_MUTATION_RESULT_KEEP_PENDING)
+
+    @classmethod
+    def record_applied(
+        cls,
+        record,
+        *,
+        run_update=None,
+        missing_intent_policy=MISSING_INTENT_IGNORE,
+    ):
+        return cls(
+            outbox_action=REMOTE_MUTATION_RESULT_RECORD_APPLIED,
+            applied_record=record,
+            run_update=run_update,
+            missing_intent_policy=missing_intent_policy,
+        )
 
     def __post_init__(self):
-        if self.journal_record is not None and not isinstance(self.journal_record, RemoteJournalRecord):
-            raise TypeError("remote mutation journal_record must be a RemoteJournalRecord")
-        if self.mutate_run is not None and not callable(self.mutate_run):
+        _require_known_result_action(self.outbox_action)
+        _require_known_missing_intent_policy(self.missing_intent_policy)
+        if self.run_update is not None and not callable(self.run_update):
             raise TypeError("remote mutation run update must be callable")
+        if self.outbox_action == REMOTE_MUTATION_RESULT_RECORD_APPLIED:
+            if not isinstance(self.applied_record, RemoteJournalRecord):
+                raise TypeError("remote mutation applied_record must be a RemoteJournalRecord")
+            return
+        if self.applied_record is not None:
+            raise ValueError("remote mutation applied records require record_applied outbox action")
+        if self.missing_intent_policy != MISSING_INTENT_IGNORE:
+            raise ValueError("remote mutation missing intent policy requires record_applied outbox action")
+        if self.outbox_action == REMOTE_MUTATION_RESULT_KEEP_PENDING and self.run_update is not None:
+            raise ValueError("remote mutation run updates require finalization or an applied record")
 
 
 @dataclass(frozen=True)
@@ -115,37 +188,39 @@ class RemoteMutationTransaction:
     def runner(self):
         return RemoteMutationRunner(self)
 
-    def mark_applied(self, run, record, *, mutate_run=None, append_if_missing=False):
+    def mark_applied(
+        self,
+        run,
+        record,
+        *,
+        run_update=None,
+        missing_intent_policy=MISSING_INTENT_IGNORE,
+    ):
         self._validate_record_identity(record)
         return self.journal.mark_applied(
             run,
             self.entry_id,
             record,
-            mutate_run=mutate_run,
-            append_if_missing=append_if_missing,
+            run_update=run_update,
+            missing_intent_policy=missing_intent_policy,
         )
 
-    def finalize(self, run, *, mutate_run=None):
-        return self.journal.finalize(run, self.entry_id, mutate_run=mutate_run)
+    def finalize(self, run, *, run_update=None):
+        return self.journal.finalize(run, self.entry_id, run_update=run_update)
 
     def apply_result(self, run, result):
         if not isinstance(result, RemoteMutationResult):
             raise TypeError("remote mutation result must be a RemoteMutationResult")
-        if result.journal_record is not None:
-            run = self.mark_applied(
+        if result.outbox_action == REMOTE_MUTATION_RESULT_RECORD_APPLIED:
+            return self.mark_applied(
                 run,
-                result.journal_record,
-                mutate_run=result.mutate_run,
-                append_if_missing=result.append_if_missing,
+                result.applied_record,
+                run_update=result.run_update,
+                missing_intent_policy=result.missing_intent_policy,
             )
-            if result.finalize:
-                return self.finalize(run)
+        if result.outbox_action == REMOTE_MUTATION_RESULT_KEEP_PENDING:
             return run
-        if result.mutate_run is not None and not result.finalize:
-            raise ValueError("remote mutation run updates require a journal record or finalization")
-        if result.finalize:
-            return self.finalize(run, mutate_run=result.mutate_run)
-        return run
+        return self.finalize(run, run_update=result.run_update)
 
     def discard_intent_best_effort(self, run):
         return self.journal.discard_intent_best_effort(
@@ -195,11 +270,11 @@ class RemoteMutationRunner:
             self.transaction.mark_uncertain_best_effort(run, remote_error)
             raise
 
-        result = RemoteMutationResult()
+        result = RemoteMutationResult.finalize()
         if apply_result is not None:
             result = apply_result(remote_result, intent)
             if result is None:
-                result = RemoteMutationResult()
+                result = RemoteMutationResult.finalize()
         run = self.transaction.apply_result(run, result)
         return RemoteMutationExecution(run=run, remote_result=remote_result, intent=intent)
 
@@ -208,8 +283,11 @@ class RemoteMutationRecovery:
     def __init__(self, field):
         self.journal = RemoteMutationJournal(field)
 
-    def pending_entries(self, run, *, kind=None):
-        return self.journal.pending_entries(run, kind=kind)
+    def pending_entries(self, run, *, kind=None, outbox_states=None):
+        return self.journal.pending_entries(run, kind=kind, outbox_states=outbox_states)
+
+    def applied_entries(self, run, *, kind=None):
+        return self.pending_entries(run, kind=kind, outbox_states=(OUTBOX_STATE_APPLIED,))
 
     def values_by_owner(
         self,
@@ -220,9 +298,10 @@ class RemoteMutationRecovery:
         value_fields=(),
         list_fields=(),
         required_fields=None,
+        outbox_states=None,
     ):
         values_by_owner = {}
-        for entry in self.pending_entries(run, kind=kind):
+        for entry in self.pending_entries(run, kind=kind, outbox_states=outbox_states):
             if not self._matches_required_fields(entry, required_fields):
                 continue
             owner = entry.get(owner_field)
@@ -253,15 +332,23 @@ class RemoteMutationJournal:
         journal = run.get(self.field)
         if not isinstance(journal, list):
             journal = []
-        journal.append(_journal_entry(entry))
+        journal.append(_with_outbox_state(_journal_entry(entry), OUTBOX_STATE_INTENT))
         run[self.field] = journal
 
-    def mark_applied(self, run, entry_id, record, *, append_if_missing=False):
+    def mark_applied(
+        self,
+        run,
+        entry_id,
+        record,
+        *,
+        missing_intent_policy=MISSING_INTENT_IGNORE,
+    ):
+        _require_known_missing_intent_policy(missing_intent_policy)
         journal = run.get(self.field)
         if not isinstance(journal, list):
             journal = []
             run[self.field] = journal
-        entry = _journal_entry(record)
+        entry = _with_outbox_state(_journal_entry(record), OUTBOX_STATE_APPLIED)
         if entry.get("id") != entry_id:
             raise ValueError(f"remote journal record id must be {entry_id!r}")
         update = _journal_update(entry)
@@ -269,7 +356,7 @@ class RemoteMutationJournal:
             if isinstance(journal_entry, dict) and journal_entry.get("id") == entry_id:
                 journal_entry.update(update)
                 return
-        if append_if_missing:
+        if missing_intent_policy == MISSING_INTENT_RECORD_APPLIED:
             journal.append(entry)
 
     def finalize(self, run, entry_id):
@@ -298,18 +385,22 @@ class RemoteMutationJournal:
             return
         for entry in journal:
             if isinstance(entry, dict) and entry.get("id") == entry_id:
+                entry["outbox_state"] = OUTBOX_STATE_UNCERTAIN
                 entry["status"] = "uncertain"
                 entry["uncertain_failure"] = dict(uncertainty)
                 return
 
-    def pending_entries(self, run, *, kind=None):
+    def pending_entries(self, run, *, kind=None, outbox_states=None):
         journal = run.get(self.field) if isinstance(run, dict) else None
         if not isinstance(journal, list):
             return ()
+        requested_states = _normalize_outbox_states(outbox_states)
         return tuple(
             entry
             for entry in journal
-            if isinstance(entry, dict) and (kind is None or entry.get("kind") == kind)
+            if isinstance(entry, dict)
+            and (kind is None or entry.get("kind") == kind)
+            and _entry_outbox_state(entry) in requested_states
         )
 
 
@@ -345,18 +436,26 @@ class PersistedRemoteMutationJournal:
             raise RuntimeError("remote mutation persistence did not record an intent")
         return RecordedIntent(run=persisted_run, intent=intent)
 
-    def mark_applied(self, run, entry_id, record, *, mutate_run=None, append_if_missing=False):
+    def mark_applied(
+        self,
+        run,
+        entry_id,
+        record,
+        *,
+        run_update=None,
+        missing_intent_policy=MISSING_INTENT_IGNORE,
+    ):
         def persisted_mutation(latest_run):
-            if mutate_run is not None:
-                _apply_run_update(mutate_run, latest_run)
-            self.journal.mark_applied(latest_run, entry_id, record, append_if_missing=append_if_missing)
+            if run_update is not None:
+                _apply_run_update(run_update, latest_run)
+            self.journal.mark_applied(latest_run, entry_id, record, missing_intent_policy=missing_intent_policy)
 
         return self.persist_run_mutation(run, persisted_mutation)
 
-    def finalize(self, run, entry_id, *, mutate_run=None):
+    def finalize(self, run, entry_id, *, run_update=None):
         def persisted_mutation(latest_run):
-            if mutate_run is not None:
-                _apply_run_update(mutate_run, latest_run)
+            if run_update is not None:
+                _apply_run_update(run_update, latest_run)
             self.journal.finalize(latest_run, entry_id)
 
         return self.persist_run_mutation(run, persisted_mutation)
@@ -367,8 +466,8 @@ class PersistedRemoteMutationJournal:
     def finalize_best_effort(self, run, entry_id, *, operation):
         return self._finalize_best_effort(run, entry_id, operation=operation)
 
-    def pending_entries(self, run, *, kind=None):
-        return self.journal.pending_entries(run, kind=kind)
+    def pending_entries(self, run, *, kind=None, outbox_states=None):
+        return self.journal.pending_entries(run, kind=kind, outbox_states=outbox_states)
 
     def mark_uncertain_best_effort(self, run, entry_id, remote_error, *, operation):
         uncertainty = {
@@ -441,8 +540,55 @@ def _journal_entry(record):
     return dict(entry)
 
 
+def _with_outbox_state(entry, outbox_state):
+    _require_known_outbox_state(outbox_state)
+    entry = dict(entry)
+    entry["outbox_state"] = outbox_state
+    return entry
+
+
 def _journal_update(entry):
-    return {key: value for key, value in entry.items() if key not in _RESERVED_RECORD_FIELDS}
+    return {key: value for key, value in entry.items() if key not in _RECORD_IDENTITY_FIELDS}
+
+
+def _normalize_outbox_states(outbox_states):
+    if outbox_states is None:
+        return _PENDING_OUTBOX_STATES
+    if isinstance(outbox_states, str):
+        outbox_states = (outbox_states,)
+    normalized = []
+    for outbox_state in outbox_states:
+        _require_known_outbox_state(outbox_state)
+        normalized.append(outbox_state)
+    return frozenset(normalized)
+
+
+def _entry_outbox_state(entry):
+    outbox_state = entry.get("outbox_state")
+    if outbox_state in _PENDING_OUTBOX_STATES:
+        return outbox_state
+    if outbox_state is not None:
+        return None
+    legacy_status = entry.get("status")
+    return _LEGACY_STATUS_OUTBOX_STATES.get(legacy_status, OUTBOX_STATE_INTENT)
+
+
+def _require_known_outbox_state(outbox_state):
+    if outbox_state not in _PENDING_OUTBOX_STATES:
+        names = ", ".join(sorted(_PENDING_OUTBOX_STATES))
+        raise ValueError(f"remote mutation outbox state must be one of {names}")
+
+
+def _require_known_missing_intent_policy(missing_intent_policy):
+    if missing_intent_policy not in _MISSING_INTENT_POLICIES:
+        names = ", ".join(sorted(_MISSING_INTENT_POLICIES))
+        raise ValueError(f"remote mutation missing intent policy must be one of {names}")
+
+
+def _require_known_result_action(outbox_action):
+    if outbox_action not in _REMOTE_MUTATION_RESULT_ACTIONS:
+        names = ", ".join(sorted(_REMOTE_MUTATION_RESULT_ACTIONS))
+        raise ValueError(f"remote mutation result action must be one of {names}")
 
 
 def _require_non_empty_string(value, field_name):

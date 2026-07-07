@@ -1,6 +1,10 @@
 import unittest
 
 from opencode_session.remote_journal import (
+    MISSING_INTENT_RECORD_APPLIED,
+    OUTBOX_STATE_APPLIED,
+    OUTBOX_STATE_INTENT,
+    OUTBOX_STATE_UNCERTAIN,
     PersistedRemoteMutationJournal,
     RecordedIntent,
     RemoteJournalRecord,
@@ -27,8 +31,11 @@ def intent_record(record_id="mutation-1", kind="prompt", session_id="ses_1", *, 
     return RemoteJournalRecord(record_id, kind, fields)
 
 
-def applied_record(record_id="mutation-1", kind="prompt", status="applied"):
-    return RemoteJournalRecord(record_id, kind, {"status": status})
+def applied_record(record_id="mutation-1", kind="prompt", status="applied", *, message_id=None):
+    fields = {"status": status}
+    if message_id is not None:
+        fields["message_id"] = message_id
+    return RemoteJournalRecord(record_id, kind, fields)
 
 
 def remember_message(message_id):
@@ -63,6 +70,9 @@ class RemoteMutationJournalTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "kind"):
             RemoteJournalRecord("mutation-1", "prompt", {"kind": "other"})
 
+        with self.assertRaisesRegex(ValueError, "outbox_state"):
+            RemoteJournalRecord("mutation-1", "prompt", {"outbox_state": OUTBOX_STATE_INTENT})
+
     def test_journal_rejects_untyped_record_writes(self):
         journal = RemoteMutationJournal("journal")
 
@@ -90,6 +100,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
                 {
                     "id": "mutation-1",
                     "kind": "prompt",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
                     "session_id": "ses_1",
                     "message_id": "msg_1",
                     "status": "applied",
@@ -98,9 +109,49 @@ class RemoteMutationJournalTest(unittest.TestCase):
         )
 
         journal.finalize(run, "mutation-1")
-        self.assertEqual(run["journal"], [{"id": "mutation-2", "kind": "abort", "session_id": "ses_1"}])
+        self.assertEqual(
+            run["journal"],
+            [
+                {
+                    "id": "mutation-2",
+                    "kind": "abort",
+                    "outbox_state": OUTBOX_STATE_INTENT,
+                    "session_id": "ses_1",
+                }
+            ],
+        )
         journal.finalize(run, "mutation-2")
         self.assertNotIn("journal", run)
+
+    def test_pending_entries_are_state_aware_and_preserve_legacy_pending_entries(self):
+        run = {
+            "journal": [
+                {"id": "intent", "kind": "prompt", "outbox_state": OUTBOX_STATE_INTENT},
+                {"id": "applied", "kind": "prompt", "outbox_state": OUTBOX_STATE_APPLIED},
+                {"id": "uncertain", "kind": "prompt", "outbox_state": OUTBOX_STATE_UNCERTAIN},
+                {"id": "legacy-created", "kind": "prompt", "status": "created"},
+                {"id": "legacy-pending", "kind": "prompt"},
+                {"id": "finalized", "kind": "prompt", "outbox_state": "finalized"},
+                {"id": "other", "kind": "abort", "outbox_state": OUTBOX_STATE_APPLIED},
+            ]
+        }
+        journal = RemoteMutationJournal("journal")
+
+        self.assertEqual(
+            tuple(entry["id"] for entry in journal.pending_entries(run, kind="prompt")),
+            ("intent", "applied", "uncertain", "legacy-created", "legacy-pending"),
+        )
+        self.assertEqual(
+            tuple(
+                entry["id"]
+                for entry in journal.pending_entries(
+                    run,
+                    kind="prompt",
+                    outbox_states=(OUTBOX_STATE_APPLIED,),
+                )
+            ),
+            ("applied", "legacy-created"),
+        )
 
     def test_mark_applied_rejects_record_id_mismatch(self):
         journal = RemoteMutationJournal("journal")
@@ -223,6 +274,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
                 {
                     "id": "mutation-1",
                     "kind": "prompt",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
                     "session_id": "ses_latest",
                     "message_id": "msg_1",
                     "status": "applied",
@@ -280,7 +332,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
             return {"message_id": "msg_1"}
 
         def apply_result(remote_result, intent):
-            return RemoteMutationResult(mutate_run=remember_message(remote_result["message_id"]))
+            return RemoteMutationResult.finalize(run_update=remember_message(remote_result["message_id"]))
 
         execution = transaction.runner().execute(
             run,
@@ -314,11 +366,62 @@ class RemoteMutationJournalTest(unittest.TestCase):
             run,
             intent_factory=lambda latest_run: intent_record(),
             call_remote=lambda latest_run, intent: {"created_session_id": None},
-            apply_result=lambda remote_result, intent: RemoteMutationResult(finalize=False),
+            apply_result=lambda remote_result, intent: RemoteMutationResult.keep_pending(),
         )
 
         self.assertIs(execution.run, run)
-        self.assertEqual(run["journal"], [{"id": "mutation-1", "kind": "prompt", "session_id": "ses_1"}])
+        self.assertEqual(
+            run["journal"],
+            [
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "outbox_state": OUTBOX_STATE_INTENT,
+                    "session_id": "ses_1",
+                }
+            ],
+        )
+
+    def test_runner_records_remote_applied_state_without_finalizing(self):
+        run = {"name": "demo"}
+
+        def persist_run_mutation(run, mutator):
+            mutator(run)
+            return run
+
+        journal = PersistedRemoteMutationJournal(
+            "journal",
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+        )
+        transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
+
+        execution = transaction.runner().execute(
+            run,
+            intent_factory=lambda latest_run: intent_record(),
+            call_remote=lambda latest_run, intent: {"message_id": "msg_1"},
+            apply_result=lambda remote_result, intent: RemoteMutationResult.record_applied(
+                applied_record(message_id=remote_result["message_id"]),
+                run_update=remember_message(remote_result["message_id"]),
+                missing_intent_policy=MISSING_INTENT_RECORD_APPLIED,
+            ),
+        )
+
+        self.assertIs(execution.run, run)
+        self.assertEqual(run["applied_message_id"], "msg_1")
+        self.assertEqual(
+            run["journal"],
+            [
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
+                    "session_id": "ses_1",
+                    "message_id": "msg_1",
+                    "status": "applied",
+                }
+            ],
+        )
 
     def test_runner_marks_intent_uncertain_after_remote_failure(self):
         run = {"name": "demo"}
@@ -353,6 +456,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
                 {
                     "id": "mutation-1",
                     "kind": "prompt",
+                    "outbox_state": OUTBOX_STATE_UNCERTAIN,
                     "session_id": "ses_1",
                     "status": "uncertain",
                     "uncertain_failure": {
@@ -426,7 +530,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
         transaction = journal.transaction("mutation-1", PROMPT_OPERATION)
 
         def apply_result(remote_result, intent):
-            return RemoteMutationResult(mutate_run=remember_message(remote_result["message_id"]))
+            return RemoteMutationResult.finalize(run_update=remember_message(remote_result["message_id"]))
 
         with self.assertRaisesRegex(RunStoreError, "forced finalize failure"):
             transaction.runner().execute(
@@ -438,7 +542,17 @@ class RemoteMutationJournalTest(unittest.TestCase):
 
         self.assertEqual(calls, ["persist", "persist"])
         self.assertNotIn("applied_message_id", run)
-        self.assertEqual(run["journal"], [{"id": "mutation-1", "kind": "prompt", "session_id": "ses_1"}])
+        self.assertEqual(
+            run["journal"],
+            [
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "outbox_state": OUTBOX_STATE_INTENT,
+                    "session_id": "ses_1",
+                }
+            ],
+        )
 
     def test_recovery_collects_unique_values_by_owner_from_pending_transactions(self):
         run = {

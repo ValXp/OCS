@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from opencode_session.remote_journal import OUTBOX_STATE_UNCERTAIN
 from opencode_session.run_services import (
     REMOTE_MUTATION_JOURNAL_FIELD,
     RunCommandService,
@@ -284,7 +285,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "steer_prompt")
         self.assertEqual(journal["message_id"], "msg_steer_1")
-        self.assertEqual(journal["status"], "uncertain")
+        self.assertEqual(journal["outbox_state"], OUTBOX_STATE_UNCERTAIN)
         self.assertEqual(journal["uncertain_failure"]["operation"], "call_steer_prompt")
         self.assertEqual(journal["uncertain_failure"]["error_type"], "RuntimeError")
         self.assertEqual(journal["uncertain_failure"]["message"], "remote prompt rejected")
@@ -430,7 +431,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "abort_worker")
         self.assertEqual(journal["session_id"], "ses_plan")
-        self.assertEqual(journal["status"], "uncertain")
+        self.assertEqual(journal["outbox_state"], OUTBOX_STATE_UNCERTAIN)
         self.assertEqual(journal["uncertain_failure"]["operation"], "call_abort_worker")
         self.assertEqual(journal["uncertain_failure"]["error_type"], "RuntimeError")
         self.assertEqual(journal["uncertain_failure"]["message"], "remote abort rejected")

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from opencode_session.remote_journal import (
+    MISSING_INTENT_RECORD_APPLIED,
     PersistedRemoteMutationJournal,
     RemoteJournalRecord,
     RemoteMutationOperation,
@@ -101,7 +102,7 @@ class WorkerSessionCreationJournal:
 
         def apply_created_session(session_outcome, intent):
             if session_outcome.created_session_id is None:
-                return RemoteMutationResult(finalize=False)
+                return RemoteMutationResult.keep_pending()
             return self._created_session_result(
                 intent,
                 session_outcome.created_session_id,
@@ -137,9 +138,9 @@ class WorkerSessionCreationJournal:
         result = self._created_session_result(intent, session_id, agent=agent, model=model)
         updated_run = self._transaction(intent).mark_applied(
             run,
-            result.journal_record,
-            mutate_run=result.mutate_run,
-            append_if_missing=result.append_if_missing,
+            result.applied_record,
+            run_update=result.run_update,
+            missing_intent_policy=result.missing_intent_policy,
         )
         return updated_run, _latest_worker(updated_run, worker)
 
@@ -303,7 +304,7 @@ def worker_session_creation_metadata(run, intent):
 
 def recoverable_worker_session_creations_by_worker(run):
     session_ids_by_worker = {}
-    for entry in _WORKER_SESSION_RECOVERY.pending_entries(run, kind=WORKER_SESSION_CREATE_KIND):
+    for entry in _WORKER_SESSION_RECOVERY.applied_entries(run, kind=WORKER_SESSION_CREATE_KIND):
         creation = WorkerSessionCreationJournalEntry.from_journal_entry(entry)
         if creation is None or not creation.cleanup_requested:
             continue
@@ -324,7 +325,6 @@ def _worker_session_creation_intent(
     intent_recorded_at=None,
 ):
     fields = {
-        "status": "intent",
         "worker_id": worker.worker_id,
         "directory": run.get("directory"),
         "cleanup_requested": bool(cleanup_requested),
@@ -344,20 +344,19 @@ def _worker_session_creation_intent(
 def _created_session_result(intent, session_id, *, created_at, agent=None, model=None):
     worker_id = intent.fields["worker_id"]
     cleanup_requested = intent.fields.get("cleanup_requested") is True
-    return RemoteMutationResult(
-        journal_record=RemoteJournalRecord(
+    return RemoteMutationResult.record_applied(
+        RemoteJournalRecord(
             id=intent.id,
             kind=WORKER_SESSION_CREATE_KIND,
             fields={
                 "worker_id": worker_id,
                 "cleanup_requested": cleanup_requested,
-                "status": "created",
                 "session_id": session_id,
                 "created_session_ids": [session_id],
                 "created_at": created_at,
             },
         ),
-        mutate_run=lambda latest_run: _apply_created_worker_session(
+        run_update=lambda latest_run: _apply_created_worker_session(
             latest_run,
             worker_id,
             session_id,
@@ -365,8 +364,7 @@ def _created_session_result(intent, session_id, *, created_at, agent=None, model
             agent=agent,
             model=model,
         ),
-        append_if_missing=True,
-        finalize=False,
+        missing_intent_policy=MISSING_INTENT_RECORD_APPLIED,
     )
 
 

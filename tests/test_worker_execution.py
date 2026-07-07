@@ -7,6 +7,11 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.run_record import run_record_for_output
 from opencode_session.run_store import RunStoreError
+from opencode_session.remote_journal import (
+    OUTBOX_STATE_APPLIED,
+    OUTBOX_STATE_INTENT,
+    OUTBOX_STATE_UNCERTAIN,
+)
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
 from opencode_session.worker_cleanup_recovery import (
     cleanup_created_worker_sessions,
@@ -120,7 +125,6 @@ class WorkerExecutionTest(unittest.TestCase):
             {
                 "id": "worker-session-intent-1",
                 "kind": "worker_session_create",
-                "status": "intent",
                 "worker_id": "worker",
                 "directory": "/workspace",
                 "agent": "build",
@@ -129,6 +133,7 @@ class WorkerExecutionTest(unittest.TestCase):
                 "intent_recorded_at": "2026-07-05T00:00:00Z",
             },
         )
+        self.assertEqual(run[WORKER_SESSION_JOURNAL_FIELD][0]["outbox_state"], OUTBOX_STATE_INTENT)
 
         run, worker = journal.record_created(
             run,
@@ -144,7 +149,7 @@ class WorkerExecutionTest(unittest.TestCase):
             {
                 "id": "worker-session-intent-1",
                 "kind": "worker_session_create",
-                "status": "created",
+                "outbox_state": OUTBOX_STATE_APPLIED,
                 "worker_id": "worker",
                 "directory": "/workspace",
                 "agent": "build",
@@ -287,7 +292,7 @@ class WorkerExecutionTest(unittest.TestCase):
         entry = run[WORKER_SESSION_JOURNAL_FIELD][0]
         self.assertEqual(entry["id"], "worker-session-intent-1")
         self.assertEqual(entry["kind"], "worker_session_create")
-        self.assertEqual(entry["status"], "intent")
+        self.assertEqual(entry["outbox_state"], OUTBOX_STATE_INTENT)
         self.assertTrue(entry["cleanup_requested"])
         self.assertEqual(
             entry["cleanup_failure"],
@@ -355,7 +360,7 @@ class WorkerExecutionTest(unittest.TestCase):
         entry = run[WORKER_SESSION_JOURNAL_FIELD][0]
         self.assertEqual(entry["id"], "worker-session-intent-1")
         self.assertEqual(entry["kind"], "worker_session_create")
-        self.assertEqual(entry["status"], "uncertain")
+        self.assertEqual(entry["outbox_state"], OUTBOX_STATE_UNCERTAIN)
         self.assertTrue(entry["cleanup_requested"])
         self.assertEqual(
             entry["uncertain_failure"],
@@ -413,8 +418,8 @@ class WorkerExecutionTest(unittest.TestCase):
         )
         self.assertEqual(provisioning.outcome.session_id, "ses_new")
         self.assertEqual(provisioning.outcome.created_session_id, "ses_new")
-        self.assertEqual(journals[0][0]["status"], "intent")
-        self.assertEqual(journals[1][0]["status"], "created")
+        self.assertEqual(journals[0][0]["outbox_state"], OUTBOX_STATE_INTENT)
+        self.assertEqual(journals[1][0]["outbox_state"], OUTBOX_STATE_APPLIED)
         self.assertIs(provisioning.worker, run["workers"]["worker"])
         self.assertEqual(worker_field(provisioning.worker, "session_id"), "ses_new")
         self.assertEqual(
@@ -537,6 +542,7 @@ class WorkerExecutionTest(unittest.TestCase):
                 {
                     "id": "worker-session-intent-1",
                     "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
                     "worker_id": "worker",
                     "cleanup_requested": True,
                     "created_session_ids": ["ses_duplicate", "ses_created"],
@@ -545,6 +551,7 @@ class WorkerExecutionTest(unittest.TestCase):
                 {
                     "id": "worker-session-intent-2",
                     "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
                     "worker_id": "other",
                     "cleanup_requested": True,
                     "session_id": "ses_other",
@@ -552,9 +559,18 @@ class WorkerExecutionTest(unittest.TestCase):
                 {
                     "id": "worker-session-intent-3",
                     "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
                     "worker_id": "skipped",
                     "cleanup_requested": False,
                     "session_id": "ses_skipped",
+                },
+                {
+                    "id": "worker-session-intent-4",
+                    "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_INTENT,
+                    "worker_id": "pending",
+                    "cleanup_requested": True,
+                    "session_id": "ses_pending",
                 },
             ],
         }
@@ -573,6 +589,7 @@ class WorkerExecutionTest(unittest.TestCase):
                 {
                     "id": "worker-session-intent-1",
                     "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
                     "worker_id": "worker",
                     "cleanup_requested": True,
                     "created_session_ids": ["ses_created", "ses_duplicate"],
@@ -581,9 +598,18 @@ class WorkerExecutionTest(unittest.TestCase):
                 {
                     "id": "worker-session-intent-2",
                     "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_APPLIED,
                     "worker_id": "skipped",
                     "cleanup_requested": False,
                     "session_id": "ses_skipped",
+                },
+                {
+                    "id": "worker-session-intent-3",
+                    "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_INTENT,
+                    "worker_id": "pending",
+                    "cleanup_requested": True,
+                    "session_id": "ses_pending",
                 },
             ]
         }
