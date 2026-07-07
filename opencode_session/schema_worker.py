@@ -89,6 +89,16 @@ class Worker(WorkerRequiredFields, total=False):
     result: JsonObject
 
 
+class WorkerTransitionRecord(Protocol):
+    """Schema-side transition shape; avoids importing worker_state at this boundary."""
+
+    @property
+    def worker_id(self) -> str: ...
+
+    @property
+    def name(self) -> str: ...
+
+
 class HydratedWorker(Protocol):
     """Runtime worker record hydrated from a persisted snapshot."""
 
@@ -188,9 +198,9 @@ class HydratedWorker(Protocol):
     @property
     def has_prompt(self) -> bool: ...
 
-    def retry_available(self, category: object = None) -> bool: ...
+    def retry_available(self, category: Optional[str] = None) -> bool: ...
 
-    def apply_transition(self, transition: object) -> "HydratedWorker": ...
+    def apply_transition(self, transition: WorkerTransitionRecord) -> "HydratedWorker": ...
 
     def remember_prompt_id(self, prompt_id: Optional[str]) -> "HydratedWorker": ...
 

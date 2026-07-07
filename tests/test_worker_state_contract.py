@@ -1,4 +1,5 @@
 import unittest
+from typing import get_args
 
 from opencode_session.worker_storage_adapter import (
     hydrate_worker_record,
@@ -13,6 +14,7 @@ from opencode_session.schema_worker import (
 )
 from opencode_session.worker_state import (
     WORKER_FIELD_SPECS,
+    WORKER_FIELD_VALIDATOR_NAMES,
     WORKER_LIST_FIELDS,
     WORKER_OPTIONAL_LIST_FIELDS,
     WORKER_RECORD_CANONICAL_FIELD_NAMES,
@@ -28,8 +30,13 @@ from opencode_session.worker_state import (
     WORKER_STORAGE_INT_FIELD_NAMES,
     WORKER_STORAGE_LIST_FIELD_NAMES,
     WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
+    WorkerFieldSpec,
+    WorkerFieldValidatorName,
     WorkerRecord,
+    WorkerTransitionName,
     worker_default_snapshot_fields,
+    _WORKER_TRANSITION_SPECS,
+    _WorkerTransitionSpec,
 )
 
 
@@ -161,6 +168,28 @@ class WorkerStateContractTest(unittest.TestCase):
             tuple(WorkerRequiredFields.__annotations__),
         )
         self.assertEqual(SCHEMA_WORKER_REQUIRED_FIELD_NAMES, WORKER_REQUIRED_FIELD_NAMES)
+
+    def test_worker_type_boundary_uses_explicit_contracts(self):
+        transition_annotations = _WorkerTransitionSpec.__annotations__
+
+        for field_name in ("payload_type", "payload_factory", "reducer", "target_resolver"):
+            with self.subTest(field_name=field_name):
+                self.assertIsNot(transition_annotations[field_name], object)
+
+        for spec in _WORKER_TRANSITION_SPECS:
+            with self.subTest(transition=spec.name.value):
+                self.assertIsInstance(spec.name, WorkerTransitionName)
+                self.assertIsInstance(spec.payload_type, type)
+                self.assertTrue(callable(spec.payload_factory))
+                self.assertTrue(callable(spec.reducer))
+                self.assertTrue(callable(spec.target_resolver))
+                self.assertIsInstance(spec.source_states, frozenset)
+                self.assertIsInstance(spec.target_states, frozenset)
+
+        self.assertEqual(set(get_args(WorkerFieldValidatorName)), set(WORKER_FIELD_VALIDATOR_NAMES))
+        self.assertEqual(WorkerFieldSpec.__annotations__["validator"], WorkerFieldValidatorName)
+        with self.assertRaisesRegex(ValueError, "unknown worker field validator"):
+            WorkerFieldSpec("bad", validator="missing")
 
     def test_worker_defaults_storage_and_output_use_field_spec(self):
         defaults = worker_default_snapshot_fields("review")

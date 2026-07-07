@@ -2,9 +2,41 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field as dataclass_field
 from enum import Enum
-from typing import Optional, Union
+from typing import Callable, FrozenSet, Literal, Optional, Type, Union
 
+from opencode_session.schema_helpers import JsonValue
 from opencode_session.status import short_status
+
+
+WorkerFieldValidatorName = Literal[
+    "any",
+    "id",
+    "int",
+    "lifecycle_state",
+    "list",
+    "timeout_policy",
+]
+WORKER_FIELD_VALIDATOR_NAMES = frozenset(
+    (
+        "any",
+        "id",
+        "int",
+        "lifecycle_state",
+        "list",
+        "timeout_policy",
+    )
+)
+
+_WorkerTransitionPayloadType = Type["WorkerTransitionPayload"]
+_WorkerTransitionPayloadFactory = Callable[..., "WorkerTransitionPayload"]
+_WorkerTransitionReducer = Callable[
+    ["WorkerRecord", "WorkerTransition", "WorkerTransitionPayload", Optional[str]],
+    "WorkerRecord",
+]
+_WorkerTransitionTargetResolver = Callable[
+    ["WorkerTransition", "WorkerTransitionPayload"],
+    Optional[str],
+]
 
 
 class WorkerTransitionName(str, Enum):
@@ -334,8 +366,8 @@ class WorkerLifecycleMetadata:
 @dataclass(frozen=True)
 class WorkerTransitionMetadata:
     name: WorkerTransitionName
-    source_states: frozenset
-    target_states: frozenset
+    source_states: FrozenSet[str]
+    target_states: FrozenSet[str]
     public_lifecycle_transition: bool = True
 
     def __post_init__(self):
@@ -352,18 +384,23 @@ class WorkerTransitionMetadata:
 @dataclass(frozen=True)
 class _WorkerTransitionSpec:
     name: WorkerTransitionName
-    payload_type: object
-    payload_factory: object
-    reducer: object
-    target_resolver: object
-    source_states: frozenset
-    target_states: frozenset = dataclass_field(default_factory=frozenset)
+    payload_type: _WorkerTransitionPayloadType
+    payload_factory: _WorkerTransitionPayloadFactory
+    reducer: _WorkerTransitionReducer
+    target_resolver: _WorkerTransitionTargetResolver
+    source_states: FrozenSet[str]
+    target_states: FrozenSet[str] = dataclass_field(default_factory=frozenset)
     public_lifecycle_transition: bool = True
     target_uses_payload: bool = False
 
     def __post_init__(self):
         if not isinstance(self.name, WorkerTransitionName):
             raise ValueError(f"unknown worker transition: {self.name}")
+        if not isinstance(self.payload_type, type):
+            raise TypeError("worker transition payload_type must be a type")
+        for field_name in ("payload_factory", "reducer", "target_resolver"):
+            if not callable(getattr(self, field_name)):
+                raise TypeError(f"worker transition {field_name} must be callable")
         object.__setattr__(self, "source_states", frozenset(self.source_states))
         object.__setattr__(self, "target_states", frozenset(self.target_states))
 
@@ -412,17 +449,17 @@ def _lifecycle_metadata_from_row(row):
 
 
 def _transition_spec(
-    name,
+    name: WorkerTransitionName,
     *,
-    payload_type,
-    payload_factory,
-    reducer,
-    target_resolver,
+    payload_type: _WorkerTransitionPayloadType,
+    payload_factory: _WorkerTransitionPayloadFactory,
+    reducer: _WorkerTransitionReducer,
+    target_resolver: _WorkerTransitionTargetResolver,
     source_states=(),
     target_states=(),
-    public_lifecycle_transition=True,
-    target_uses_payload=False,
-):
+    public_lifecycle_transition: bool = True,
+    target_uses_payload: bool = False,
+) -> _WorkerTransitionSpec:
     return _WorkerTransitionSpec(
         name,
         payload_type,
@@ -538,9 +575,9 @@ class WorkerFieldSpec:
     """Canonical runtime metadata for worker fields and their boundary projections."""
 
     name: str
-    default: object = None
+    default: JsonValue = None
     required: bool = True
-    validator: str = "any"
+    validator: WorkerFieldValidatorName = "any"
     default_from_worker_id: bool = False
     record_update: bool = False
     run_upsert: bool = False
@@ -549,6 +586,10 @@ class WorkerFieldSpec:
     snapshot_set_if_missing: bool = False
     snapshot_accepted_abort_passthrough: bool = False
     snapshot_prompt_ids: bool = False
+
+    def __post_init__(self):
+        if self.validator not in WORKER_FIELD_VALIDATOR_NAMES:
+            raise ValueError(f"unknown worker field validator: {self.validator}")
 
     def default_value(self, worker_id):
         if self.default_from_worker_id:
@@ -1110,7 +1151,8 @@ def _reduce_worker_transition_payload(latest_worker, transition):
     spec = _worker_transition_spec(transition.name)
     payload = _require_transition_payload(transition, spec.payload_type)
     target_state = _resolve_transition_target_lifecycle_state(spec, transition, payload)
-    return spec.reducer(latest_worker, transition, payload, target_state)
+    reduced_worker = spec.reducer(latest_worker, transition, payload, target_state)
+    return _require_worker_record(reduced_worker)
 
 
 def _transition_worker_copy(latest_worker):
@@ -1546,6 +1588,8 @@ def _resolve_transition_target_lifecycle_state(spec, transition, payload=UNSET_T
     if spec.target_uses_payload and payload is UNSET_TRANSITION_FIELD:
         payload = _require_transition_payload(transition, spec.payload_type)
     target_state = spec.target_resolver(transition, payload)
+    if target_state is not None and not isinstance(target_state, str):
+        raise TypeError(f"worker transition '{spec.name.value}' resolved a non-string lifecycle target")
     _validate_transition_target_lifecycle_state(spec.name, target_state)
     return target_state
 
@@ -1616,7 +1660,7 @@ def is_worker_record(worker):
     return _is_worker_record(worker)
 
 
-def worker_retry_available(worker, category=None):
+def worker_retry_available(worker, category: Optional[str] = None) -> bool:
     worker = _require_worker_record(worker)
     return worker.retry_available(category)
 
@@ -1971,7 +2015,7 @@ class WorkerRecord:
             self._set_canonical_field("attempts", finalized)
         return self
 
-    def retry_available(self, category=None) -> bool:
+    def retry_available(self, category: Optional[str] = None) -> bool:
         if self.failure_retryable is False:
             return False
         retryable = set(self.retryable_failures or [])
@@ -2012,7 +2056,13 @@ class WorkerRecord:
         normalized = self.to_snapshot()
         return type(self).from_worker(require_internal_worker(normalized), self.worker_id)
 
-    def set_session(self, session_id, *, agent=None, model=None):
+    def set_session(
+        self,
+        session_id: Optional[str],
+        *,
+        agent: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> "WorkerRecord":
         self._set_canonical_field("session_id", session_id)
         if agent is not None:
             self._set_canonical_field("agent", agent)
@@ -2020,14 +2070,14 @@ class WorkerRecord:
             self._set_canonical_field("model", model)
         return self
 
-    def remember_prompt_id(self, prompt_id):
+    def remember_prompt_id(self, prompt_id: Optional[str]) -> "WorkerRecord":
         prompt_ids = list(self.prompt_ids)
         if prompt_id not in prompt_ids:
             prompt_ids.append(prompt_id)
         self._set_canonical_field("prompt_ids", prompt_ids)
         return self
 
-    def apply_transition(self, transition):
+    def apply_transition(self, transition: "WorkerTransition") -> "WorkerRecord":
         result = _apply_worker_transition_to_record(self, transition)
         if result.skipped and not result.stale_snapshot_recovery:
             raise WorkerTransitionError(result)
