@@ -1,14 +1,36 @@
 from copy import deepcopy
 import unittest
 
+from opencode_session import worker_state as worker_state_module
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition
-from opencode_session.worker_state import WorkerRecord, WorkerTransition, WorkerTransitionError, reduce_worker_transition
+from opencode_session.worker_state import (
+    WORKER_TRANSITION_METADATA,
+    WorkerRecord,
+    WorkerTransition,
+    WorkerTransitionError,
+    WorkerTransitionName,
+    reduce_worker_transition,
+)
 
 
 NOW = "2026-07-04T00:00:00Z"
 
 
 class WorkerLifecycleTransitionTest(unittest.TestCase):
+    def test_worker_transition_definitions_are_single_sourced(self):
+        specs = worker_state_module._WORKER_TRANSITION_SPECS
+
+        self.assertCountEqual((spec.name for spec in specs), tuple(WorkerTransitionName))
+        self.assertEqual(set(WORKER_TRANSITION_METADATA), set(WorkerTransitionName))
+        for spec in specs:
+            with self.subTest(name=spec.name.value):
+                metadata = WORKER_TRANSITION_METADATA[spec.name]
+
+                self.assertEqual(metadata.name, spec.name)
+                self.assertEqual(metadata.source_states, spec.source_states)
+                self.assertEqual(metadata.target_states, spec.target_states)
+                self.assertEqual(metadata.public_lifecycle_transition, spec.public_lifecycle_transition)
+
     def test_public_worker_transitions_produce_observable_outcomes(self):
         cases = (
             (
