@@ -50,6 +50,7 @@ class WorkerSnapshotRecord(TypedDict, total=False):
     manual_retry_required: bool
     cleanup: JsonObject
     abort: JsonObject
+    result: JsonObject
 
 
 class WorkerRequiredFields(TypedDict):

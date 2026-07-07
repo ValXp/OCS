@@ -7,8 +7,8 @@ from opencode_session.worker_storage_adapter import (
 )
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition_patch
 from opencode_session.run_record import upsert_worker_record
-from opencode_session.schema_worker import WorkerRequiredFields
-from opencode_session.worker_state import WorkerRecord
+from opencode_session.schema_worker import WorkerRequiredFields, WorkerSnapshotRecord
+from opencode_session.worker_state import WORKER_RECORD_CANONICAL_FIELD_NAMES, WorkerRecord
 
 
 class WorkerStateContractTest(unittest.TestCase):
@@ -65,6 +65,12 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_worker_snapshot_schema_declares_runtime_persisted_fields(self):
+        self.assertEqual(
+            set(WorkerSnapshotRecord.__annotations__),
+            WORKER_RECORD_CANONICAL_FIELD_NAMES,
+        )
 
     def test_worker_default_storage_and_output_follow_required_schema_contract(self):
         expected_defaults = {
