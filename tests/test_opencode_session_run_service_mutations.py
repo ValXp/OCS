@@ -3,12 +3,8 @@ import unittest
 from unittest.mock import patch
 
 from opencode_session.run_services import (
-    AbortWorkerAppliedRecord,
-    AbortWorkerIntentRecord,
     REMOTE_MUTATION_JOURNAL_FIELD,
     RunCommandService,
-    SteerPromptAdmittedRecord,
-    SteerPromptIntentRecord,
     recoverable_remote_mutation_entries,
 )
 from opencode_session.run_store import RunStore, RunStoreError
@@ -90,74 +86,6 @@ class ChangeWorkerSessionBeforeFirstUpdateStore:
 
 
 class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
-    def test_steer_prompt_intent_record_serializes_journal_entry(self):
-        record = SteerPromptIntentRecord(
-            id="mutation-1",
-            worker_id="planner",
-            session_id="ses_plan",
-            message_id="msg_steer_1",
-            delivery="queue",
-            text="Continue with the plan",
-        )
-
-        self.assertEqual(
-            record.to_journal_entry(),
-            {
-                "id": "mutation-1",
-                "kind": "steer_prompt",
-                "worker_id": "planner",
-                "session_id": "ses_plan",
-                "message_id": "msg_steer_1",
-                "delivery": "queue",
-                "text": "Continue with the plan",
-            },
-        )
-
-    def test_abort_worker_intent_record_serializes_journal_entry(self):
-        record = AbortWorkerIntentRecord(
-            id="mutation-1",
-            worker_id="planner",
-            session_id="ses_plan",
-        )
-
-        self.assertEqual(
-            record.to_journal_entry(),
-            {
-                "id": "mutation-1",
-                "kind": "abort_worker",
-                "worker_id": "planner",
-                "session_id": "ses_plan",
-            },
-        )
-
-    def test_steer_prompt_admitted_record_applies_prompt_id(self):
-        worker = WorkerRecord.default_fields("planner")
-        worker.set_session("ses_plan")
-        run = {"name": "demo", "workers": {"planner": worker}}
-
-        SteerPromptAdmittedRecord(
-            id="mutation-1",
-            worker_id="planner",
-            message_id="msg_steer_1",
-        ).apply_to_run(run)
-
-        self.assertEqual(worker_field(run["workers"]["planner"], "prompt_ids"), ["msg_steer_1"])
-
-    def test_abort_worker_applied_record_marks_worker_aborted(self):
-        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
-            store = _active_worker_store(store_root, directory)
-            run = store.load_run("demo")
-
-        AbortWorkerAppliedRecord(
-            id="mutation-1",
-            worker_id="planner",
-            session_id="ses_plan",
-            response_data={"sessionID": "ses_plan", "accepted": True, "status": "aborted"},
-        ).apply_to_run(run)
-
-        self.assertEqual(run["status"], "aborted")
-        self.assertEqual(worker_output_field(run["workers"]["planner"], "status"), "aborted")
-
     def test_steer_persists_recoverable_journal_before_prompt_admission(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = _active_worker_store(store_root, directory)

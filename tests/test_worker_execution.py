@@ -19,9 +19,7 @@ from opencode_session.worker_execution import (
 )
 from opencode_session.worker_session_provisioning import (
     WORKER_SESSION_JOURNAL_FIELD,
-    WorkerSessionCreatedRecord,
     WorkerSessionCreationJournal,
-    WorkerSessionCreationIntent,
     WorkerSessionProvisioner,
     ensure_worker_session,
     provision_worker_session,
@@ -91,22 +89,30 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(attempt.get("status"), status)
         return attempt
 
-    def test_worker_session_creation_records_serialize_journal_entries(self):
-        intent = WorkerSessionCreationIntent(
-            id="worker-session-intent-1",
-            worker_id="worker",
-            directory="/workspace",
+    def test_worker_session_creation_journal_records_intent_and_created_entry(self):
+        run = {
+            "name": "demo",
+            "directory": "/workspace",
+            "workers": {"worker": WorkerRecord.default_fields("worker")},
+        }
+        worker = run["workers"]["worker"]
+
+        def persist_run_mutation(run, mutator):
+            mutator(run)
+            return run
+
+        journal = WorkerSessionCreationJournal(
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+            id_factory=lambda: "worker-session-intent-1",
+        )
+
+        run, worker, intent = journal.record_intent(
+            run,
+            worker,
             agent="build",
             model="openai/gpt-5.5",
             cleanup_requested=True,
-            intent_recorded_at="2026-07-05T00:00:00Z",
-        )
-        created = WorkerSessionCreatedRecord(
-            id="worker-session-intent-1",
-            worker_id="worker",
-            session_id="ses_new",
-            cleanup_requested=True,
-            created_at="2026-07-05T00:00:00Z",
         )
 
         self.assertEqual(
@@ -123,42 +129,33 @@ class WorkerExecutionTest(unittest.TestCase):
                 "intent_recorded_at": "2026-07-05T00:00:00Z",
             },
         )
-        self.assertEqual(
-            created.to_journal_update(),
-            {
-                "status": "created",
-                "session_id": "ses_new",
-                "created_session_ids": ["ses_new"],
-                "created_at": "2026-07-05T00:00:00Z",
-            },
-        )
-        self.assertEqual(
-            created.to_journal_entry(),
-            {
-                "id": "worker-session-intent-1",
-                "kind": "worker_session_create",
-                "worker_id": "worker",
-                "cleanup_requested": True,
-                "status": "created",
-                "session_id": "ses_new",
-                "created_session_ids": ["ses_new"],
-                "created_at": "2026-07-05T00:00:00Z",
-            },
-        )
 
-    def test_worker_session_created_record_applies_worker_update(self):
-        run = {"workers": {"worker": WorkerRecord.default_fields("worker")}}
-        created = WorkerSessionCreatedRecord(
-            id="worker-session-intent-1",
-            worker_id="worker",
-            session_id="ses_new",
-            cleanup_requested=True,
-            created_at="2026-07-05T00:00:00Z",
+        run, worker = journal.record_created(
+            run,
+            worker,
+            intent,
+            "ses_new",
             agent="build",
             model="openai/gpt-5.5",
         )
 
-        created.apply_to_run(run)
+        self.assertEqual(
+            run[WORKER_SESSION_JOURNAL_FIELD][0],
+            {
+                "id": "worker-session-intent-1",
+                "kind": "worker_session_create",
+                "status": "created",
+                "worker_id": "worker",
+                "directory": "/workspace",
+                "agent": "build",
+                "model": "openai/gpt-5.5",
+                "cleanup_requested": True,
+                "intent_recorded_at": "2026-07-05T00:00:00Z",
+                "session_id": "ses_new",
+                "created_session_ids": ["ses_new"],
+                "created_at": "2026-07-05T00:00:00Z",
+            },
+        )
 
         worker = run["workers"]["worker"]
         self.assertEqual(worker_field(worker, "session_id"), "ses_new")
