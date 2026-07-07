@@ -1,0 +1,32 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Compile and unittest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install package
+        run: python3 -m pip install -e .
+
+      - name: Compile sources and tests
+        run: python3 -m compileall -q opencode_session tests
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests
