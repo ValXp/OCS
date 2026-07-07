@@ -2,29 +2,37 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field as dataclass_field
 from enum import Enum
-from typing import Callable, FrozenSet, Literal, Optional, Type, Union
+from typing import Callable, FrozenSet, Optional, Type, Union
 
 from opencode_session.schema_helpers import JsonValue
 from opencode_session.status import short_status
-
-
-WorkerFieldValidatorName = Literal[
-    "any",
-    "id",
-    "int",
-    "lifecycle_state",
-    "list",
-    "timeout_policy",
-]
-WORKER_FIELD_VALIDATOR_NAMES = frozenset(
-    (
-        "any",
-        "id",
-        "int",
-        "lifecycle_state",
-        "list",
-        "timeout_policy",
-    )
+from opencode_session.worker_field_spec import (
+    REMOVABLE_WORKER_TRANSITION_FIELDS,
+    WORKER_FIELD_SPEC_BY_NAME,
+    WORKER_FIELD_SPECS,
+    WORKER_FIELD_VALIDATOR_NAMES,
+    WORKER_LIST_FIELDS,
+    WORKER_OPTIONAL_LIST_FIELDS,
+    WORKER_RECORD_CANONICAL_FIELD_NAMES,
+    WORKER_RECORD_FIELD_NAMES,
+    WORKER_RECORD_OPTIONAL_FIELD_NAMES,
+    WORKER_RECORD_UPDATE_FIELD_NAMES,
+    WORKER_REQUIRED_FIELD_NAMES,
+    WORKER_RUN_UPSERT_FIELD_NAMES,
+    WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES,
+    WORKER_SNAPSHOT_PROMPT_ID_FIELD_NAMES,
+    WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES,
+    WORKER_SNAPSHOT_REPLAY_FIELD_NAMES,
+    WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES,
+    WORKER_STORAGE_INT_FIELD_NAMES,
+    WORKER_STORAGE_LIST_FIELD_NAMES,
+    WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
+    WorkerFieldSpec,
+    WorkerFieldValidatorName,
+    worker_default_snapshot_fields,
+    worker_optional_schema_annotations,
+    worker_required_schema_annotations,
+    worker_snapshot_schema_annotations,
 )
 
 _WorkerTransitionPayloadType = Type["WorkerTransitionPayload"]
@@ -574,216 +582,6 @@ WORKER_TIMEOUT_POLICY_STATUSES = frozenset(
 )
 UNSET_TRANSITION_FIELD = object()
 PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("status", "next_eligible_action"))
-
-
-@dataclass(frozen=True)
-class WorkerFieldSpec:
-    """Canonical runtime metadata for worker fields and their boundary projections."""
-
-    name: str
-    default: JsonValue = None
-    required: bool = True
-    validator: WorkerFieldValidatorName = "any"
-    default_from_worker_id: bool = False
-    record_update: bool = False
-    run_upsert: bool = False
-    removable_transition_field: bool = False
-    snapshot_replay_field: bool = False
-    snapshot_set_if_missing: bool = False
-    snapshot_accepted_abort_passthrough: bool = False
-    snapshot_prompt_ids: bool = False
-
-    def __post_init__(self):
-        if self.validator not in WORKER_FIELD_VALIDATOR_NAMES:
-            raise ValueError(f"unknown worker field validator: {self.validator}")
-
-    def default_value(self, worker_id):
-        if self.default_from_worker_id:
-            return worker_id
-        return deepcopy(self.default)
-
-
-WORKER_FIELD_SPECS = (
-    WorkerFieldSpec("id", default_from_worker_id=True, validator="id"),
-    WorkerFieldSpec("role", record_update=True, run_upsert=True),
-    WorkerFieldSpec(
-        "session_id",
-        record_update=True,
-        run_upsert=True,
-        snapshot_set_if_missing=True,
-    ),
-    WorkerFieldSpec("agent", record_update=True, run_upsert=True),
-    WorkerFieldSpec("model", record_update=True, run_upsert=True),
-    WorkerFieldSpec(
-        "dependencies",
-        default=[],
-        validator="list",
-        record_update=True,
-        run_upsert=True,
-    ),
-    WorkerFieldSpec(
-        "prompt_ids",
-        default=[],
-        validator="list",
-        record_update=True,
-        run_upsert=True,
-        snapshot_prompt_ids=True,
-    ),
-    WorkerFieldSpec(
-        "retry_count",
-        default=0,
-        validator="int",
-        record_update=True,
-        run_upsert=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec(
-        "retry_limit",
-        default=0,
-        validator="int",
-        record_update=True,
-        run_upsert=True,
-    ),
-    WorkerFieldSpec(
-        "retryable_failures",
-        default=[],
-        validator="list",
-        record_update=True,
-        run_upsert=True,
-    ),
-    WorkerFieldSpec("timeout_seconds", record_update=True, run_upsert=True),
-    WorkerFieldSpec(
-        "timeout_policy",
-        default=WORKER_STATUS_TIMEOUT,
-        validator="timeout_policy",
-        record_update=True,
-        run_upsert=True,
-    ),
-    WorkerFieldSpec("timeout_started_at", record_update=True, snapshot_replay_field=True),
-    WorkerFieldSpec("timed_out_at", record_update=True, snapshot_replay_field=True),
-    WorkerFieldSpec(
-        "lifecycle_state",
-        default=WORKER_LIFECYCLE_QUEUED,
-        validator="lifecycle_state",
-        record_update=True,
-        run_upsert=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec("failure_category", record_update=True, snapshot_replay_field=True),
-    WorkerFieldSpec("failure_reason", record_update=True, snapshot_replay_field=True),
-    WorkerFieldSpec("last_failure_category", record_update=True, snapshot_replay_field=True),
-    WorkerFieldSpec("last_failure_reason", record_update=True, snapshot_replay_field=True),
-    WorkerFieldSpec(
-        "blockers",
-        default=[],
-        validator="list",
-        record_update=True,
-        run_upsert=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec(
-        "output_refs",
-        default=[],
-        validator="list",
-        record_update=True,
-        run_upsert=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec("name", required=False),
-    WorkerFieldSpec("title", required=False),
-    WorkerFieldSpec("prompt", required=False, record_update=True, run_upsert=True),
-    WorkerFieldSpec(
-        "error",
-        required=False,
-        record_update=True,
-        removable_transition_field=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec(
-        "failure_retryable",
-        required=False,
-        record_update=True,
-        removable_transition_field=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec(
-        "manual_retry_required",
-        required=False,
-        record_update=True,
-        removable_transition_field=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec(
-        "cleanup",
-        required=False,
-        record_update=True,
-        snapshot_replay_field=True,
-        snapshot_accepted_abort_passthrough=True,
-    ),
-    WorkerFieldSpec("abort", required=False, record_update=True, snapshot_replay_field=True),
-    WorkerFieldSpec(
-        "attempts",
-        default=[],
-        required=False,
-        validator="list",
-        record_update=True,
-        snapshot_replay_field=True,
-    ),
-    WorkerFieldSpec("result", required=False, record_update=True, snapshot_replay_field=True),
-)
-WORKER_FIELD_SPEC_BY_NAME = {spec.name: spec for spec in WORKER_FIELD_SPECS}
-WORKER_REQUIRED_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.required
-)
-WORKER_RECORD_OPTIONAL_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if not spec.required
-)
-WORKER_RECORD_CANONICAL_FIELD_NAMES = frozenset(spec.name for spec in WORKER_FIELD_SPECS)
-WORKER_LIST_FIELDS = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.required and spec.validator == "list"
-)
-WORKER_OPTIONAL_LIST_FIELDS = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if not spec.required and spec.validator == "list"
-)
-WORKER_RECORD_UPDATE_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.record_update
-)
-WORKER_RUN_UPSERT_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.run_upsert
-)
-REMOVABLE_WORKER_TRANSITION_FIELDS = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.removable_transition_field
-)
-WORKER_STORAGE_INT_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "int"
-)
-WORKER_STORAGE_LIST_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "list"
-)
-WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_policy"
-)
-WORKER_SNAPSHOT_REPLAY_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_replay_field
-)
-WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_set_if_missing
-)
-WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES = REMOVABLE_WORKER_TRANSITION_FIELDS
-WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_accepted_abort_passthrough
-)
-WORKER_SNAPSHOT_PROMPT_ID_FIELD_NAMES = tuple(
-    spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_prompt_ids
-)
-
-
-def worker_default_snapshot_fields(worker_id):
-    return {
-        spec.name: spec.default_value(worker_id)
-        for spec in WORKER_FIELD_SPECS
-        if spec.required
-    }
 
 
 @dataclass(frozen=True)
@@ -1754,42 +1552,11 @@ def is_dependency_blockable_worker(worker):
 _UNSET_WORKER_UPDATE = object()
 
 
-@dataclass(init=False, slots=True)
 class WorkerRecord:
     """Hydrated worker domain object with explicit serialization boundaries."""
 
-    id: Optional[str] = None
-    name: Optional[str] = None
-    title: Optional[str] = None
-    role: Optional[str] = None
-    session_id: Optional[str] = None
-    agent: Optional[str] = None
-    model: Optional[str] = None
-    prompt: Optional[str] = None
-    lifecycle_state: str = WORKER_LIFECYCLE_QUEUED
-    dependencies: list = dataclass_field(default_factory=list)
-    prompt_ids: list = dataclass_field(default_factory=list)
-    retry_count: int = 0
-    retry_limit: int = 0
-    retryable_failures: list = dataclass_field(default_factory=list)
-    timeout_seconds: Optional[float] = None
-    timeout_policy: str = WORKER_STATUS_TIMEOUT
-    timeout_started_at: object = None
-    timed_out_at: object = None
-    failure_category: Optional[str] = None
-    failure_reason: Optional[str] = None
-    last_failure_category: Optional[str] = None
-    last_failure_reason: Optional[str] = None
-    blockers: list = dataclass_field(default_factory=list)
-    output_refs: list = dataclass_field(default_factory=list)
-    error: Optional[str] = None
-    failure_retryable: Optional[bool] = None
-    manual_retry_required: Optional[bool] = None
-    cleanup: Optional[dict] = None
-    abort: Optional[dict] = None
-    attempts: list = dataclass_field(default_factory=list)
-    result: Optional[dict] = None
-    _present_optional_fields: set = dataclass_field(default_factory=set, repr=False)
+    __slots__ = (*WORKER_RECORD_FIELD_NAMES, "_present_optional_fields")
+    __annotations__ = {"_present_optional_fields": "set"}
 
     __iter__ = None
 

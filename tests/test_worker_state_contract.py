@@ -7,8 +7,20 @@ from opencode_session.worker_storage_adapter import (
 )
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition_patch
 from opencode_session.run_record import upsert_worker_record
-from opencode_session.schema_worker import WorkerRequiredFields, WorkerSnapshotRecord
-from opencode_session.worker_state import WORKER_RECORD_CANONICAL_FIELD_NAMES, WorkerRecord
+from opencode_session.schema_worker import Worker, WorkerOutputRecord, WorkerRequiredFields, WorkerSnapshotRecord
+from opencode_session.worker_state import (
+    WORKER_FIELD_SPECS,
+    WORKER_RECORD_CANONICAL_FIELD_NAMES,
+    WORKER_RECORD_FIELD_NAMES,
+    WORKER_RECORD_OPTIONAL_FIELD_NAMES,
+    WORKER_REQUIRED_FIELD_NAMES as RUNTIME_WORKER_REQUIRED_FIELD_NAMES,
+    WORKER_STORAGE_INT_FIELD_NAMES,
+    WORKER_STORAGE_LIST_FIELD_NAMES,
+    WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
+    WorkerRecord,
+    worker_required_schema_annotations,
+    worker_snapshot_schema_annotations,
+)
 
 
 class WorkerStateContractTest(unittest.TestCase):
@@ -75,11 +87,57 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(worker.prompt_ids, [])
         self.assertEqual(worker.to_snapshot()["prompt_ids"], [])
 
-    def test_worker_snapshot_schema_declares_runtime_persisted_fields(self):
+    def test_worker_schema_typed_dicts_are_projected_from_canonical_field_specs(self):
+        self.assertEqual(tuple(worker_snapshot_schema_annotations()), WORKER_RECORD_FIELD_NAMES)
+        self.assertEqual(tuple(worker_required_schema_annotations()), RUNTIME_WORKER_REQUIRED_FIELD_NAMES)
         self.assertEqual(
-            set(WorkerSnapshotRecord.__annotations__),
-            WORKER_RECORD_CANONICAL_FIELD_NAMES,
+            tuple(WorkerSnapshotRecord.__annotations__),
+            WORKER_RECORD_FIELD_NAMES,
         )
+        self.assertEqual(tuple(WorkerRequiredFields.__annotations__), RUNTIME_WORKER_REQUIRED_FIELD_NAMES)
+        self.assertEqual(tuple(Worker.__annotations__), WORKER_RECORD_FIELD_NAMES)
+        self.assertEqual(
+            tuple(WorkerOutputRecord.__annotations__),
+            (*WORKER_RECORD_FIELD_NAMES, "status", "next_eligible_action"),
+        )
+        self.assertEqual(set(Worker.__required_keys__), set(RUNTIME_WORKER_REQUIRED_FIELD_NAMES))
+        self.assertEqual(set(Worker.__optional_keys__), set(WORKER_RECORD_OPTIONAL_FIELD_NAMES))
+        self.assertEqual(set(WorkerOutputRecord.__required_keys__), set(RUNTIME_WORKER_REQUIRED_FIELD_NAMES))
+
+    def test_worker_record_runtime_slots_are_projected_from_canonical_field_specs(self):
+        self.assertEqual(WorkerRecord.__slots__, (*WORKER_RECORD_FIELD_NAMES, "_present_optional_fields"))
+        self.assertEqual(set(WorkerRecord.__slots__) - {"_present_optional_fields"}, WORKER_RECORD_CANONICAL_FIELD_NAMES)
+
+    def test_worker_storage_coercion_fields_are_projected_from_canonical_field_specs(self):
+        self.assertEqual(
+            WORKER_STORAGE_INT_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "int"),
+        )
+        self.assertEqual(
+            WORKER_STORAGE_LIST_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "list"),
+        )
+        self.assertEqual(
+            WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_policy"),
+        )
+
+        legacy_worker = {"id": "review"}
+        legacy_worker.update({field_name: "2" for field_name in WORKER_STORAGE_INT_FIELD_NAMES})
+        legacy_worker.update({field_name: "not-a-list" for field_name in WORKER_STORAGE_LIST_FIELD_NAMES})
+        legacy_worker.update({field_name: "unknown-policy" for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES})
+
+        migrated = migrate_persisted_worker_snapshot(legacy_worker, "review")
+
+        for field_name in WORKER_STORAGE_INT_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(migrated[field_name], 2)
+        for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(migrated[field_name], [])
+        for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(migrated[field_name], "timeout")
 
     def test_worker_default_storage_and_output_follow_required_schema_contract(self):
         expected_defaults = {
