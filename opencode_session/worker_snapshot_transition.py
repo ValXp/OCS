@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 from copy import deepcopy
 
 from opencode_session.worker_state import (
@@ -11,12 +10,13 @@ from opencode_session.worker_state import (
     WorkerSnapshotTransitionPatch,
     WorkerTransition,
 )
-from opencode_session.worker_storage_adapter import canonical_worker_snapshot_fields
 
 
 def worker_snapshot_transition_patch(worker, worker_id=None):
+    worker = _snapshot_worker_record(worker)
     worker_id = _snapshot_worker_id(worker, worker_id)
-    snapshot = canonical_worker_snapshot_fields(worker, worker_id)
+    snapshot = worker.to_snapshot()
+    snapshot["id"] = worker_id
     fields = {"id": worker_id}
     for field_name in WORKER_SNAPSHOT_REPLAY_FIELD_NAMES:
         if field_name in snapshot:
@@ -54,16 +54,15 @@ def worker_snapshot_transition(worker, worker_id=None):
 def _snapshot_worker_id(worker, worker_id=None):
     if worker_id:
         return worker_id
+    if worker.worker_id:
+        return worker.worker_id
+    raise ValueError("snapshot worker requires id")
+
+
+def _snapshot_worker_record(worker):
     if isinstance(worker, WorkerRecord):
-        if worker.worker_id:
-            return worker.worker_id
-        raise ValueError("snapshot worker requires id")
-    if isinstance(worker, Mapping):
-        worker_id = worker.get("id")
-        if worker_id:
-            return worker_id
-        raise ValueError("snapshot worker requires id")
-    raise TypeError("snapshot worker must be WorkerRecord or persisted worker mapping")
+        return worker
+    raise TypeError("snapshot worker must be WorkerRecord; hydrate raw mappings at the storage boundary")
 
 
 def _optional_tuple(value):

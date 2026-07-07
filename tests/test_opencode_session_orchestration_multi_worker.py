@@ -10,7 +10,6 @@ from opencode_session.worker_state import (
     WorkerTransitionError,
     apply_worker_transition,
     mark_worker_active,
-    normalize_worker,
     worker_field,
     worker_output_field,
 )
@@ -151,7 +150,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual([transition.worker_id for transition in step.dependency_blocked_transitions], ["review"])
         self.assertEqual(worker_output_field(workers["review"], "status"), "queued")
 
-        latest_workers = {"review": normalize_worker(workers["review"].to_snapshot(), "review")}
+        latest_workers = {"review": workers["review"].to_worker()}
         apply_worker_transition(latest_workers, step.dependency_blocked_transitions[0])
 
         self.assertEqual(worker_output_field(latest_workers["review"], "status"), "blocked")

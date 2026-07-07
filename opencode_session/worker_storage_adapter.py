@@ -55,23 +55,16 @@ class _PersistedWorkerSnapshot:
 
 
 def _worker_fields(worker):
-    if isinstance(worker, WorkerRecord):
-        return worker.to_snapshot()
     if isinstance(worker, Mapping):
         return dict(worker)
-    return {}
+    raise TypeError("persisted worker snapshot must be a mapping")
 
 
 def _raw_worker_field(worker, field_name, default=None):
-    if isinstance(worker, WorkerRecord):
-        return worker._compat_field(field_name, default)
-    if isinstance(worker, Mapping):
-        return worker.get(field_name, default)
-    return default
+    return worker.get(field_name, default)
 
 
 def _lifecycle_state_from_legacy_public_worker_state(worker):
-    worker = worker if isinstance(worker, Mapping) else {}
     status = short_status(_raw_worker_field(worker, "status"))
     if _legacy_worker_timeout_origin(worker, status):
         return worker_timeout_lifecycle_state(
@@ -209,10 +202,8 @@ def _coerce_persisted_worker_timeout_policy(fields):
 
 def hydrate_worker_record(worker, worker_id, *, run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION):
     snapshot = _migrated_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version)
-    return WorkerRecord.from_worker(
-        snapshot.runtime_fields,
-        worker_id,
-    ).to_worker()
+    fields = _canonical_worker_snapshot_fields(snapshot, worker_id)
+    return WorkerRecord(fields["id"], fields).to_worker()
 
 
 def canonical_worker_snapshot_fields(
@@ -223,8 +214,7 @@ def canonical_worker_snapshot_fields(
 ):
     if isinstance(worker, WorkerRecord):
         return _worker_record_snapshot_fields(worker, worker_id)
-    snapshot = _migrated_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version)
-    return _canonical_worker_snapshot_fields(snapshot, worker_id)
+    raise TypeError("worker snapshot fields require WorkerRecord; hydrate raw mappings at the storage boundary")
 
 
 def normalize_worker_snapshot_for_storage(

@@ -15,9 +15,9 @@ from opencode_session.run_start_core import (
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
+from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_state import (
     apply_worker_transition,
-    normalize_worker,
     worker_field,
     worker_has_field,
     worker_output_field,
@@ -79,8 +79,8 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         run = {
             "status": "done",
             "workers": {
-                "alpha": normalize_worker({"id": "alpha", "lifecycle_state": "done_collect"}, "alpha"),
-                "beta": normalize_worker({"id": "beta", "lifecycle_state": "done_collect"}, "beta"),
+                "alpha": hydrate_worker_record({"id": "alpha", "lifecycle_state": "done_collect"}, "alpha"),
+                "beta": hydrate_worker_record({"id": "beta", "lifecycle_state": "done_collect"}, "beta"),
             },
         }
         persisted_worker_ids = []
@@ -122,7 +122,7 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         client = FakeClient([])
         run = {
             "workers": {
-                "worker": normalize_worker(
+                "worker": hydrate_worker_record(
                     {
                         "id": "worker",
                         "lifecycle_state": "done_collect",

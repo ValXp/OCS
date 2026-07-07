@@ -12,7 +12,7 @@ from opencode_session.schema_run import HydratedRunRecord, PersistedRunRecord, R
 from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
 from opencode_session.worker_attempt_log import new_worker_attempt_record
 from opencode_session.worker_storage_adapter import migrate_persisted_worker_snapshot, normalize_worker_snapshot_for_storage
-from opencode_session.worker_state import WorkerRecord, worker_field, worker_output_field
+from opencode_session.worker_state import WorkerRecord, worker_field, worker_output_dict, worker_output_field
 
 
 class RunRecordHydrationBoundaryTest(unittest.TestCase):
@@ -51,6 +51,19 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         self.assertEqual(worker.lifecycle_state, "active_wait")
         self.assertEqual(worker_output_field(worker, "status"), "active")
         self.assertEqual(worker_output_field(worker, "next_eligible_action"), "wait")
+
+    def test_normalize_run_keeps_already_hydrated_worker_records(self):
+        worker = WorkerRecord.default_fields("review")
+        worker.update_canonical_fields(role="review", prompt="Review the change")
+
+        with patch(
+            "opencode_session.run_record.hydrate_worker_record",
+            side_effect=AssertionError("hydrated runtime workers must not be rehydrated as persisted snapshots"),
+        ):
+            run = normalize_run({"name": "demo", "workers": {"review": worker}}, fallback_name="demo")
+
+        self.assertIsInstance(run["workers"]["review"], WorkerRecord)
+        self.assertEqual(run["workers"]["review"].worker_id, "review")
 
     def test_normalize_run_migrates_legacy_public_status_at_hydration_boundary(self):
         run = normalize_run(
@@ -156,20 +169,24 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         self.assertEqual(stored["unknown_plugin_state"], {"attempt": 2})
         self.assertNotIn("status", stored)
 
-    def test_worker_state_core_rejects_legacy_public_status(self):
+    def test_runtime_worker_helpers_reject_raw_mappings(self):
         from opencode_session.worker_state import normalize_worker
 
-        with self.assertRaisesRegex(ValueError, "output-only"):
+        raw_worker = {
+            "id": "review",
+            "role": "review",
+            "prompt": "Review the change",
+            "status": "done",
+            "next_eligible_action": "collect",
+        }
+
+        with self.assertRaisesRegex(TypeError, "internal worker must be WorkerRecord"):
             normalize_worker(
-                {
-                    "id": "review",
-                    "role": "review",
-                    "prompt": "Review the change",
-                    "status": "done",
-                    "next_eligible_action": "collect",
-                },
-                "review",
+                raw_worker,
+                raw_worker["id"],
             )
+        with self.assertRaisesRegex(TypeError, "internal worker must be WorkerRecord"):
+            worker_output_dict(raw_worker, raw_worker["id"])
 
     def test_worker_attempt_logging_rejects_raw_worker_mapping(self):
         with self.assertRaisesRegex(TypeError, "worker attempts require WorkerRecord"):

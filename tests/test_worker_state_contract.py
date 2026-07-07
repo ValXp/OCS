@@ -29,9 +29,9 @@ class WorkerStateContractTest(unittest.TestCase):
 
         for lifecycle_state, status, action in cases:
             with self.subTest(lifecycle_state=lifecycle_state):
-                worker = WorkerRecord.from_worker(
-                    {"id": lifecycle_state, "prompt": "Work", "lifecycle_state": lifecycle_state},
+                worker = WorkerRecord(
                     lifecycle_state,
+                    {"id": lifecycle_state, "prompt": "Work", "lifecycle_state": lifecycle_state},
                 ).to_worker()
                 output = worker.to_output_dict()
 
@@ -214,7 +214,7 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(patch.accepted_abort_fields, {"cleanup": {"requested": True, "deleted": False}})
 
     def test_snapshot_replay_absent_removals_clear_stale_transient_failure_fields(self):
-        patch = worker_snapshot_transition_patch({"id": "review"}, "review")
+        patch = worker_snapshot_transition_patch(WorkerRecord.default_fields("review"))
 
         self.assertEqual(set(patch.remove_fields), {"error", "failure_retryable", "manual_retry_required"})
         self.assertEqual(patch.accepted_abort_fields, {})
@@ -412,7 +412,15 @@ class WorkerStateContractTest(unittest.TestCase):
         for fields, message in cases:
             with self.subTest(fields=fields):
                 with self.assertRaisesRegex((TypeError, ValueError), message):
-                    WorkerRecord.from_worker(fields, "review")
+                    WorkerRecord("review", fields)
+
+    def test_worker_record_from_worker_rejects_raw_mapping(self):
+        with self.assertRaisesRegex(TypeError, "internal worker must be WorkerRecord"):
+            WorkerRecord.from_worker({"id": "review"}, "review")
+
+    def test_snapshot_transition_rejects_raw_worker_mapping(self):
+        with self.assertRaisesRegex(TypeError, "snapshot worker must be WorkerRecord"):
+            worker_snapshot_transition_patch({"id": "review"}, "review")
 
     def test_storage_boundary_preserves_unknown_fields_outside_runtime_record(self):
         persisted = {

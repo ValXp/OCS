@@ -10,6 +10,8 @@ from opencode_session.worker_state import (
     WORKER_LIFECYCLE_STATES,
     WORKER_RUN_UPSERT_FIELD_NAMES,
     default_worker_record,
+    is_worker_record,
+    worker_record_for_mutation,
     worker_output_dict,
 )
 
@@ -45,14 +47,13 @@ def new_run_record(name, *, directory, server_url, now):
 
 def upsert_worker_record(run, worker_id, changes, *, now):
     workers = run.setdefault("workers", {})
-    run_schema_version = _worker_snapshot_schema_version(run)
     existing = workers.get(worker_id)
     if existing is None:
         if not changes.get("role"):
             raise RunRecordError(f"worker '{worker_id}' does not exist; --role is required to create it")
         worker = default_worker_record(worker_id)
     else:
-        worker = hydrate_worker_record(existing, worker_id, run_schema_version=run_schema_version)
+        worker = worker_record_for_mutation(existing, worker_id).to_worker()
 
     for public_field_name in ("status", "next_eligible_action"):
         if changes.get(public_field_name) is not None:
@@ -69,7 +70,7 @@ def upsert_worker_record(run, worker_id, changes, *, now):
         field_names=WORKER_RUN_UPSERT_FIELD_NAMES,
     )
 
-    workers[worker_id] = hydrate_worker_record(worker, worker_id, run_schema_version=run_schema_version)
+    workers[worker_id] = worker.to_worker()
     run["updated_at"] = now
 
 
@@ -78,10 +79,16 @@ def normalize_run(run, *, fallback_name):
     run_schema_version = _worker_snapshot_schema_version(normalized)
     workers = _run_worker_snapshots(normalized, fallback_name=fallback_name)
     normalized["workers"] = {
-        worker_id: hydrate_worker_record(worker, worker_id, run_schema_version=run_schema_version)
+        worker_id: _normalize_worker_for_run(worker, worker_id, run_schema_version=run_schema_version)
         for worker_id, worker in workers.items()
     }
     return normalized
+
+
+def _normalize_worker_for_run(worker, worker_id, *, run_schema_version):
+    if is_worker_record(worker):
+        return worker.to_worker()
+    return hydrate_worker_record(worker, worker_id, run_schema_version=run_schema_version)
 
 
 def normalize_run_for_storage(run, *, fallback_name, persisted_run=None):

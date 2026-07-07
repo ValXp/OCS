@@ -1,6 +1,7 @@
 from copy import deepcopy
 import unittest
 
+from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition
 from opencode_session.worker_state import (
     WorkerRecord,
@@ -341,11 +342,16 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
             "output_refs": ["assistant:msg_assistant"],
         }
 
-        worker.apply_transition(worker_snapshot_transition(done_snapshot))
+        worker.apply_transition(
+            worker_snapshot_transition(hydrate_worker_record(done_snapshot, worker.worker_id))
+        )
         after_done = deepcopy(worker)
         worker.apply_transition(
             worker_snapshot_transition(
-                {"id": worker.worker_id, "lifecycle_state": "active_wait", "prompt_ids": ["msg_stale"]}
+                hydrate_worker_record(
+                    {"id": worker.worker_id, "lifecycle_state": "active_wait", "prompt_ids": ["msg_stale"]},
+                    worker.worker_id,
+                )
             )
         )
 
@@ -363,7 +369,7 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
 
 def worker_record(worker_id="review", **fields):
     fields = {"id": worker_id, "prompt": "Review", **fields}
-    return WorkerRecord.from_worker(fields, worker_id).to_worker()
+    return WorkerRecord(worker_id, fields).to_worker()
 
 
 if __name__ == "__main__":

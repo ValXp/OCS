@@ -1,9 +1,9 @@
 from copy import deepcopy
 from dataclasses import dataclass
 
+from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_state import (
     apply_worker_transition_to_worker,
-    normalize_worker,
 )
 
 
@@ -19,7 +19,7 @@ class WorkerTransitionCase:
 
 class WorkerScenario:
     def __init__(self, worker_id="worker", **fields):
-        self.worker = normalize_worker(fields, worker_id)
+        self.worker = hydrate_worker_record(fields, worker_id)
 
     def apply(self, transition_factory):
         transition = transition_factory(self.worker)
@@ -55,7 +55,7 @@ def assert_worker_outcome(
 
 
 def assert_worker_transition_case(test_case, case, *, worker_id="review"):
-    worker = normalize_worker(deepcopy(case.worker_fields), worker_id)
+    worker = hydrate_worker_record(deepcopy(case.worker_fields), worker_id)
     transition = case.transition_factory(worker)
     test_case.assertTrue(transition, case.name)
 

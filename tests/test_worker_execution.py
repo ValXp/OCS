@@ -31,11 +31,11 @@ from opencode_session.worker_session_provisioning import (
     provision_worker_session,
     recoverable_worker_session_creations_by_worker,
 )
+from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_state import (
     WorkerRecord,
     apply_worker_transition,
     ensure_worker,
-    normalize_worker,
     worker_field,
     worker_has_field,
     worker_output_field,
@@ -228,7 +228,8 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(worker_field(worker, "session_id"), "ses_existing")
 
     def test_cleanup_created_worker_sessions_clears_stale_sessions_after_single_session_success(self):
-        worker = WorkerRecord.from_worker(
+        worker = WorkerRecord(
+            "worker",
             {
                 "id": "worker",
                 "cleanup": {
@@ -238,7 +239,6 @@ class WorkerExecutionTest(unittest.TestCase):
                     "sessions": ["ses_old", "ses_retry"],
                 },
             },
-            "worker",
         ).to_worker()
         client = FakeClient([])
 
@@ -267,7 +267,7 @@ class WorkerExecutionTest(unittest.TestCase):
         run = {
             "name": "demo",
             "directory": "/workspace",
-            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+            "workers": {"worker": hydrate_worker_record({"id": "worker"}, "worker")},
         }
         worker = run["workers"]["worker"]
         calls = []
@@ -309,7 +309,7 @@ class WorkerExecutionTest(unittest.TestCase):
         run = {
             "name": "demo",
             "directory": "/workspace",
-            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+            "workers": {"worker": hydrate_worker_record({"id": "worker"}, "worker")},
         }
         worker = run["workers"]["worker"]
         calls = []
@@ -377,7 +377,7 @@ class WorkerExecutionTest(unittest.TestCase):
         run = {
             "name": "demo",
             "directory": "/workspace",
-            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+            "workers": {"worker": hydrate_worker_record({"id": "worker"}, "worker")},
         }
         worker = run["workers"]["worker"]
         journals = []
@@ -445,7 +445,7 @@ class WorkerExecutionTest(unittest.TestCase):
         run = {
             "name": "demo",
             "directory": "/workspace",
-            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+            "workers": {"worker": hydrate_worker_record({"id": "worker"}, "worker")},
         }
         worker = run["workers"]["worker"]
         calls = []
@@ -494,7 +494,7 @@ class WorkerExecutionTest(unittest.TestCase):
         run = {
             "name": "demo",
             "directory": "/workspace",
-            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+            "workers": {"worker": hydrate_worker_record({"id": "worker"}, "worker")},
         }
         worker = run["workers"]["worker"]
         client = FakeClient(["ses_new"])
@@ -570,7 +570,7 @@ class WorkerExecutionTest(unittest.TestCase):
     def test_recoverable_created_worker_sessions_merges_cleanup_and_journal_transactions(self):
         run = {
             "workers": {
-                "worker": normalize_worker(
+                "worker": hydrate_worker_record(
                     {
                         "id": "worker",
                         "cleanup": {
@@ -580,7 +580,7 @@ class WorkerExecutionTest(unittest.TestCase):
                     },
                     "worker",
                 ),
-                "deleted": normalize_worker(
+                "deleted": hydrate_worker_record(
                     {
                         "id": "deleted",
                         "cleanup": {

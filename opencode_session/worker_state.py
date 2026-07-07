@@ -874,8 +874,7 @@ def public_worker_state_fields(lifecycle_state):
 
 
 def worker_output_dict(worker, worker_id=None):
-    record = WorkerRecord.from_worker(worker, worker_id).to_worker()
-    return record.to_output_dict()
+    return _require_worker_record(worker).to_output_dict()
 
 
 def worker_output_field(worker, field_name, default=None):
@@ -1909,9 +1908,9 @@ class WorkerRecord:
 
     @classmethod
     def from_worker(cls, worker, worker_id=None):
-        fields = _worker_init_fields(worker)
-        resolved_worker_id = fields.get("id") or worker_id
-        return cls(resolved_worker_id, fields)
+        worker = _require_worker_record(worker)
+        resolved_worker_id = worker.worker_id or worker_id
+        return cls(resolved_worker_id, worker.to_snapshot())
 
     @classmethod
     def default_snapshot_fields(cls, worker_id):
@@ -1919,8 +1918,7 @@ class WorkerRecord:
 
     @classmethod
     def default_fields(cls, worker_id):
-        fields = cls.default_snapshot_fields(worker_id)
-        return cls.from_worker(require_internal_worker(fields), worker_id)
+        return cls(worker_id, cls.default_snapshot_fields(worker_id))
 
     @classmethod
     def lifecycle_set_fields(cls, worker_id, lifecycle_state):
@@ -2066,7 +2064,7 @@ class WorkerRecord:
 
     def to_worker(self):
         normalized = self.to_snapshot()
-        return type(self).from_worker(require_internal_worker(normalized), self.worker_id)
+        return type(self)(self.worker_id, require_internal_worker(normalized))
 
     def set_session(
         self,
@@ -2144,6 +2142,8 @@ def worker_record_for_mutation(worker, worker_id=None):
 
 
 def require_internal_worker(worker):
+    if not isinstance(worker, Mapping):
+        raise TypeError("internal worker fields must be a mapping")
     missing = [field_name for field_name in WORKER_REQUIRED_FIELD_NAMES if field_name not in worker]
     if missing:
         raise ValueError(f"internal worker missing required fields: {', '.join(missing)}")
@@ -2401,15 +2401,12 @@ def _reduce_worker_transition_to_result(record, transition):
     _finalize_worker_attempt(worker, transition.attempt_finalization)
     return WorkerTransitionResult(
         applied=True,
-        worker=WorkerRecord.from_worker(
-            worker,
-            record.worker_id or transition.worker_id,
-        ).to_worker(),
+        worker=_require_worker_record(worker).to_worker(),
     )
 
 
 def _unchanged_transition_worker(latest_worker, record, transition):
-    return WorkerRecord.from_worker(latest_worker, record.worker_id or transition.worker_id).to_worker()
+    return _require_worker_record(latest_worker).to_worker()
 
 
 def _illegal_transition_reason(latest_worker, transition, metadata):
@@ -2482,7 +2479,11 @@ def next_eligible_action(worker):
 
 def ensure_worker(run, worker_id, *, role):
     workers = run.setdefault("workers", {})
-    worker = normalize_worker(workers.get(worker_id), worker_id)
+    existing = workers.get(worker_id)
+    if existing is None:
+        worker = default_worker_record(worker_id)
+    else:
+        worker = worker_record_for_mutation(existing, worker_id).to_worker()
     if not worker.role:
         worker.role = deepcopy(role)
     worker.id = worker_id

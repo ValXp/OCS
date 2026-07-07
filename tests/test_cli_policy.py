@@ -13,7 +13,8 @@ from opencode_session.cli_policy import (
     exit_code_for_status,
     server_default,
 )
-from opencode_session.worker_state import normalize_worker, refresh_run_summary
+from opencode_session.worker_storage_adapter import hydrate_worker_record
+from opencode_session.worker_state import refresh_run_summary
 
 
 class CliPolicyTest(unittest.TestCase):
@@ -61,8 +62,14 @@ class CliPolicyTest(unittest.TestCase):
         run = {
             "status": "failed",
             "workers": {
-                "build": normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "done_collect"}, "build"),
-                "review": normalize_worker({"id": "review", "prompt": "Review", "lifecycle_state": "failed_terminal"}, "review"),
+                "build": hydrate_worker_record(
+                    {"id": "build", "prompt": "Build", "lifecycle_state": "done_collect"},
+                    "build",
+                ),
+                "review": hydrate_worker_record(
+                    {"id": "review", "prompt": "Review", "lifecycle_state": "failed_terminal"},
+                    "review",
+                ),
             },
         }
 
@@ -71,9 +78,18 @@ class CliPolicyTest(unittest.TestCase):
     def test_exit_code_for_run_uses_refreshed_run_status_precedence(self):
         run = {
             "workers": {
-                "build": normalize_worker({"id": "build", "prompt": "Build", "lifecycle_state": "timeout_terminal"}, "build"),
-                "review": normalize_worker({"id": "review", "prompt": "Review", "lifecycle_state": "aborted"}, "review"),
-                "test": normalize_worker({"id": "test", "prompt": "Test", "lifecycle_state": "failed_terminal"}, "test"),
+                "build": hydrate_worker_record(
+                    {"id": "build", "prompt": "Build", "lifecycle_state": "timeout_terminal"},
+                    "build",
+                ),
+                "review": hydrate_worker_record(
+                    {"id": "review", "prompt": "Review", "lifecycle_state": "aborted"},
+                    "review",
+                ),
+                "test": hydrate_worker_record(
+                    {"id": "test", "prompt": "Test", "lifecycle_state": "failed_terminal"},
+                    "test",
+                ),
             }
         }
 
