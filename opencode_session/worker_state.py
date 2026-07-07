@@ -1679,37 +1679,23 @@ class WorkerRecord:
         self,
         *,
         skip_none=False,
-        role=_UNSET_WORKER_UPDATE,
-        session_id=_UNSET_WORKER_UPDATE,
-        agent=_UNSET_WORKER_UPDATE,
-        model=_UNSET_WORKER_UPDATE,
-        prompt=_UNSET_WORKER_UPDATE,
-        lifecycle_state=_UNSET_WORKER_UPDATE,
-        dependencies=_UNSET_WORKER_UPDATE,
-        prompt_ids=_UNSET_WORKER_UPDATE,
-        retry_count=_UNSET_WORKER_UPDATE,
-        retry_limit=_UNSET_WORKER_UPDATE,
-        retryable_failures=_UNSET_WORKER_UPDATE,
-        timeout_seconds=_UNSET_WORKER_UPDATE,
-        timeout_policy=_UNSET_WORKER_UPDATE,
-        timeout_started_at=_UNSET_WORKER_UPDATE,
-        timed_out_at=_UNSET_WORKER_UPDATE,
-        failure_category=_UNSET_WORKER_UPDATE,
-        failure_reason=_UNSET_WORKER_UPDATE,
-        last_failure_category=_UNSET_WORKER_UPDATE,
-        last_failure_reason=_UNSET_WORKER_UPDATE,
-        blockers=_UNSET_WORKER_UPDATE,
-        output_refs=_UNSET_WORKER_UPDATE,
-        error=_UNSET_WORKER_UPDATE,
-        failure_retryable=_UNSET_WORKER_UPDATE,
-        manual_retry_required=_UNSET_WORKER_UPDATE,
-        cleanup=_UNSET_WORKER_UPDATE,
-        abort=_UNSET_WORKER_UPDATE,
-        attempts=_UNSET_WORKER_UPDATE,
-        result=_UNSET_WORKER_UPDATE,
+        **fields,
     ):
+        unexpected_field = next(
+            (
+                field_name
+                for field_name in fields
+                if field_name not in WORKER_RECORD_UPDATE_FIELD_NAMES
+            ),
+            None,
+        )
+        if unexpected_field is not None:
+            raise TypeError(
+                "update_canonical_fields() got an unexpected keyword "
+                f"argument '{unexpected_field}'"
+            )
         return self.update_canonical_fields_from_mapping(
-            locals(),
+            fields,
             skip_none=skip_none,
             field_names=WORKER_RECORD_UPDATE_FIELD_NAMES,
         )

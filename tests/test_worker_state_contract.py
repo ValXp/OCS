@@ -8,6 +8,7 @@ from opencode_session.worker_storage_adapter import (
 from opencode_session.worker_field_spec import (
     WORKER_FIELD_SPEC_BY_NAME,
     WORKER_FIELD_TIMEOUT_POLICY_STATUSES,
+    WORKER_RECORD_UPDATE_FIELD_NAMES,
 )
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition_patch
 from opencode_session.run_record import upsert_worker_record
@@ -114,6 +115,52 @@ class WorkerStateContractTest(unittest.TestCase):
     def test_worker_record_runtime_slots_are_projected_from_canonical_field_specs(self):
         self.assertEqual(WorkerRecord.__slots__, (*WORKER_RECORD_FIELD_NAMES, "_present_optional_fields"))
         self.assertEqual(set(WorkerRecord.__slots__) - {"_present_optional_fields"}, WORKER_RECORD_CANONICAL_FIELD_NAMES)
+
+    def test_worker_record_update_boundary_follows_canonical_field_specs(self):
+        self.assertEqual(
+            WORKER_RECORD_UPDATE_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.record_update),
+        )
+
+        def update_value(spec):
+            if spec.validator == "list":
+                if spec.name == "attempts":
+                    return [{"id": "attempt-1"}]
+                return [f"{spec.name}-value"]
+            if spec.validator == "int":
+                return 1
+            if spec.validator == "timeout_seconds":
+                return 0.5
+            if spec.validator == "timeout_policy":
+                return "failed"
+            if spec.validator == "lifecycle_state":
+                return "active_wait"
+            if spec.schema_annotation == "bool":
+                return True
+            if spec.schema_annotation == "JsonObject":
+                return {"updated": spec.name}
+            return f"{spec.name}-value"
+
+        for spec in WORKER_FIELD_SPECS:
+            if not spec.record_update:
+                continue
+            with self.subTest(field_name=spec.name):
+                worker = WorkerRecord.default_fields("review")
+                value = update_value(spec)
+
+                worker.update_canonical_fields(**{spec.name: value})
+
+                expected_value = spec.canonical_value(value)
+                self.assertEqual(getattr(worker, spec.name), expected_value)
+                self.assertEqual(worker.to_snapshot()[spec.name], expected_value)
+
+    def test_worker_record_update_boundary_rejects_non_update_fields(self):
+        worker = WorkerRecord.default_fields("review")
+
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'title'"):
+            worker.update_canonical_fields(title="Review title")
+
+        self.assertNotIn("title", worker.to_snapshot())
 
     def test_worker_storage_coercion_fields_are_projected_from_canonical_field_specs(self):
         self.assertEqual(
