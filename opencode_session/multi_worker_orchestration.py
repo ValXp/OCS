@@ -20,7 +20,6 @@ from opencode_session.run_persistence import (
 from opencode_session.run_start_core import (
     CreatedWorkerCleanupExecutor,
     CreatedWorkerCleanupPlanner,
-    RunStartCore,
     RunStartCapabilityProbe,
     remember_created_worker_sessions,
 )
@@ -28,8 +27,10 @@ from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_run import RunRecord
 from opencode_session.worker_execution import (
+    WorkerExecutionExecutor,
     WorkerExecutionOutcome,
 )
+from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import (
     WorkerTransition,
@@ -238,8 +239,8 @@ class DisposableSessionTracker:
 
 
 class SelectedSerialWorkerExecutor:
-    def __init__(self, core):
-        self.core = core
+    def __init__(self, worker_executor):
+        self.worker_executor = worker_executor
 
     def execute_next(
         self,
@@ -266,7 +267,7 @@ class SelectedSerialWorkerExecutor:
         return SerialWorkerExecutionOutcome(run, first_error_outcome)
 
     def _execute_single_worker(self, client, run, worker, capabilities, session_tracker):
-        return self.core.execute_worker(
+        return self.worker_executor.execute(
             client,
             run,
             worker,
@@ -274,6 +275,7 @@ class SelectedSerialWorkerExecutor:
             capabilities,
             agent=worker.agent,
             model=worker.model,
+            create_session=True,
             cleanup_requested=getattr(session_tracker, "enabled", False),
         )
 
@@ -309,14 +311,13 @@ class DependencyOrderedSerialRunOrchestrationService:
             refresh_run_summary=refresh_orchestration_run_summary,
         )
         self.outcome_policy = DependencyOrderedSerialRunStartOutcomePolicy()
-        self.core = RunStartCore(
-            persist_worker_transition=self._persist_worker_transition,
-            refresh_run_summary=refresh_orchestration_run_summary,
+        self.worker_execution_executor = WorkerExecutionExecutor(
+            apply_transition=self._persist_worker_execution_transition,
             executor=self.executor,
-            persist_run_mutation=self._persist_mutation,
             now=self.now,
+            session_journal=self._worker_session_journal(),
         )
-        self.worker_executor = SelectedSerialWorkerExecutor(self.core)
+        self.worker_executor = SelectedSerialWorkerExecutor(self.worker_execution_executor)
         self.run_loop_executor = DependencyOrderedSerialRunLoopExecutor(self.scheduler, self.worker_executor)
 
     def start(self, request):
@@ -387,6 +388,18 @@ class DependencyOrderedSerialRunOrchestrationService:
             refresh_run_summary=refresh_orchestration_run_summary,
             now=self.now,
         )
+
+    def _persist_worker_execution_transition(self, run, worker, transition):
+        result = self._persist_worker_transition(run, transition)
+        persisted_worker = (
+            result.workers[0]
+            if result.workers
+            else result.run.get("workers", {}).get(transition.worker_id)
+        )
+        return result.run, persisted_worker or worker
+
+    def _worker_session_journal(self):
+        return WorkerSessionCreationJournal(self._persist_mutation, now=self.now)
 
     def _persist_transitions(self, run, transitions):
         result = persist_worker_transitions(

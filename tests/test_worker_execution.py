@@ -5,8 +5,6 @@ from unittest.mock import patch
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.run_persistence import PersistedWorkerTransitions
-from opencode_session.run_start_core import RunStartCore
 from opencode_session.run_store import RunStoreError
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
 from opencode_session.worker_cleanup_recovery import (
@@ -803,18 +801,18 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertFalse(worker_has_field(worker, "timeout_retry_sessions"))
         self.assertFalse(worker_has_field(worker, "result"))
 
-    def test_run_start_core_persists_attempt_record_before_blocking_executor(self):
+    def test_worker_execution_executor_persists_attempt_record_before_blocking_executor(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
             worker = ensure_worker(run, "worker", role="worker")
             client = FakeClient(["ses_initial"])
             persisted_workers = []
 
-            def persist_worker_transition(run, transition):
+            def persist_worker_transition(run, worker, transition):
                 persisted_run = deepcopy(run)
                 updated = apply_worker_transition(persisted_run.setdefault("workers", {}), transition)
                 persisted_workers.append(deepcopy(updated))
-                return PersistedWorkerTransitions(persisted_run, [updated])
+                return persisted_run, updated
 
             def execute_prompt(client, session_id, prompt, capabilities):
                 client.requests.append(("execute", session_id, prompt))
@@ -834,13 +832,12 @@ class WorkerExecutionTest(unittest.TestCase):
                 self.assertNotIn("result_status", attempt)
                 return {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
 
-            core = RunStartCore(
-                persist_worker_transition=persist_worker_transition,
-                refresh_run_summary=lambda run: None,
+            worker_executor = WorkerExecutionExecutor(
+                apply_transition=persist_worker_transition,
                 executor=execute_prompt,
                 now=lambda: "2026-07-03T00:00:00Z",
             )
-            outcome = core.execute_worker(
+            outcome = worker_executor.execute(
                 client,
                 run,
                 worker,

@@ -71,7 +71,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertIsNotNone(client.route_plan)
         self.assertEqual(client.requests, [])
 
-    def test_next_eligible_worker_executor_delegates_to_core_direct_execution(self):
+    def test_selected_worker_executor_invokes_worker_execution_pipeline_directly(self):
         run = {
             "workers": {
                 "worker": normalize_worker(
@@ -87,11 +87,11 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         }
         client = object()
 
-        class DirectCore:
+        class RecordingWorkerExecution:
             def __init__(self):
                 self.calls = []
 
-            def execute_worker(
+            def execute(
                 self,
                 client,
                 run,
@@ -102,6 +102,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                 session_id=None,
                 agent=None,
                 model=None,
+                create_session=True,
                 cleanup_requested=False,
             ):
                 self.calls.append(
@@ -114,6 +115,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                         "session_id": session_id,
                         "agent": agent,
                         "model": model,
+                        "create_session": create_session,
                         "cleanup_requested": cleanup_requested,
                     }
                 )
@@ -128,10 +130,10 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             def remember_worker_outcome(self, run, fallback_worker, outcome):
                 self.remembered.append((run, fallback_worker, outcome.kind))
 
-        core = DirectCore()
+        worker_execution = RecordingWorkerExecution()
         session_tracker = RecordingSessionTracker()
 
-        outcome = SelectedSerialWorkerExecutor(core).execute_next(
+        outcome = SelectedSerialWorkerExecutor(worker_execution).execute_next(
             run,
             "worker",
             client,
@@ -141,16 +143,17 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         )
 
         self.assertEqual(worker_output_field(outcome.run["workers"]["worker"], "status"), "done")
-        self.assertEqual(len(core.calls), 1)
-        self.assertIs(core.calls[0]["client"], client)
-        self.assertIs(core.calls[0]["run"], run)
-        self.assertIs(core.calls[0]["worker"], run["workers"]["worker"])
-        self.assertEqual(core.calls[0]["prompt"], "Finish the worker task")
-        self.assertEqual(core.calls[0]["capabilities"], CAPABILITIES)
-        self.assertIsNone(core.calls[0]["session_id"])
-        self.assertEqual(core.calls[0]["agent"], "build")
-        self.assertEqual(core.calls[0]["model"], "openai/gpt-5.5")
-        self.assertFalse(core.calls[0]["cleanup_requested"])
+        self.assertEqual(len(worker_execution.calls), 1)
+        self.assertIs(worker_execution.calls[0]["client"], client)
+        self.assertIs(worker_execution.calls[0]["run"], run)
+        self.assertIs(worker_execution.calls[0]["worker"], run["workers"]["worker"])
+        self.assertEqual(worker_execution.calls[0]["prompt"], "Finish the worker task")
+        self.assertEqual(worker_execution.calls[0]["capabilities"], CAPABILITIES)
+        self.assertIsNone(worker_execution.calls[0]["session_id"])
+        self.assertEqual(worker_execution.calls[0]["agent"], "build")
+        self.assertEqual(worker_execution.calls[0]["model"], "openai/gpt-5.5")
+        self.assertTrue(worker_execution.calls[0]["create_session"])
+        self.assertFalse(worker_execution.calls[0]["cleanup_requested"])
         self.assertEqual(worker_output_field(session_tracker.remembered[0][1], "status"), "done")
         self.assertEqual(session_tracker.remembered[0][2], "completed")
 
@@ -171,11 +174,11 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         client = object()
         test_case = self
 
-        class RetryCore:
+        class RetryWorkerExecution:
             def __init__(self):
                 self.calls = 0
 
-            def execute_worker(
+            def execute(
                 self,
                 client,
                 run,
@@ -186,6 +189,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                 session_id=None,
                 agent=None,
                 model=None,
+                create_session=True,
                 cleanup_requested=False,
             ):
                 self.calls += 1
@@ -208,10 +212,10 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             def remember_worker_outcome(self, run, fallback_worker, outcome):
                 self.remembered.append((run, fallback_worker, outcome.kind))
 
-        core = RetryCore()
+        worker_execution = RetryWorkerExecution()
         session_tracker = RecordingSessionTracker()
 
-        outcome = SelectedSerialWorkerExecutor(core).execute_next(
+        outcome = SelectedSerialWorkerExecutor(worker_execution).execute_next(
             run,
             "worker",
             client,
@@ -220,7 +224,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
             execution_policy=EXECUTION_POLICY_FAIL_FAST,
         )
 
-        self.assertEqual(core.calls, 1)
+        self.assertEqual(worker_execution.calls, 1)
         worker = outcome.run["workers"]["worker"]
         self.assertEqual(worker_output_field(worker, "status"), "active")
         self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
