@@ -7,6 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "opencode_session"
 PACKAGE_ROOT = PROJECT_ROOT / PACKAGE_NAME
 MAX_SOURCE_LINES = 300
+LONG_SOURCE_FILE_DECOMPOSITION_PLAN = PROJECT_ROOT / "docs" / "ocs" / "architecture-quality.md"
 
 # Existing long source files are grandfathered at their current size so this
 # gate prevents further growth without forcing skipped decomposition work.
@@ -21,6 +22,22 @@ GRANDFATHERED_LONG_SOURCE_FILES = {
     "opencode_session/worker_field_spec.py": 386,
     "opencode_session/worker_session_provisioning.py": 438,
     "opencode_session/worker_state.py": 2398,
+}
+
+# Long-file exceptions are temporary. Each one must declare the intended
+# reduction target here and appear in the decomposition plan, but current debt is
+# only failed on growth so skipped worker_state decomposition stays non-blocking.
+LONG_SOURCE_FILE_RATCHET_TARGETS = {
+    "opencode_session/api_profile.py": MAX_SOURCE_LINES,
+    "opencode_session/multi_worker_orchestration.py": MAX_SOURCE_LINES,
+    "opencode_session/remote_journal.py": MAX_SOURCE_LINES,
+    "opencode_session/run_services.py": MAX_SOURCE_LINES,
+    "opencode_session/schema_event_adapter.py": MAX_SOURCE_LINES,
+    "opencode_session/schema_message_adapter.py": MAX_SOURCE_LINES,
+    "opencode_session/validation_live.py": MAX_SOURCE_LINES,
+    "opencode_session/worker_field_spec.py": MAX_SOURCE_LINES,
+    "opencode_session/worker_session_provisioning.py": MAX_SOURCE_LINES,
+    "opencode_session/worker_state.py": MAX_SOURCE_LINES,
 }
 
 # The direct worker_state cycle is an explicitly skipped review finding. Keep
@@ -173,9 +190,47 @@ class ArchitectureQualityGateTest(unittest.TestCase):
             grandfathered_limit = GRANDFATHERED_LONG_SOURCE_FILES.get(relative_path)
             if grandfathered_limit is not None:
                 if line_count > grandfathered_limit:
-                    offenders.append(f"{relative_path} grew from {grandfathered_limit} to {line_count} lines")
+                    target = LONG_SOURCE_FILE_RATCHET_TARGETS.get(relative_path, MAX_SOURCE_LINES)
+                    offenders.append(
+                        f"{relative_path} grew from {grandfathered_limit} to {line_count} lines; "
+                        f"ratchet target is {target}"
+                    )
+                elif line_count <= MAX_SOURCE_LINES:
+                    offenders.append(
+                        f"{relative_path} is now {line_count} lines; remove its grandfathered exception"
+                    )
             elif line_count > MAX_SOURCE_LINES:
                 offenders.append(f"{relative_path} has {line_count} lines; max is {MAX_SOURCE_LINES}")
+
+        self.assertEqual([], offenders)
+
+    def test_grandfathered_long_source_files_have_explicit_ratchet_targets(self):
+        plan_text = LONG_SOURCE_FILE_DECOMPOSITION_PLAN.read_text(encoding="utf-8")
+        offenders = []
+
+        grandfathered_paths = set(GRANDFATHERED_LONG_SOURCE_FILES)
+        ratchet_paths = set(LONG_SOURCE_FILE_RATCHET_TARGETS)
+        for relative_path in sorted(grandfathered_paths - ratchet_paths):
+            offenders.append(f"{relative_path} is grandfathered without a ratchet target")
+        for relative_path in sorted(ratchet_paths - grandfathered_paths):
+            offenders.append(f"{relative_path} has a ratchet target but is not grandfathered")
+
+        for relative_path, grandfathered_limit in sorted(GRANDFATHERED_LONG_SOURCE_FILES.items()):
+            target = LONG_SOURCE_FILE_RATCHET_TARGETS.get(relative_path)
+            if target is None:
+                continue
+            if target >= grandfathered_limit:
+                offenders.append(
+                    f"{relative_path} ratchet target {target} must be below grandfathered ceiling "
+                    f"{grandfathered_limit}"
+                )
+            if target > MAX_SOURCE_LINES:
+                offenders.append(
+                    f"{relative_path} ratchet target {target} exceeds standard max {MAX_SOURCE_LINES}"
+                )
+            if relative_path not in plan_text:
+                plan_path = LONG_SOURCE_FILE_DECOMPOSITION_PLAN.relative_to(PROJECT_ROOT).as_posix()
+                offenders.append(f"{relative_path} is missing from {plan_path}")
 
         self.assertEqual([], offenders)
 
