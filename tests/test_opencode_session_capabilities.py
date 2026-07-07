@@ -200,6 +200,20 @@ class CapabilityProbeCliTest(unittest.TestCase):
             {"messageID": "msg_1", "parts": [{"type": "text", "text": "PONG"}], "delivery": "queue"},
         )
 
+    def test_server_profile_selects_message_adapters_from_route_contracts(self):
+        profile = OpenCodeServerProfile.from_route_plan(
+            {
+                "blocking_message": "/custom/{sessionID}/message",
+                "legacy_run": "/session/{sessionID}/run",
+                "legacy_reply": "/session/{sessionID}/reply",
+            }
+        )
+
+        self.assertEqual(profile.adapter("blocking_message").version, "session-message")
+        self.assertEqual(profile.adapter("legacy_run").version, "legacy-run-reply")
+        self.assertEqual(profile.adapter("legacy_reply").version, "legacy-run-reply")
+        self.assertEqual(profile.message_route("unknown_endpoint"), "unknown")
+
     def test_detected_session_route_plan_drives_client_session_routes(self):
         doc = {
             "openapi": "3.1.0",

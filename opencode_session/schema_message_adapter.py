@@ -10,12 +10,17 @@ from opencode_session.schema_helpers import (
     set_missing,
 )
 from opencode_session.schema_message import NormalizedMessageRecord
-from opencode_session.schema_route_contract import RouteAdapterContract, route_field
+from opencode_session.schema_route_contract import (
+    RouteAdapterContract,
+    adapters_by_endpoint,
+    adapters_by_route_path,
+    route_field,
+    route_path_key,
+)
 from opencode_session.status import short_status
 
 
 MESSAGE_CANONICAL_FIELDS = ("id", "role", "status", "raw_status", "cost", "tokens", "text")
-MESSAGE_FIELD_NAMES = ("id", "role", "status", "cost", "tokens", "text", "error")
 MESSAGE_KNOWN_FIELDS = ("id", "role", "status", "text", "error")
 MESSAGE_TEXT_FIELDS = ("text", "content")
 MESSAGE_ERROR_FIELDS = ("error", "reason", "message")
@@ -23,6 +28,9 @@ MESSAGE_ID_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id",))
 FINAL_MESSAGE_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id", "text"))
 SESSION_MESSAGE_ROUTE = "session_message"
 LEGACY_MESSAGE_ROUTE = "legacy_run_reply"
+SESSION_MESSAGE_PATH = "/session/{sessionID}/message"
+LEGACY_RUN_PATH = "/session/{sessionID}/run"
+LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 MESSAGE_REQUIRE_ID = "message_id"
 MESSAGE_REQUIRE_FINAL_ASSISTANT = "final_assistant"
 TERMINAL_MESSAGE_STATUSES = {"done", "failed", "aborted", "timeout"}
@@ -42,6 +50,8 @@ SESSION_MESSAGE_CONTRACT = RouteAdapterContract(
     ),
     known_fields=MESSAGE_KNOWN_FIELDS,
     minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
+    route_paths=(SESSION_MESSAGE_PATH,),
+    endpoint_names=("blocking_message",),
 )
 LEGACY_MESSAGE_CONTRACT = RouteAdapterContract(
     route=LEGACY_MESSAGE_ROUTE,
@@ -57,12 +67,12 @@ LEGACY_MESSAGE_CONTRACT = RouteAdapterContract(
     ),
     known_fields=MESSAGE_KNOWN_FIELDS,
     minimum_field_sets=MESSAGE_ID_MINIMUM_FIELD_SETS,
+    route_paths=(LEGACY_RUN_PATH, LEGACY_REPLY_PATH),
+    endpoint_names=("legacy_run", "legacy_reply"),
 )
 UNKNOWN_MESSAGE_CONTRACT = RouteAdapterContract(
     route="unknown",
     version="unknown",
-    fields=tuple(route_field(name) for name in MESSAGE_FIELD_NAMES),
-    known_fields=MESSAGE_KNOWN_FIELDS,
 )
 MESSAGE_VALUE_ALIASES = tuple((field.name, field.aliases) for field in LEGACY_MESSAGE_CONTRACT.fields)
 
@@ -266,7 +276,18 @@ def _message_text_from_fields(message, fields):
 def message_adapter_for_route(route=None):
     if route is None:
         return DEFAULT_MESSAGE_ADAPTER
-    return MESSAGE_ROUTE_ADAPTERS.get(route, UNKNOWN_MESSAGE_ADAPTER)
+    return (
+        MESSAGE_ROUTE_ADAPTERS.get(route)
+        or MESSAGE_ROUTE_PATH_ADAPTERS.get(route_path_key(route))
+        or UNKNOWN_MESSAGE_ADAPTER
+    )
+
+
+def message_adapter_for_endpoint(endpoint, route_path=None):
+    path_adapter = MESSAGE_ROUTE_PATH_ADAPTERS.get(route_path_key(route_path))
+    if path_adapter is not None:
+        return path_adapter
+    return MESSAGE_ENDPOINT_ADAPTERS.get(endpoint, UNKNOWN_MESSAGE_ADAPTER)
 
 
 def unknown_message_record(raw) -> NormalizedMessageRecord:
@@ -300,4 +321,6 @@ MESSAGE_ROUTE_ADAPTERS = {
     SESSION_MESSAGE_ROUTE: SESSION_MESSAGE_ADAPTER,
     LEGACY_MESSAGE_ROUTE: LEGACY_MESSAGE_ADAPTER,
 }
+MESSAGE_ROUTE_PATH_ADAPTERS = adapters_by_route_path((SESSION_MESSAGE_ADAPTER, LEGACY_MESSAGE_ADAPTER))
+MESSAGE_ENDPOINT_ADAPTERS = adapters_by_endpoint((SESSION_MESSAGE_ADAPTER, LEGACY_MESSAGE_ADAPTER))
 DEFAULT_MESSAGE_ADAPTER = LEGACY_MESSAGE_ADAPTER

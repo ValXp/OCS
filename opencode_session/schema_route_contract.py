@@ -37,6 +37,8 @@ class RouteAdapterContract:
     fields: Tuple[RouteField, ...] = ()
     known_fields: Tuple[str, ...] = ()
     minimum_field_sets: Tuple[Tuple[str, ...], ...] = ()
+    route_paths: Tuple[str, ...] = ()
+    endpoint_names: Tuple[str, ...] = ()
 
     def read_fields(self, record):
         return {field.name: field.read(record) for field in self.fields}
@@ -59,3 +61,35 @@ def route_field(name, *aliases, children=(), include_info=True):
 
 def child_field(name, *aliases):
     return name, tuple(aliases)
+
+
+def route_path_key(path):
+    if path is None:
+        return None
+    key = str(path).split("?", 1)[0].rstrip("/")
+    replacements = (
+        (":sessionID", "{sessionID}"),
+        (":id", "{sessionID}"),
+        ("{id}", "{sessionID}"),
+        (":requestID", "{requestID}"),
+        ("{requestId}", "{requestID}"),
+    )
+    for old, new in replacements:
+        key = key.replace(old, new)
+    return key
+
+
+def adapters_by_route_path(adapters):
+    return {
+        route_path_key(path): adapter
+        for adapter in adapters
+        for path in adapter.contract.route_paths
+    }
+
+
+def adapters_by_endpoint(adapters):
+    return {
+        endpoint_name: adapter
+        for adapter in adapters
+        for endpoint_name in adapter.contract.endpoint_names
+    }

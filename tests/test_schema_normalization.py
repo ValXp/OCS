@@ -15,6 +15,7 @@ from opencode_session.schema_message_adapter import (
     SESSION_MESSAGE_ADAPTER,
     SESSION_MESSAGE_ROUTE,
     iter_normalized_message_records,
+    message_adapter_for_route,
     message_value,
     normalize_message_record,
     normalize_message_result,
@@ -158,6 +159,13 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertTrue(SESSION_MESSAGE_ADAPTER.has_minimum_shape(session_failure))
         self.assertFalse(LEGACY_MESSAGE_ADAPTER.has_minimum_shape(legacy_text_only))
         self.assertTrue(LEGACY_MESSAGE_ADAPTER.has_minimum_shape(legacy_identity))
+
+    def test_message_route_adapters_are_selected_from_versioned_route_contracts(self):
+        self.assertEqual(message_adapter_for_route(SESSION_MESSAGE_ROUTE).version, "session-message")
+        self.assertEqual(message_adapter_for_route("/session/{sessionID}/message").version, "session-message")
+        self.assertEqual(message_adapter_for_route("/session/:sessionID/run?wait=true").version, "legacy-run-reply")
+        self.assertEqual(message_adapter_for_route("/session/{id}/reply/").version, "legacy-run-reply")
+        self.assertEqual(message_adapter_for_route("/custom/{sessionID}/message").version, "unknown")
 
     def test_message_adapter_result_reports_execution_invariants(self):
         final_missing_text = normalize_message_result(
@@ -561,6 +569,15 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(normalized["raw"], message)
         self.assertIsNone(message_value(message, "id", route="custom_message_route"))
 
+    def test_unknown_message_route_rejects_canonical_message_shape(self):
+        message = {"id": "msg_1", "role": "assistant", "status": "completed", "text": "done"}
+
+        normalized = normalize_message_record(message, route="/custom/{sessionID}/message")
+
+        self.assertEqual(normalized["schema_status"], "unknown")
+        self.assertEqual(normalized["raw"], message)
+        self.assertIsNone(message_value(message, "id", route="/custom/{sessionID}/message"))
+
     def test_message_token_only_shape_is_unknown(self):
         message = {"tokenUsage": {"input": 1, "output": 2}}
 
@@ -605,6 +622,21 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(legacy_event["kind"], "status")
         self.assertEqual(legacy_event["session_id"], "ses_1")
         self.assertEqual(legacy_event["status"], "done")
+
+    def test_event_route_adapter_selection_uses_route_path_contract(self):
+        event = {
+            "type": "session.status",
+            "properties": {"sessionID": "ses_1", "status": "completed"},
+        }
+
+        api_event = normalize_event_record(event, "ses_1", route_path="/api/event?reconnect=true")
+        unknown_event = normalize_event_record(event, "ses_1", route_path="/custom/event?reconnect=true")
+
+        self.assertEqual(api_event["kind"], "status")
+        self.assertEqual(api_event["status"], "done")
+        self.assertEqual(unknown_event["kind"], "unknown")
+        self.assertEqual(unknown_event["schema_status"], "unknown")
+        self.assertNotIn("status", unknown_event)
 
     def test_unknown_event_route_does_not_try_known_event_shapes(self):
         event = {

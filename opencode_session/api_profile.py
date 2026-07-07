@@ -5,9 +5,11 @@ from urllib.parse import quote
 from opencode_session.schema_admission_adapter import ADMISSION_ADAPTER
 from opencode_session.schema_event_adapter import event_adapter_for_route
 from opencode_session.schema_message_adapter import (
-    LEGACY_MESSAGE_ADAPTER,
-    SESSION_MESSAGE_ADAPTER,
+    LEGACY_REPLY_PATH,
+    LEGACY_RUN_PATH,
+    SESSION_MESSAGE_PATH,
     UNKNOWN_MESSAGE_ADAPTER,
+    message_adapter_for_endpoint,
     normalize_message_record as _normalize_message_record,
 )
 from opencode_session.schema_session_adapter import LEGACY_SESSION_ADAPTER, session_adapter_for_route
@@ -17,9 +19,6 @@ SESSION_PATHS = ["/api/session", "/session"]
 PROMPT_PATHS = ["/api/session/{sessionID}/prompt", "/session/{sessionID}/prompt_async"]
 WAIT_PATHS = ["/api/session/{sessionID}/wait"]
 EVENT_PATHS = ["/api/event", "/event", "/global/event"]
-SESSION_MESSAGE_PATH = "/session/{sessionID}/message"
-LEGACY_RUN_PATH = "/session/{sessionID}/run"
-LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 
 PUBLIC_ROUTE_PLAN_KEYS = (
     "session_collection",
@@ -270,9 +269,9 @@ def _adapters_for_route_plan(route_plan):
         "session_children": LEGACY_SESSION_ADAPTER,
         "events": event_adapter_for_route(route_plan.get("events")),
         "v2_prompt": ADMISSION_ADAPTER,
-        "blocking_message": SESSION_MESSAGE_ADAPTER,
-        "legacy_run": LEGACY_MESSAGE_ADAPTER,
-        "legacy_reply": LEGACY_MESSAGE_ADAPTER,
+        "blocking_message": message_adapter_for_endpoint("blocking_message", route_plan.get("blocking_message")),
+        "legacy_run": message_adapter_for_endpoint("legacy_run", route_plan.get("legacy_run")),
+        "legacy_reply": message_adapter_for_endpoint("legacy_reply", route_plan.get("legacy_reply")),
     }
 
 

@@ -13,7 +13,12 @@ from opencode_session.schema_helpers import (
     set_if_present,
     string_value,
 )
-from opencode_session.schema_route_contract import RouteAdapterContract, route_field
+from opencode_session.schema_route_contract import (
+    RouteAdapterContract,
+    adapters_by_route_path,
+    route_field,
+    route_path_key,
+)
 from opencode_session.status import short_status
 
 
@@ -58,8 +63,18 @@ EVENT_ROUTE_FIELDS = (
     ),
     route_field("question", "question", "prompt", "title", include_info=False),
 )
-API_EVENT_CONTRACT = RouteAdapterContract(route="event", version="api-v1", fields=EVENT_ROUTE_FIELDS)
-LEGACY_EVENT_CONTRACT = RouteAdapterContract(route="event", version="legacy", fields=EVENT_ROUTE_FIELDS)
+API_EVENT_CONTRACT = RouteAdapterContract(
+    route="event",
+    version="api-v1",
+    fields=EVENT_ROUTE_FIELDS,
+    route_paths=(API_EVENT_ROUTE,),
+)
+LEGACY_EVENT_CONTRACT = RouteAdapterContract(
+    route="event",
+    version="legacy",
+    fields=EVENT_ROUTE_FIELDS,
+    route_paths=tuple(LEGACY_EVENT_ROUTES),
+)
 KNOWN_EVENT_CONTRACT = RouteAdapterContract(route="event", version="known-shapes", fields=EVENT_ROUTE_FIELDS)
 UNKNOWN_EVENT_CONTRACT = RouteAdapterContract(route="event", version="unknown")
 
@@ -319,7 +334,7 @@ def _error_text(error):
 def event_adapter_for_route(route_path=None):
     if route_path is None:
         return KNOWN_EVENT_DECODER
-    normalized_path = str(route_path).split("?", 1)[0].rstrip("/")
+    normalized_path = route_path_key(route_path)
     return EVENT_ROUTE_DECODERS.get(normalized_path, UNKNOWN_EVENT_DECODER)
 
 
@@ -352,8 +367,7 @@ API_EVENT_DECODER = ApiEventRouteDecoder()
 LEGACY_EVENT_DECODER = LegacyEventRouteDecoder()
 KNOWN_EVENT_DECODER = KnownEventRouteDecoder((API_EVENT_DECODER, LEGACY_EVENT_DECODER))
 UNKNOWN_EVENT_DECODER = UnknownEventRouteDecoder()
-EVENT_ROUTE_DECODERS = {API_EVENT_ROUTE: API_EVENT_DECODER}
-EVENT_ROUTE_DECODERS.update({route: LEGACY_EVENT_DECODER for route in LEGACY_EVENT_ROUTES})
+EVENT_ROUTE_DECODERS = adapters_by_route_path((API_EVENT_DECODER, LEGACY_EVENT_DECODER))
 EVENT_KIND_CONTRACTS = _event_kind_contracts()
 EVENT_ADAPTER = KNOWN_EVENT_DECODER
 OPENAPI_EVENT_ADAPTER = API_EVENT_DECODER
