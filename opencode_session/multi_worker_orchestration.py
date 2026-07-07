@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiClient
@@ -11,6 +10,7 @@ from opencode_session.cli_policy import (
     EX_UNSUPPORTED,
     exit_code_for_run as _exit_code_for_orchestration_run,
 )
+from opencode_session.domain_helpers import utc_now
 from opencode_session.run_persistence import (
     persist_run_mutation,
     persist_run_summary,
@@ -388,7 +388,7 @@ class DependencyOrderedSerialRunOrchestrationService:
         self.client_factory = client_factory
         self.capability_detector = capability_detector
         self.executor = executor
-        self.now = now or _utc_now
+        self.now = now or utc_now
         self.capability_probe = RunStartCapabilityProbe(
             client_factory=self.client_factory,
             capability_detector=self.capability_detector,
@@ -567,7 +567,3 @@ def _normalize_execution_policy(policy):
     if normalized not in EXECUTION_POLICIES:
         raise RunStoreError(f"unsupported execution policy '{policy}'")
     return normalized
-
-
-def _utc_now():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

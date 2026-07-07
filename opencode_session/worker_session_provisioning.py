@@ -2,6 +2,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
+from opencode_session.domain_helpers import append_unique_string, string_list
 from opencode_session.remote_journal import (
     MISSING_INTENT_RECORD_APPLIED,
     OUTBOX_STATE_APPLIED,
@@ -65,9 +66,9 @@ class WorkerSessionCreationJournalEntry:
         if not isinstance(worker_id, str) or not worker_id:
             return None
         session_ids = []
-        for session_id in _string_list(entry.get("created_session_ids")):
-            _append_unique_session_id(session_ids, session_id)
-        _append_unique_session_id(session_ids, entry.get("session_id"))
+        for session_id in string_list(entry.get("created_session_ids")):
+            append_unique_string(session_ids, session_id)
+        append_unique_string(session_ids, entry.get("session_id"))
         return cls(
             worker_id=worker_id,
             cleanup_requested=entry.get("cleanup_requested") is True,
@@ -337,7 +338,7 @@ def recoverable_worker_session_creations_by_worker(run):
             continue
         session_ids = session_ids_by_worker.setdefault(creation.worker_id, [])
         for session_id in creation.session_ids:
-            _append_unique_session_id(session_ids, session_id)
+            append_unique_string(session_ids, session_id)
     return {worker_id: session_ids for worker_id, session_ids in session_ids_by_worker.items() if session_ids}
 
 
@@ -432,18 +433,6 @@ def _coerce_worker_record(run, worker):
     if isinstance(run, dict) and worker_id:
         return _ensure_latest_worker(run, worker_id)
     return worker_record_for_mutation(worker, worker_id).to_worker()
-
-
-def _string_list(value):
-    if not isinstance(value, list):
-        return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
-
-
-def _append_unique_session_id(session_ids, session_id):
-    if isinstance(session_id, str) and session_id and session_id not in session_ids:
-        session_ids.append(session_id)
-
 
 def _new_worker_session_journal_id():
     return f"worker_session_create_{uuid.uuid4().hex}"

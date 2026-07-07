@@ -3,6 +3,7 @@ from typing import Optional
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
+from opencode_session.domain_helpers import append_unique_string, string_list
 from opencode_session.worker_session_provisioning import (
     recoverable_worker_session_creations_by_worker,
 )
@@ -61,21 +62,10 @@ def recoverable_created_worker_sessions_by_worker(run):
             cleanup = worker.cleanup
             if not isinstance(cleanup, dict) or cleanup.get("deleted"):
                 continue
-            for session_id in _string_list(cleanup.get("sessions")):
-                _append_unique_session_id(session_ids_by_worker.setdefault(worker_id, []), session_id)
+            for session_id in string_list(cleanup.get("sessions")):
+                append_unique_string(session_ids_by_worker.setdefault(worker_id, []), session_id)
     recovered_session_ids_by_worker = recoverable_worker_session_creations_by_worker(run)
     for worker_id, session_ids in recovered_session_ids_by_worker.items():
         for session_id in session_ids:
-            _append_unique_session_id(session_ids_by_worker.setdefault(worker_id, []), session_id)
+            append_unique_string(session_ids_by_worker.setdefault(worker_id, []), session_id)
     return {worker_id: session_ids for worker_id, session_ids in session_ids_by_worker.items() if session_ids}
-
-
-def _string_list(value):
-    if not isinstance(value, list):
-        return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
-
-
-def _append_unique_session_id(session_ids, session_id):
-    if isinstance(session_id, str) and session_id and session_id not in session_ids:
-        session_ids.append(session_id)

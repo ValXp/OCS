@@ -3,9 +3,9 @@ import fcntl
 import json
 import os
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 
+from opencode_session.domain_helpers import utc_now
 from opencode_session.run_record import (
     RunRecordError,
     new_run_record,
@@ -30,7 +30,7 @@ class RunStore:
         self.root = Path(root)
 
     def create_run(self, name, *, directory, server_url):
-        now = _utc_now()
+        now = utc_now()
         run = _normalize_for_store(
             new_run_record(name, directory=directory, server_url=server_url, now=now),
             fallback_name=name,
@@ -44,7 +44,7 @@ class RunStore:
     def upsert_worker(self, name, worker_id, **changes):
         def mutate(run):
             try:
-                upsert_worker_record(run, worker_id, changes, now=_utc_now())
+                upsert_worker_record(run, worker_id, changes, now=utc_now())
             except RunRecordError as error:
                 raise RunStoreError(str(error), kind=error.kind) from error
 
@@ -138,7 +138,3 @@ def _normalize_for_storage(run, *, fallback_name, persisted_run=None):
         return normalize_run_for_storage(run, fallback_name=fallback_name, persisted_run=persisted_run)
     except RunRecordError as error:
         raise RunStoreError(str(error), kind=error.kind) from error
-
-
-def _utc_now():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

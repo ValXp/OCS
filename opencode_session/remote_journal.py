@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, MutableMapping, Optional, Tuple, Union
 
+from opencode_session.domain_helpers import append_unique_string, string_list
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_helpers import JsonObject, JsonValue
 
@@ -376,10 +377,10 @@ class RemoteMutationRecovery:
                 continue
             values = values_by_owner.setdefault(owner, [])
             for list_field in list_fields:
-                for value in _string_list(entry.get(list_field)):
-                    _append_unique(values, value)
+                for value in string_list(entry.get(list_field)):
+                    append_unique_string(values, value)
             for value_field in value_fields:
-                _append_unique(values, entry.get(value_field))
+                append_unique_string(values, entry.get(value_field))
         return {owner: values for owner, values in values_by_owner.items() if values}
 
     def _matches_required_fields(
@@ -652,18 +653,6 @@ class PersistedRemoteMutationJournal:
 
 
 _UNSET = object()
-
-
-def _string_list(value: JsonValue) -> Tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
-
-
-def _append_unique(values: List[str], value: JsonValue) -> None:
-    if isinstance(value, str) and value and value not in values:
-        values.append(value)
-
 
 def _apply_run_update(run_update: _RunUpdate, run: _RemoteMutationRun) -> None:
     if not callable(run_update):

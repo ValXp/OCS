@@ -1,11 +1,11 @@
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
+from opencode_session.domain_helpers import utc_now
 from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
@@ -122,7 +122,7 @@ class RunCommandService:
         self.store = store
         self.client_factory = client_factory
         self.capability_detector = capability_detector
-        self.now = now or _utc_now
+        self.now = now or utc_now
         self.remote_mutations = PersistedRemoteMutationJournal(
             REMOTE_MUTATION_JOURNAL_FIELD,
             self._persist_run_mutation,
@@ -416,7 +416,3 @@ def _new_prompt_message_id():
 
 def _new_remote_mutation_id():
     return f"remote_mutation_{uuid.uuid4().hex}"
-
-
-def _utc_now():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
