@@ -1,13 +1,26 @@
 from contextlib import redirect_stdout
 import io
 import json
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from typing import Dict, get_type_hints
 
 from opencode_session.commands.rendering import render_command_result
-from opencode_session.run_record import normalize_run, normalize_run_for_storage, run_record_for_output
+from opencode_session.run_record import (
+    ensure_run_worker,
+    normalize_run,
+    normalize_run_for_storage,
+    run_directory,
+    run_record_for_output,
+    run_server_url,
+    run_worker,
+    set_run_directory,
+    set_run_server_url,
+    set_run_status,
+    set_run_updated_at,
+)
 from opencode_session.schema_run import HydratedRunRecord, PersistedRunRecord, RunRecord
 from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
 from opencode_session.worker_attempt_log import new_worker_attempt_record
@@ -187,6 +200,30 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(TypeError, "internal worker must be WorkerRecord"):
             worker_output_dict(raw_worker, raw_worker["id"])
+
+    def test_run_mutation_helpers_preserve_persisted_json_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"name": "demo"}
+            set_run_directory(run, directory)
+            set_run_server_url(run, "http://opencode.example")
+            set_run_status(run, "active")
+            set_run_updated_at(run, "2026-07-05T00:00:00Z")
+            worker = ensure_run_worker(run, "review", role="review")
+            worker.update_canonical_fields(prompt="Review the change", lifecycle_state="active_wait")
+
+            stored = normalize_run_for_storage(run, fallback_name="demo")
+            round_tripped = json.loads(json.dumps(stored))
+
+        self.assertEqual(run_directory(run), directory)
+        self.assertEqual(run_server_url(run), "http://opencode.example")
+        self.assertIs(run_worker(run, "review"), worker)
+        self.assertIsInstance(worker, WorkerRecord)
+        self.assertIs(type(stored["workers"]["review"]), dict)
+        self.assertEqual(stored["workers"]["review"]["lifecycle_state"], "active_wait")
+        self.assertNotIn("status", stored["workers"]["review"])
+        self.assertEqual(round_tripped["directory"], directory)
+        self.assertEqual(round_tripped["server_url"], "http://opencode.example")
+        self.assertEqual(round_tripped["status"], "active")
 
     def test_worker_attempt_logging_rejects_raw_worker_mapping(self):
         with self.assertRaisesRegex(TypeError, "worker attempts require WorkerRecord"):

@@ -4,6 +4,7 @@ from typing import Optional, Protocol
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.capabilities import configure_client_route_plan, detect_capabilities
 from opencode_session.cli_policy import EX_UNAVAILABLE
+from opencode_session.run_record import ensure_run_workers, run_server_url, run_worker, set_run_worker
 from opencode_session.run_start_policy import blocking_execution_start_error
 from opencode_session.schema_capabilities import CapabilitiesRecord
 from opencode_session.schema_run import RunRecord
@@ -81,7 +82,7 @@ class RunStartCapabilityProbe:
         self.capability_detector = capability_detector
 
     def probe(self, run):
-        client = self.client_factory(run["server_url"])
+        client = self.client_factory(run_server_url(run))
         capabilities = self.capability_detector(client)
         configure_client_route_plan(client, capabilities)
         return CapabilityProbeOutcome(client, capabilities, blocking_execution_start_error(capabilities))
@@ -107,12 +108,12 @@ class CreatedWorkerCleanupExecutor:
         first_error = None
         current_run = run
         for step in cleanup_plan.steps:
-            workers = current_run.setdefault("workers", {})
+            workers = ensure_run_workers(current_run)
             worker = workers.get(step.worker_id)
             if not is_worker_record(worker):
                 continue
             worker = worker_record_for_mutation(worker, step.worker_id).to_worker()
-            workers[step.worker_id] = worker
+            set_run_worker(current_run, step.worker_id, worker)
             cleanup_outcome = cleanup_created_worker_sessions(client, worker, step.session_ids)
             persisted = self._persist_transition(current_run, WorkerTransition.cleanup_updated(worker))
             current_run = persisted.run
@@ -130,7 +131,7 @@ class CreatedWorkerCleanupExecutor:
 
     def _persist_transition(self, run, transition):
         result = self.persist_worker_transition(run, transition)
-        worker = result.workers[0] if result.workers else result.run.get("workers", {}).get(transition.worker_id)
+        worker = result.workers[0] if result.workers else run_worker(result.run, transition.worker_id)
         return PersistedTransitionOutcome(result.run, worker)
 
 

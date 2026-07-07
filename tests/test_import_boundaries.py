@@ -51,6 +51,10 @@ def temporarily_unimported(*module_names):
                 setattr(parent, attr_name, attr_value)
 
 
+def _is_raw_run_record_name(node, names):
+    return isinstance(node, ast.Name) and node.id in names
+
+
 class ImportBoundaryTest(unittest.TestCase):
     def test_api_transport_import_does_not_require_session_domain_modules(self):
         blocked = BlockedModuleFinder(
@@ -122,6 +126,33 @@ class ImportBoundaryTest(unittest.TestCase):
                 sys.meta_path.remove(blocked)
 
         self.assertTrue(hasattr(run_record, "normalize_run"))
+
+    def test_core_run_paths_use_run_record_boundary_helpers(self):
+        project_root = Path(__file__).resolve().parents[1]
+        target_paths = (
+            project_root / "opencode_session" / "run_persistence.py",
+            project_root / "opencode_session" / "multi_worker_orchestration.py",
+            project_root / "opencode_session" / "run_services.py",
+            project_root / "opencode_session" / "run_start_core.py",
+            project_root / "opencode_session" / "worker_session_provisioning.py",
+        )
+        run_record_names = {"run", "latest_run", "current_run"}
+        offenders = []
+
+        for path in target_paths:
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Subscript) and _is_raw_run_record_name(node.value, run_record_names):
+                    offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"get", "setdefault"}
+                    and _is_raw_run_record_name(node.func.value, run_record_names)
+                ):
+                    offenders.append(f"{path.relative_to(project_root)}:{node.lineno}")
+
+        self.assertEqual([], offenders)
 
     def test_schema_run_hydrated_types_do_not_import_worker_state(self):
         blocked = BlockedModuleFinder({"opencode_session.worker_state"})

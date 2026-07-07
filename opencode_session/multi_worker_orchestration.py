@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from opencode_session.api_client import OpenCodeApiClient
@@ -17,6 +16,14 @@ from opencode_session.run_persistence import (
     persist_run_summary,
     persist_worker_transitions,
 )
+from opencode_session.run_record import (
+    ensure_run_worker,
+    run_worker,
+    run_workers,
+    set_run_directory,
+    set_run_server_url,
+    set_run_status,
+)
 from opencode_session.run_start_core import (
     CreatedWorkerCleanupExecutor,
     CreatedWorkerCleanupPlanner,
@@ -32,7 +39,6 @@ from opencode_session.worker_session_provisioning import WorkerSessionCreationJo
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import (
     WorkerTransition,
-    ensure_worker as _ensure_orchestration_worker,
     is_executable_worker,
     is_worker_record,
     refresh_run_summary as _refresh_worker_run_summary,
@@ -179,7 +185,7 @@ class DependencyOrderedSerialRecoveryPhase:
         self.now = now
 
     def recover(self, run):
-        recoveries = recover_expired_active_attempts(run.get("workers", {}), now=self.now)
+        recoveries = recover_expired_active_attempts(run_workers(run), now=self.now)
         if not recoveries:
             return DependencyOrderedSerialRecoveryResult(run)
         result = persist_worker_transitions(
@@ -200,7 +206,7 @@ class DependencyOrderedSerialPlanningPhase:
         self.plan_serial_step = plan_serial_step
 
     def plan(self, run):
-        step = self.plan_serial_step(run.get("workers", {}))
+        step = self.plan_serial_step(run_workers(run))
         if step.dependency_blocked_transitions:
             result = persist_worker_transitions(
                 self.store,
@@ -317,7 +323,7 @@ class DependencyOrderedSerialExecutionPhase:
         return run, first_error_outcome, fail_fast_outcome
 
     def _execute_selected_worker(self, run, worker_id, client, capabilities, created_session_ids_by_worker):
-        worker = _worker_by_id(run.get("workers", {}), worker_id)
+        worker = _worker_by_id(run_workers(run), worker_id)
         if worker is None:
             return run, None
         outcome = self.worker_execution_executor.execute(
@@ -333,7 +339,7 @@ class DependencyOrderedSerialExecutionPhase:
         )
         run = outcome.run or run
         if created_session_ids_by_worker is not None:
-            current_worker = run.get("workers", {}).get(worker.worker_id, worker)
+            current_worker = run_worker(run, worker.worker_id, worker)
             remember_created_worker_sessions(created_session_ids_by_worker, current_worker, outcome.created_session_ids)
         return run, outcome
 
@@ -419,7 +425,7 @@ class DependencyOrderedSerialRunOrchestrationService:
             run,
             lambda latest_run: apply_dependency_ordered_start_request(latest_run, request),
         )
-        if not any(_worker_prompt(worker) for worker in run.get("workers", {}).values() if is_worker_record(worker)):
+        if not any(_worker_prompt(worker) for worker in run_workers(run).values() if is_worker_record(worker)):
             raise RunStoreError(f"run '{request.name}' has no worker prompts; pass --prompt or add workers with --prompt")
         return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
 
@@ -452,7 +458,7 @@ class DependencyOrderedSerialRunOrchestrationService:
         return self._persist_mutation(run, _mark_run_active)
 
     def _mark_prompted_workers_failed(self, run, error):
-        workers = _pending_prompted_workers(run.get("workers", {}))
+        workers = _pending_prompted_workers(run_workers(run))
         transitions = mark_orchestration_start_failed(run, workers, error)
         return self._persist_transitions(run, transitions)
 
@@ -473,7 +479,7 @@ class DependencyOrderedSerialRunOrchestrationService:
         persisted_worker = (
             result.workers[0]
             if result.workers
-            else result.run.get("workers", {}).get(transition.worker_id)
+            else run_worker(result.run, transition.worker_id)
         )
         return result.run, persisted_worker or worker
 
@@ -496,7 +502,7 @@ def refresh_orchestration_run_summary(run):
 
 
 def _mark_run_active(run):
-    run["status"] = "active"
+    set_run_status(run, "active")
 
 
 def plan_dependency_ordered_serial_step(workers):
@@ -518,11 +524,11 @@ def plan_dependency_ordered_serial_step(workers):
 
 def apply_dependency_ordered_start_request(run, request):
     if request.directory is not None:
-        run["directory"] = str(Path(request.directory).resolve())
+        set_run_directory(run, request.directory)
     if request.server_url is not None:
-        run["server_url"] = request.server_url
+        set_run_server_url(run, request.server_url)
     if request.session_id is not None or request.agent is not None or request.model is not None:
-        worker = _ensure_orchestration_worker(run, request.worker_id, role=request.role)
+        worker = ensure_run_worker(run, request.worker_id, role=request.role)
         worker_record = worker_record_for_mutation(worker, request.worker_id)
         worker_record.set_session(
             request.session_id if request.session_id is not None else worker_record.session_id,

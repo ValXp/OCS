@@ -8,6 +8,7 @@ from opencode_session.run_services import (
     RunCommandService,
     recoverable_remote_mutation_entries,
 )
+from opencode_session.run_record import run_server_url
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_state import WorkerRecord, worker_field, worker_output_field
 
@@ -120,16 +121,18 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
                 now=lambda: "2026-07-05T00:00:00Z",
             )
 
-            result = service.steer_worker(
-                "demo",
-                "planner",
-                "Continue with the plan",
-                delivery="queue",
-                message_id="msg_steer_1",
-            )
+            with patch("opencode_session.run_services.run_server_url", wraps=run_server_url) as server_url_accessor:
+                result = service.steer_worker(
+                    "demo",
+                    "planner",
+                    "Continue with the plan",
+                    delivery="queue",
+                    message_id="msg_steer_1",
+                )
             run = store.load_run("demo")
 
         self.assertEqual(result.admission["message_id"], "msg_steer_1")
+        self.assertEqual(server_url_accessor.call_count, 1)
         self.assertNotIn(REMOTE_MUTATION_JOURNAL_FIELD, run)
         self.assertEqual(worker_field(run["workers"]["planner"], "prompt_ids"), ["msg_steer_1"])
         self.assertEqual(len(client.requests), 1)

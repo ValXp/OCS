@@ -45,8 +45,85 @@ def new_run_record(name, *, directory, server_url, now):
     }
 
 
+def run_name(run):
+    return run["name"]
+
+
+def run_optional_name(run):
+    return run.get("name")
+
+
+def run_directory(run):
+    return run["directory"]
+
+
+def run_optional_directory(run):
+    return run.get("directory")
+
+
+def run_server_url(run):
+    return run["server_url"]
+
+
+def run_workers(run):
+    workers = run.get("workers")
+    if workers is None:
+        return {}
+    if not isinstance(workers, dict):
+        raise RunRecordError("run record is corrupted: workers must be an object")
+    return workers
+
+
+def ensure_run_workers(run):
+    workers = run.get("workers")
+    if workers is None:
+        workers = {}
+        run["workers"] = workers
+    if not isinstance(workers, dict):
+        raise RunRecordError("run record is corrupted: workers must be an object")
+    return workers
+
+
+def run_worker(run, worker_id, default=None):
+    return run_workers(run).get(worker_id, default)
+
+
+def set_run_worker(run, worker_id, worker):
+    ensure_run_workers(run)[worker_id] = worker
+
+
+def ensure_run_worker(run, worker_id, *, role):
+    workers = ensure_run_workers(run)
+    existing = workers.get(worker_id)
+    if existing is None:
+        worker = default_worker_record(worker_id)
+    else:
+        worker = worker_record_for_mutation(existing, worker_id).to_worker()
+    if not worker.role:
+        worker.role = deepcopy(role)
+    worker.id = worker_id
+    set_run_worker(run, worker_id, worker)
+    return worker
+
+
+def set_run_directory(run, directory):
+    run["directory"] = str(Path(directory).resolve())
+
+
+def set_run_server_url(run, server_url):
+    run["server_url"] = server_url
+
+
+def set_run_status(run, status):
+    run["status"] = status
+
+
+def set_run_updated_at(run, updated_at):
+    run["updated_at"] = updated_at
+
+
 def upsert_worker_record(run, worker_id, changes, *, now):
-    workers = run.setdefault("workers", {})
+    workers = ensure_run_workers(run)
     existing = workers.get(worker_id)
     if existing is None:
         if not changes.get("role"):
@@ -71,7 +148,7 @@ def upsert_worker_record(run, worker_id, changes, *, now):
     )
 
     workers[worker_id] = worker.to_worker()
-    run["updated_at"] = now
+    set_run_updated_at(run, now)
 
 
 def normalize_run(run, *, fallback_name):

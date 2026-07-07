@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.run_record import run_record_for_output
+from opencode_session.run_record import run_directory, run_record_for_output
 from opencode_session.run_store import RunStoreError
 from opencode_session.remote_journal import (
     OUTBOX_STATE_APPLIED,
@@ -184,7 +184,10 @@ class WorkerExecutionTest(unittest.TestCase):
                 calls.append((self.worker_id, session_id, agent, model))
                 return original(self, session_id, agent=agent, model=model)
 
-            with patch.object(WorkerRecord, "set_session", traced_set_session):
+            with patch.object(WorkerRecord, "set_session", traced_set_session), patch(
+                "opencode_session.worker_session_provisioning.run_directory",
+                wraps=run_directory,
+            ) as directory_accessor:
                 outcome = ensure_worker_session(
                     client,
                     run,
@@ -196,6 +199,7 @@ class WorkerExecutionTest(unittest.TestCase):
 
         self.assertIsInstance(worker, WorkerRecord)
         self.assertEqual(outcome.session_id, "ses_new")
+        self.assertEqual(directory_accessor.call_count, 1)
         self.assertEqual(calls, [("worker", "ses_new", "build", "openai/gpt-5.5")])
         self.assertEqual(worker_field(worker, "session_id"), "ses_new")
 

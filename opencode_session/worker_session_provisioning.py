@@ -12,6 +12,13 @@ from opencode_session.remote_journal import (
     RemoteMutationRecovery,
     RemoteMutationResult,
 )
+from opencode_session.run_record import (
+    ensure_run_workers,
+    run_directory,
+    run_optional_directory,
+    run_optional_name,
+    set_run_worker,
+)
 from opencode_session.schema_run import RunRecord
 from opencode_session.schema_worker import HydratedWorker
 from opencode_session.session_ids import require_session_id
@@ -265,7 +272,7 @@ def ensure_worker_session(
         create_options = {"agent": agent, "model": model}
         if session_metadata is not None:
             create_options["metadata"] = session_metadata
-        create_response = client.create_session_response(run["directory"], **create_options)
+        create_response = client.create_session_response(run_directory(run), **create_options)
         worker_session_id = require_session_id(create_response)
         created_session_id = worker_session_id
     record.set_session(worker_session_id, agent=agent, model=model)
@@ -312,7 +319,7 @@ def worker_session_creation_metadata(run, intent):
         "ocs.worker_id": intent.fields["worker_id"],
         "ocs.cleanup_requested": "true" if intent.fields.get("cleanup_requested") is True else "false",
     }
-    run_name = run.get("name")
+    run_name = run_optional_name(run)
     if isinstance(run_name, str) and run_name:
         metadata["ocs.run_name"] = run_name
     return metadata
@@ -346,7 +353,7 @@ def _worker_session_creation_intent(
 ):
     fields = {
         "worker_id": worker.worker_id,
-        "directory": run.get("directory"),
+        "directory": run_optional_directory(run),
         "cleanup_requested": bool(cleanup_requested),
         "intent_recorded_at": intent_recorded_at,
     }
@@ -406,7 +413,7 @@ def _latest_worker(run, fallback_worker):
 
 
 def _ensure_latest_worker(run, worker_id):
-    workers = run.setdefault("workers", {})
+    workers = ensure_run_workers(run)
     worker = workers.get(worker_id)
     if isinstance(worker, WorkerRecord):
         return worker
@@ -414,7 +421,7 @@ def _ensure_latest_worker(run, worker_id):
         worker = worker_record_for_mutation(worker, worker_id).to_worker()
     else:
         worker = WorkerRecord.default_fields(worker_id)
-    workers[worker_id] = worker
+    set_run_worker(run, worker_id, worker)
     return worker
 
 

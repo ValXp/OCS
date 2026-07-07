@@ -22,7 +22,15 @@ from opencode_session.remote_journal import (
 )
 from opencode_session.run_persistence import persist_worker_transitions
 from opencode_session.run_prompt_worker import ensure_prompt_worker
-from opencode_session.run_record import RunRecordError, upsert_worker_record
+from opencode_session.run_record import (
+    RunRecordError,
+    run_name,
+    run_server_url,
+    run_worker,
+    run_workers,
+    set_run_updated_at,
+    upsert_worker_record,
+)
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_admission import NormalizedAdmissionRecord
 from opencode_session.schema_run import RunRecord
@@ -151,7 +159,7 @@ class RunCommandService:
                 upsert_worker_record(run, worker_id, changes, now=self.now())
             except RunRecordError as error:
                 raise RunStoreError(str(error), kind=error.kind) from error
-            worker = run["workers"][worker_id]
+            worker = run_worker(run, worker_id)
             if status == "active":
                 transition = mark_worker_active(worker, now=self.now)
             else:
@@ -161,7 +169,7 @@ class RunCommandService:
                 transition = mark_dependency_blocked(worker, blockers)
             record = worker_record_for_mutation(worker, worker_id)
             record.apply_transition(transition)
-            run["updated_at"] = self.now()
+            set_run_updated_at(run, self.now())
 
         return self.store.update_run(name, mutate)
 
@@ -190,7 +198,7 @@ class RunCommandService:
 
     def collect_results(self, name, *, worker_id=None):
         run = self.store.load_run(name)
-        workers = run.get("workers", {})
+        workers = run_workers(run)
         if worker_id is not None:
             return RunCollectResult(run, worker=_worker_result(run, worker_id))
         if len(workers) == 1:
@@ -206,7 +214,7 @@ class RunCommandService:
     def steer_worker(self, name, worker_id, text, *, delivery, message_id=None):
         run = self.store.load_run(name)
         _run_worker_with_session(run, worker_id)
-        client = self.client_factory(run["server_url"])
+        client = self.client_factory(run_server_url(run))
         capabilities = self.capability_detector(client)
         configure_client_route_plan(client, capabilities)
         prompt_message_id = message_id or _new_prompt_message_id()
@@ -255,12 +263,12 @@ class RunCommandService:
         )
         run = execution.run
         admission = execution.remote_result.record
-        return RunSteerResult(run=run, worker=run["workers"][worker_id], admission=admission)
+        return RunSteerResult(run=run, worker=run_worker(run, worker_id), admission=admission)
 
     def abort_worker(self, name, worker_id):
         run = self.store.load_run(name)
         _run_worker_with_session(run, worker_id)
-        client = self.client_factory(run["server_url"])
+        client = self.client_factory(run_server_url(run))
         mutation_id = _new_remote_mutation_id()
 
         def intent_from_run(latest_run):
@@ -303,7 +311,7 @@ class RunCommandService:
         run = execution.run
         response = execution.remote_result
         abort = abort_record(execution.intent.fields["session_id"], response.data)
-        return RunAbortResult(run=run, worker=run["workers"][worker_id], abort=abort, raw_body=response.body)
+        return RunAbortResult(run=run, worker=run_worker(run, worker_id), abort=abort, raw_body=response.body)
 
     def _remote_transaction(self, mutation_id, operation):
         return self.remote_mutations.transaction(
@@ -312,17 +320,17 @@ class RunCommandService:
         )
 
     def _persist_run_mutation(self, run, mutator):
-        return self._update_run(run["name"], mutator)
+        return self._update_run(run_name(run), mutator)
 
     def _update_run(self, name, mutator):
         def update(run):
             mutator(run)
-            run["updated_at"] = self.now()
+            set_run_updated_at(run, self.now())
 
         return self.store.update_run(name, update)
 
     def _recover_active_attempts(self, run):
-        recoveries = recover_expired_active_attempts(run.get("workers", {}), now=self.now)
+        recoveries = recover_expired_active_attempts(run_workers(run), now=self.now)
         if not recoveries:
             return run
         return persist_worker_transitions(
@@ -384,21 +392,21 @@ def _apply_abort_worker(latest_run, worker_id, session_id, response_data):
 
 
 def _worker_result(run, worker_id):
-    worker = run.get("workers", {}).get(worker_id)
+    worker = run_worker(run, worker_id)
     if not is_worker_record(worker):
-        raise RunStoreError(f"worker '{worker_id}' not found in run '{run['name']}'", kind="missing")
+        raise RunStoreError(f"worker '{worker_id}' not found in run '{run_name(run)}'", kind="missing")
     result = worker.result
     if not isinstance(result, dict):
-        raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no collected result", kind="missing")
+        raise RunStoreError(f"worker '{worker_id}' in run '{run_name(run)}' has no collected result", kind="missing")
     return worker
 
 
 def _run_worker_with_session(run, worker_id):
-    worker = run.get("workers", {}).get(worker_id)
+    worker = run_worker(run, worker_id)
     if not is_worker_record(worker):
-        raise RunStoreError(f"worker '{worker_id}' not found in run '{run['name']}'", kind="missing")
+        raise RunStoreError(f"worker '{worker_id}' not found in run '{run_name(run)}'", kind="missing")
     if not worker.session_id:
-        raise RunStoreError(f"worker '{worker_id}' in run '{run['name']}' has no session", kind="missing")
+        raise RunStoreError(f"worker '{worker_id}' in run '{run_name(run)}' has no session", kind="missing")
     return worker
 
 

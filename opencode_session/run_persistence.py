@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from opencode_session.run_record import ensure_run_workers, run_name, run_worker, set_run_updated_at
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition
 from opencode_session.worker_state import (
     WorkerRecord,
@@ -14,11 +15,11 @@ class PersistedWorkerTransitions:
 
 
 def persist_run_mutation(store, run, mutator, *, now):
-    name = run["name"]
+    name = run_name(run)
 
     def update(latest_run):
         mutator(latest_run)
-        latest_run["updated_at"] = now()
+        set_run_updated_at(latest_run, now())
 
     return store.update_run(name, update)
 
@@ -46,32 +47,30 @@ def _snapshot_update_transition(worker):
 
 
 def persist_worker_transitions(store, run, transitions, *, refresh_run_summary, now):
-    name = run["name"]
+    name = run_name(run)
     transitions = tuple(transitions)
 
     def update(latest_run):
-        latest_workers = latest_run.setdefault("workers", {})
+        latest_workers = ensure_run_workers(latest_run)
         for transition in transitions:
             apply_worker_transition(latest_workers, transition)
         refresh_run_summary(latest_run)
-        latest_run["updated_at"] = now()
+        set_run_updated_at(latest_run, now())
 
     persisted = store.update_run(name, update)
-    return PersistedWorkerTransitions(
-        persisted,
-        [
-            persisted["workers"][transition.worker_id]
-            for transition in transitions
-            if transition.worker_id in persisted.get("workers", {})
-        ],
-    )
+    persisted_workers = []
+    for transition in transitions:
+        worker = run_worker(persisted, transition.worker_id)
+        if worker is not None:
+            persisted_workers.append(worker)
+    return PersistedWorkerTransitions(persisted, persisted_workers)
 
 
 def persist_run_summary(store, run, *, refresh_run_summary, now):
-    name = run["name"]
+    name = run_name(run)
 
     def update(latest_run):
         refresh_run_summary(latest_run)
-        latest_run["updated_at"] = now()
+        set_run_updated_at(latest_run, now())
 
     return store.update_run(name, update)
