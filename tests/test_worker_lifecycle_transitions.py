@@ -1,14 +1,11 @@
 from copy import deepcopy
 import unittest
 
-from opencode_session import worker_state as worker_state_module
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition
 from opencode_session.worker_state import (
-    WORKER_TRANSITION_METADATA,
     WorkerRecord,
     WorkerTransition,
     WorkerTransitionError,
-    WorkerTransitionName,
     reduce_worker_transition,
 )
 
@@ -17,28 +14,38 @@ NOW = "2026-07-04T00:00:00Z"
 
 
 class WorkerLifecycleTransitionTest(unittest.TestCase):
-    def test_worker_transition_definitions_are_single_sourced(self):
-        specs = worker_state_module._WORKER_TRANSITION_SPECS
-
-        self.assertCountEqual((spec.name for spec in specs), tuple(WorkerTransitionName))
-        self.assertEqual(set(WORKER_TRANSITION_METADATA), set(WorkerTransitionName))
-        for spec in specs:
-            with self.subTest(name=spec.name.value):
-                metadata = WORKER_TRANSITION_METADATA[spec.name]
-
-                self.assertEqual(metadata.name, spec.name)
-                self.assertEqual(metadata.source_states, spec.source_states)
-                self.assertEqual(metadata.target_states, spec.target_states)
-                self.assertEqual(metadata.public_lifecycle_transition, spec.public_lifecycle_transition)
-
     def test_public_worker_transitions_produce_observable_outcomes(self):
         cases = (
+            (
+                "record provisioned session metadata",
+                {},
+                lambda worker: WorkerTransition.provisioned(
+                    worker_record(
+                        worker.worker_id,
+                        session_id="ses_review",
+                        agent="review-agent",
+                        model="review-model",
+                    )
+                ),
+                {"status": "queued", "next_eligible_action": "start"},
+                {"session_id": "ses_review", "agent": "review-agent", "model": "review-model"},
+            ),
             (
                 "start queued worker",
                 {"timeout_seconds": 30},
                 lambda worker: WorkerTransition.active(worker.worker_id, timeout_started_at=NOW),
                 {"status": "active", "next_eligible_action": "wait"},
                 {"timeout_started_at": NOW},
+            ),
+            (
+                "record attempt start",
+                {"lifecycle_state": "active_wait"},
+                lambda worker: WorkerTransition.attempt_started(
+                    worker.worker_id,
+                    {"id": "attempt-1", "status": "active"},
+                ),
+                {"status": "active", "next_eligible_action": "wait"},
+                {"attempts": [{"id": "attempt-1", "status": "active"}]},
             ),
             (
                 "record retryable provider failure",
@@ -147,6 +154,15 @@ class WorkerLifecycleTransitionTest(unittest.TestCase):
                     "manual_retry_required": True,
                     "timed_out_at": NOW,
                 },
+            ),
+            (
+                "record cleanup update",
+                {"lifecycle_state": "done_collect"},
+                lambda worker: WorkerTransition.cleanup_updated(
+                    worker_record(worker.worker_id, cleanup={"requested": True, "deleted": False})
+                ),
+                {"status": "done", "next_eligible_action": "collect"},
+                {"cleanup": {"requested": True, "deleted": False}},
             ),
         )
 

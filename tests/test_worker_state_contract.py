@@ -33,10 +33,7 @@ from opencode_session.worker_state import (
     WorkerFieldSpec,
     WorkerFieldValidatorName,
     WorkerRecord,
-    WorkerTransitionName,
     worker_default_snapshot_fields,
-    _WORKER_TRANSITION_SPECS,
-    _WorkerTransitionSpec,
 )
 
 
@@ -169,23 +166,7 @@ class WorkerStateContractTest(unittest.TestCase):
         )
         self.assertEqual(SCHEMA_WORKER_REQUIRED_FIELD_NAMES, WORKER_REQUIRED_FIELD_NAMES)
 
-    def test_worker_type_boundary_uses_explicit_contracts(self):
-        transition_annotations = _WorkerTransitionSpec.__annotations__
-
-        for field_name in ("payload_type", "payload_factory", "reducer", "target_resolver"):
-            with self.subTest(field_name=field_name):
-                self.assertIsNot(transition_annotations[field_name], object)
-
-        for spec in _WORKER_TRANSITION_SPECS:
-            with self.subTest(transition=spec.name.value):
-                self.assertIsInstance(spec.name, WorkerTransitionName)
-                self.assertIsInstance(spec.payload_type, type)
-                self.assertTrue(callable(spec.payload_factory))
-                self.assertTrue(callable(spec.reducer))
-                self.assertTrue(callable(spec.target_resolver))
-                self.assertIsInstance(spec.source_states, frozenset)
-                self.assertIsInstance(spec.target_states, frozenset)
-
+    def test_worker_field_type_boundary_uses_explicit_contracts(self):
         self.assertEqual(set(get_args(WorkerFieldValidatorName)), set(WORKER_FIELD_VALIDATOR_NAMES))
         self.assertEqual(WorkerFieldSpec.__annotations__["validator"], WorkerFieldValidatorName)
         with self.assertRaisesRegex(ValueError, "unknown worker field validator"):
