@@ -238,6 +238,12 @@ def _enum_members(values):
     return {value.upper(): value for value in values}
 
 
+def _require_worker_field_name(field_name: str) -> str:
+    if not isinstance(field_name, str) or not field_name:
+        raise TypeError("worker field name must be a non-empty string")
+    return field_name
+
+
 WORKER_STATUS_QUEUED = _lifecycle_table_value("status", "queued")
 WORKER_STATUS_ACTIVE = _lifecycle_table_value("status", "active")
 WORKER_STATUS_BLOCKED = _lifecycle_table_value("status", "blocked")
@@ -1824,7 +1830,8 @@ class WorkerRecord:
         value = self._raw_field(field_name)
         return value if isinstance(value, list) else []
 
-    def _canonical_field_value(self, field_name, value):
+    def _canonical_field_value(self, field_name: str, value: JsonValue) -> JsonValue:
+        field_name = _require_worker_field_name(field_name)
         spec = WORKER_FIELD_SPEC_BY_NAME.get(field_name)
         value = deepcopy(value)
         if spec is None:
@@ -1851,12 +1858,14 @@ class WorkerRecord:
             return value
         return value
 
-    def _set_canonical_field(self, field_name, value):
+    def _set_canonical_field(self, field_name: str, value: JsonValue) -> None:
+        field_name = _require_worker_field_name(field_name)
         setattr(self, field_name, self._canonical_field_value(field_name, value))
         if field_name in WORKER_RECORD_OPTIONAL_FIELD_NAMES:
             self._present_optional_fields.add(field_name)
 
-    def _set_field_value(self, field_name, value):
+    def _set_field_value(self, field_name: str, value: JsonValue) -> None:
+        field_name = _require_worker_field_name(field_name)
         if field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
             raise ValueError(f"worker public field '{field_name}' is output-only; use lifecycle_state")
         if field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES:
@@ -2073,7 +2082,9 @@ class WorkerRecord:
             self._set_canonical_field("model", model)
         return self
 
-    def remember_prompt_id(self, prompt_id: Optional[str]) -> "WorkerRecord":
+    def remember_prompt_id(self, prompt_id: str) -> "WorkerRecord":
+        if not isinstance(prompt_id, str) or not prompt_id:
+            raise TypeError("worker prompt_id must be a non-empty string")
         prompt_ids = list(self.prompt_ids)
         if prompt_id not in prompt_ids:
             prompt_ids.append(prompt_id)

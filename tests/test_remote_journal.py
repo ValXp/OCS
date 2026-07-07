@@ -73,6 +73,47 @@ class RemoteMutationJournalTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outbox_state"):
             RemoteJournalRecord("mutation-1", "prompt", {"outbox_state": OUTBOX_STATE_INTENT})
 
+    def test_record_get_rejects_untyped_field_names(self):
+        record = RemoteJournalRecord("mutation-1", "prompt", {"message_id": "msg_1"})
+
+        with self.assertRaisesRegex(TypeError, "record field name"):
+            record.get(None)
+
+    def test_journal_rejects_untyped_boundary_names(self):
+        with self.assertRaisesRegex(TypeError, "journal field"):
+            RemoteMutationJournal(None)
+
+    def test_recovery_values_by_owner_ignores_untyped_owners(self):
+        recovery = RemoteMutationRecovery("journal")
+        run = {
+            "journal": [
+                {
+                    "id": "mutation-1",
+                    "kind": "prompt",
+                    "worker_id": None,
+                    "message_id": "msg_skipped",
+                },
+                {
+                    "id": "mutation-2",
+                    "kind": "prompt",
+                    "worker_id": "planner",
+                    "prompt_ids": ["msg_1", None, "msg_2"],
+                    "message_id": "msg_2",
+                },
+            ]
+        }
+
+        self.assertEqual(
+            recovery.values_by_owner(
+                run,
+                kind="prompt",
+                owner_field="worker_id",
+                value_fields=("message_id",),
+                list_fields=("prompt_ids",),
+            ),
+            {"planner": ["msg_1", "msg_2"]},
+        )
+
     def test_journal_rejects_untyped_record_writes(self):
         journal = RemoteMutationJournal("journal")
 

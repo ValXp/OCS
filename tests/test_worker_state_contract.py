@@ -66,6 +66,15 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
+    def test_worker_record_rejects_none_prompt_id(self):
+        worker = WorkerRecord.default_fields("review")
+
+        with self.assertRaisesRegex(TypeError, "prompt_id"):
+            worker.remember_prompt_id(None)
+
+        self.assertEqual(worker.prompt_ids, [])
+        self.assertEqual(worker.to_snapshot()["prompt_ids"], [])
+
     def test_worker_snapshot_schema_declares_runtime_persisted_fields(self):
         self.assertEqual(
             set(WorkerSnapshotRecord.__annotations__),
