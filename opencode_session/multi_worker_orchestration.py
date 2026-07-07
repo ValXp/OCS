@@ -6,8 +6,6 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import execute_blocking_prompt
 from opencode_session.capabilities import detect_capabilities
 from opencode_session.cli_policy import (
-    EX_UNAVAILABLE,
-    EX_UNSUPPORTED,
     exit_code_for_run as _exit_code_for_orchestration_run,
 )
 from opencode_session.domain_helpers import utc_now
@@ -33,6 +31,10 @@ from opencode_session.run_start_core import (
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_run import RunRecord
+from opencode_session.multi_worker_execution_outcome import (
+    DependencyOrderedSerialExecutionResult,
+    DependencyOrderedSerialRunStartOutcome,
+)
 from opencode_session.worker_active_attempt_recovery import recover_expired_active_attempts
 from opencode_session.worker_execution import WorkerExecutionExecutor
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
@@ -69,13 +71,6 @@ class DependencyOrderedSerialRunStartRequest:
     cleanup: bool = False
 
 
-@dataclass
-class DependencyOrderedSerialRunStartOutcome:
-    run: RunRecord
-    exit_code: int
-    error: Optional[str] = None
-
-
 @dataclass(frozen=True)
 class DependencyOrderedSerialStep:
     worker_id: Optional[str]
@@ -107,70 +102,6 @@ class DependencyOrderedSerialPlanningResult:
                 recovery_error,
             )
         return None
-
-
-@dataclass(frozen=True)
-class DependencyOrderedSerialExecutionResult:
-    run: RunRecord
-    client: Optional[object] = None
-    created_session_ids_by_worker: Optional[dict] = None
-    first_error: Optional[str] = None
-    terminal_error: Optional[str] = None
-    terminal_exit_code: Optional[int] = None
-    terminal_exit_code_from_run: bool = False
-
-    @classmethod
-    def completed(cls, run, client, created_session_ids_by_worker, first_error):
-        return cls(
-            run,
-            client=client,
-            created_session_ids_by_worker=created_session_ids_by_worker,
-            first_error=first_error,
-        )
-
-    @classmethod
-    def unsupported(cls, run, start_error, created_session_ids_by_worker):
-        return cls(
-            run,
-            created_session_ids_by_worker=created_session_ids_by_worker,
-            terminal_error=start_error,
-            terminal_exit_code=EX_UNSUPPORTED,
-        )
-
-    @classmethod
-    def api_failure(cls, run, client, created_session_ids_by_worker, error):
-        return cls(
-            run,
-            client=client,
-            created_session_ids_by_worker=created_session_ids_by_worker,
-            terminal_error=f"api failure: {error}",
-            terminal_exit_code=EX_UNAVAILABLE,
-        )
-
-    @classmethod
-    def fail_fast(cls, run, client, created_session_ids_by_worker, error):
-        return cls(
-            run,
-            client=client,
-            created_session_ids_by_worker=created_session_ids_by_worker,
-            terminal_error=error,
-            terminal_exit_code_from_run=True,
-        )
-
-    def finish_outcome(self, run, recovery_error):
-        if self.terminal_exit_code_from_run:
-            return DependencyOrderedSerialRunStartOutcome(
-                run,
-                _exit_code_for_orchestration_run(run),
-                self.terminal_error,
-            )
-        if self.terminal_exit_code is not None:
-            return DependencyOrderedSerialRunStartOutcome(run, self.terminal_exit_code, self.terminal_error)
-        return DependencyOrderedSerialRunStartOutcome(
-            run,
-            _exit_code_for_orchestration_run(run),
-            recovery_error or self.first_error,
-        )
 
 
 @dataclass(frozen=True)
@@ -443,9 +374,9 @@ class DependencyOrderedSerialRunOrchestrationService:
             execution_policy=execution_policy,
         )
         cleanup_result = self.cleanup_phase.cleanup(
-            execution.client,
+            execution.cleanup_context.client,
             execution.run,
-            execution.created_session_ids_by_worker,
+            execution.cleanup_context.created_session_ids_by_worker,
         )
         if cleanup_result.outcome is not None:
             return cleanup_result.outcome

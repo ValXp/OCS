@@ -1,5 +1,14 @@
 import unittest
 
+from opencode_session.api_transport import OpenCodeApiError
+from opencode_session.cli_policy import EX_TIMEOUT, EX_UNAVAILABLE, EX_UNSUPPORTED
+from opencode_session.multi_worker_execution_outcome import (
+    DependencyOrderedSerialExecutionApiFailure,
+    DependencyOrderedSerialExecutionCompleted,
+    DependencyOrderedSerialExecutionFailFast,
+    DependencyOrderedSerialExecutionResult,
+    DependencyOrderedSerialExecutionUnsupported,
+)
 from opencode_session.multi_worker_orchestration import (
     plan_dependency_ordered_serial_step,
 )
@@ -206,6 +215,69 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(second_step.worker_id, "review")
         self.assertEqual(third_step.worker_id, "deploy")
         self.assertIsNone(final_step.worker_id)
+
+
+class DependencyOrderedSerialExecutionOutcomeTest(unittest.TestCase):
+    def test_completed_variant_finishes_from_run_state_and_first_error(self):
+        client = object()
+        created_session_ids_by_worker = {"worker": ["ses_worker"]}
+
+        result = DependencyOrderedSerialExecutionResult.completed(
+            {"status": "active", "workers": {}},
+            client,
+            created_session_ids_by_worker,
+            "provider failure: boom",
+        )
+        outcome = result.finish_outcome({"status": "failed", "workers": {}}, None)
+
+        self.assertIsInstance(result.outcome, DependencyOrderedSerialExecutionCompleted)
+        self.assertIs(result.cleanup_context.client, client)
+        self.assertIs(result.cleanup_context.created_session_ids_by_worker, created_session_ids_by_worker)
+        self.assertEqual(outcome.exit_code, EX_UNAVAILABLE)
+        self.assertEqual(outcome.error, "provider failure: boom")
+
+    def test_unsupported_variant_uses_unsupported_exit_code(self):
+        result = DependencyOrderedSerialExecutionResult.unsupported(
+            {"status": "failed", "workers": {}},
+            "unsupported route behavior: missing blocking execution",
+            {},
+        )
+        outcome = result.finish_outcome({"status": "done", "workers": {}}, None)
+
+        self.assertIsInstance(result.outcome, DependencyOrderedSerialExecutionUnsupported)
+        self.assertIsNone(result.cleanup_context.client)
+        self.assertEqual(outcome.exit_code, EX_UNSUPPORTED)
+        self.assertEqual(outcome.error, "unsupported route behavior: missing blocking execution")
+
+    def test_api_failure_variant_formats_api_error(self):
+        client = object()
+
+        result = DependencyOrderedSerialExecutionResult.api_failure(
+            {"status": "failed", "workers": {}},
+            client,
+            {},
+            OpenCodeApiError("capability probe failed"),
+        )
+        outcome = result.finish_outcome({"status": "done", "workers": {}}, None)
+
+        self.assertIsInstance(result.outcome, DependencyOrderedSerialExecutionApiFailure)
+        self.assertIs(result.cleanup_context.client, client)
+        self.assertEqual(outcome.exit_code, EX_UNAVAILABLE)
+        self.assertEqual(outcome.error, "api failure: capability probe failed")
+
+    def test_fail_fast_variant_uses_run_exit_code_and_worker_error(self):
+        result = DependencyOrderedSerialExecutionResult.fail_fast(
+            {"status": "failed", "workers": {}},
+            object(),
+            {},
+            "worker timed out after 0.01s",
+        )
+        outcome = result.finish_outcome({"status": "timeout", "workers": {}}, "recovered timeout")
+
+        self.assertIsInstance(result.outcome, DependencyOrderedSerialExecutionFailFast)
+        self.assertEqual(outcome.exit_code, EX_TIMEOUT)
+        self.assertEqual(outcome.error, "worker timed out after 0.01s")
+
 
 def _hydrated_workers(workers):
     return {worker_id: hydrate_worker_record(worker, worker_id) for worker_id, worker in workers.items()}
