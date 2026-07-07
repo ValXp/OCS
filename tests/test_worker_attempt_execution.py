@@ -4,14 +4,13 @@ import unittest
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
-from opencode_session.run_record import run_record_for_output
+from opencode_session.run_record import ensure_run_worker, run_record_for_output
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
 from opencode_session.worker_execution import WorkerExecutionExecutor, execute_worker_attempts
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD, WorkerSessionCreationJournal
 from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_state import (
     apply_worker_transition,
-    ensure_worker,
     worker_field,
     worker_has_field,
     worker_output_field,
@@ -104,7 +103,7 @@ class WorkerAttemptExecutionTest(WorkerExecutionAssertionsMixin, unittest.TestCa
     def test_execute_worker_attempts_rejects_create_response_without_session_id_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             client = FakeClient([None])
 
             def execute_prompt(client, session_id, prompt, capabilities):
@@ -135,7 +134,7 @@ class WorkerAttemptExecutionTest(WorkerExecutionAssertionsMixin, unittest.TestCa
     def test_execute_worker_attempts_applies_active_attempt_before_executor(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             client = FakeClient(["ses_initial"])
             executions = []
 
@@ -176,7 +175,7 @@ class WorkerAttemptExecutionTest(WorkerExecutionAssertionsMixin, unittest.TestCa
     def test_execute_worker_attempts_uses_executor_protocol_request_with_deadline(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             worker.update_canonical_fields(timeout_seconds=1)
             client = FakeClient(["ses_initial"])
             executions = []
@@ -210,7 +209,7 @@ class WorkerAttemptExecutionTest(WorkerExecutionAssertionsMixin, unittest.TestCa
     def test_execute_worker_attempts_returns_retry_scheduled_after_one_attempt(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             worker.update_canonical_fields(retry_limit=1, retryable_failures=["provider"])
             client = FakeClient(["ses_initial"])
             executions = []
@@ -247,7 +246,7 @@ class WorkerAttemptExecutionTest(WorkerExecutionAssertionsMixin, unittest.TestCa
     def test_worker_execution_executor_persists_attempt_record_before_blocking_executor(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             client = FakeClient(["ses_initial"])
             persisted_workers = []
 

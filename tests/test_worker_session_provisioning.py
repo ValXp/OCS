@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from opencode_session.api_transport import OpenCodeApiError
-from opencode_session.run_record import run_directory
+from opencode_session.run_record import ensure_run_worker, run_directory
 from opencode_session.run_store import RunStoreError
 from opencode_session.remote_journal import (
     OUTBOX_STATE_APPLIED,
@@ -21,7 +21,7 @@ from opencode_session.worker_session_provisioning import (
     recoverable_worker_session_creations_by_worker,
 )
 from opencode_session.worker_storage_adapter import hydrate_worker_record
-from opencode_session.worker_state import WorkerRecord, ensure_worker, worker_field
+from opencode_session.worker_state import WorkerRecord, worker_field
 
 try:
     from tests.worker_execution_helpers import FakeClient
@@ -110,7 +110,7 @@ class WorkerSessionProvisioningTest(unittest.TestCase):
     def test_ensure_worker_session_uses_worker_record_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             client = FakeClient(["ses_new"])
             calls = []
             original = WorkerRecord.set_session
@@ -141,7 +141,7 @@ class WorkerSessionProvisioningTest(unittest.TestCase):
     def test_provision_without_create_uses_worker_record_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             client = FakeClient([])
             calls = []
             original = WorkerRecord.set_session

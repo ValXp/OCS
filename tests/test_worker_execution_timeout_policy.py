@@ -2,7 +2,8 @@ import tempfile
 import unittest
 
 from opencode_session.worker_execution import WorkerExecutionTimeout, execute_worker_attempts
-from opencode_session.worker_state import ensure_worker, worker_field, worker_has_field, worker_output_field
+from opencode_session.run_record import ensure_run_worker
+from opencode_session.worker_state import worker_field, worker_has_field, worker_output_field
 
 try:
     from tests.worker_execution_helpers import CAPABILITIES, FakeClient
@@ -14,7 +15,7 @@ class WorkerExecutionTimeoutPolicyTest(unittest.TestCase):
     def test_execute_worker_attempts_skips_automatic_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             worker.update_canonical_fields(timeout_seconds=0.05, retry_limit=1, retryable_failures=["timeout"])
             client = FakeClient(["ses_initial", "ses_unused"])
 
@@ -55,7 +56,7 @@ class WorkerExecutionTimeoutPolicyTest(unittest.TestCase):
     def test_execute_worker_attempts_does_not_start_retry_session_after_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             worker.update_canonical_fields(timeout_seconds=0.05, retry_limit=1, retryable_failures=["timeout"])
             client = FakeClient(["ses_initial", "ses_retry"])
 
@@ -99,7 +100,7 @@ class WorkerExecutionTimeoutPolicyTest(unittest.TestCase):
     def test_execute_worker_attempts_does_not_schedule_timeout_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             run = {"directory": directory, "workers": {}}
-            worker = ensure_worker(run, "worker", role="worker")
+            worker = ensure_run_worker(run, "worker", role="worker")
             worker.update_canonical_fields(timeout_seconds=0.05, retry_limit=1, retryable_failures=["timeout"])
             client = FakeClient(["ses_initial", "ses_retry"])
 

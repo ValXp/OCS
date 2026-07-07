@@ -2083,18 +2083,6 @@ def _abort_is_accepted(abort):
     return isinstance(abort, dict) and abort.get("accepted")
 
 
-def default_worker(worker_id):
-    return default_worker_record(worker_id)
-
-
-def normalize_worker(worker, worker_id):
-    return deserialize_worker_record(worker, worker_id)
-
-
-def normalize_worker_snapshot(worker, worker_id):
-    return serialize_worker_snapshot(worker, worker_id)
-
-
 class WorkerLifecycleReducer:
     def __init__(self, record):
         self.record = worker_record_for_mutation(record)
@@ -2199,24 +2187,6 @@ def apply_worker_transition(latest_workers, transition):
     record.apply_transition(transition)
     latest_workers[transition.worker_id] = record
     return record
-
-
-def next_eligible_action(worker):
-    return next_eligible_worker_action(worker)
-
-
-def ensure_worker(run, worker_id, *, role):
-    workers = run.setdefault("workers", {})
-    existing = workers.get(worker_id)
-    if existing is None:
-        worker = default_worker_record(worker_id)
-    else:
-        worker = worker_record_for_mutation(existing, worker_id).to_worker()
-    if not worker.role:
-        worker.role = deepcopy(role)
-    worker.id = worker_id
-    workers[worker_id] = worker
-    return worker
 
 
 def mark_worker_active(worker, *, now=None):

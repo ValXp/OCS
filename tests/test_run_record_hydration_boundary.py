@@ -183,7 +183,7 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         self.assertNotIn("status", stored)
 
     def test_runtime_worker_helpers_reject_raw_mappings(self):
-        from opencode_session.worker_state import normalize_worker
+        from opencode_session.worker_state import deserialize_worker_record
 
         raw_worker = {
             "id": "review",
@@ -194,7 +194,7 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(TypeError, "internal worker must be WorkerRecord"):
-            normalize_worker(
+            deserialize_worker_record(
                 raw_worker,
                 raw_worker["id"],
             )

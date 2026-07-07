@@ -269,6 +269,19 @@ class ImportBoundaryTest(unittest.TestCase):
             any(hasattr(metadata, "exit_code") for metadata in worker_state.WORKER_LIFECYCLE_METADATA.values())
         )
 
+    def test_worker_state_does_not_export_run_record_or_legacy_test_helpers(self):
+        import opencode_session.worker_state as worker_state
+
+        for name in (
+            "default_worker",
+            "ensure_worker",
+            "next_eligible_action",
+            "normalize_worker",
+            "normalize_worker_snapshot",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(worker_state, name))
+
     def test_python_39_claim_avoids_pep604_type_union_annotations(self):
         project_root = Path(__file__).resolve().parents[1]
         package_dir = project_root / "opencode_session"
