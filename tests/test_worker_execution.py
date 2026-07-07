@@ -10,6 +10,7 @@ from opencode_session.run_store import RunStoreError
 from opencode_session.remote_journal import (
     OUTBOX_STATE_APPLIED,
     OUTBOX_STATE_INTENT,
+    OUTBOX_STATE_REMOTE_SUCCEEDED,
     OUTBOX_STATE_UNCERTAIN,
 )
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
@@ -419,7 +420,10 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertEqual(provisioning.outcome.session_id, "ses_new")
         self.assertEqual(provisioning.outcome.created_session_id, "ses_new")
         self.assertEqual(journals[0][0]["outbox_state"], OUTBOX_STATE_INTENT)
-        self.assertEqual(journals[1][0]["outbox_state"], OUTBOX_STATE_APPLIED)
+        self.assertEqual(journals[1][0]["outbox_state"], OUTBOX_STATE_REMOTE_SUCCEEDED)
+        self.assertEqual(journals[1][0]["session_id"], "ses_new")
+        self.assertEqual(journals[1][0]["created_session_ids"], ["ses_new"])
+        self.assertEqual(journals[2][0]["outbox_state"], OUTBOX_STATE_APPLIED)
         self.assertIs(provisioning.worker, run["workers"]["worker"])
         self.assertEqual(worker_field(provisioning.worker, "session_id"), "ses_new")
         self.assertEqual(
@@ -436,6 +440,55 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIs(finalized_run, run)
         self.assertIs(finalized_worker, provisioning.worker)
         self.assertNotIn(WORKER_SESSION_JOURNAL_FIELD, run)
+
+    def test_worker_session_provisioner_recovers_created_session_when_local_apply_fails(self):
+        run = {
+            "name": "demo",
+            "directory": "/workspace",
+            "workers": {"worker": normalize_worker({"id": "worker"}, "worker")},
+        }
+        worker = run["workers"]["worker"]
+        calls = []
+
+        def persist_run_mutation(run, mutator):
+            calls.append("persist")
+            if len(calls) == 3:
+                raise RunStoreError("forced worker session apply failure")
+            mutator(run)
+            return run
+
+        journal = WorkerSessionCreationJournal(
+            persist_run_mutation,
+            now=lambda: "2026-07-05T00:00:00Z",
+            id_factory=lambda: "worker-session-intent-1",
+        )
+        provisioner = WorkerSessionProvisioner(session_journal=journal)
+        client = FakeClient(["ses_new"])
+
+        with self.assertRaisesRegex(RunStoreError, "forced worker session apply failure"):
+            provisioner.provision(
+                client,
+                run,
+                worker,
+                agent="build",
+                model="openai/gpt-5.5",
+                cleanup_requested=True,
+            )
+
+        self.assertEqual(calls, ["persist", "persist", "persist"])
+        self.assertEqual(client.requests, [("create", "/workspace", "build", "openai/gpt-5.5")])
+        self.assertIsNone(worker_field(run["workers"]["worker"], "cleanup"))
+        entry = run[WORKER_SESSION_JOURNAL_FIELD][0]
+        self.assertEqual(entry["id"], "worker-session-intent-1")
+        self.assertEqual(entry["kind"], "worker_session_create")
+        self.assertEqual(entry["outbox_state"], OUTBOX_STATE_REMOTE_SUCCEEDED)
+        self.assertEqual(entry["session_id"], "ses_new")
+        self.assertEqual(entry["created_session_ids"], ["ses_new"])
+        self.assertTrue(entry["cleanup_requested"])
+        self.assertEqual(
+            recoverable_worker_session_creations_by_worker(run),
+            {"worker": ["ses_new"]},
+        )
 
     def test_worker_execution_records_completed_run_outcome(self):
         run = {
@@ -567,6 +620,14 @@ class WorkerExecutionTest(unittest.TestCase):
                 {
                     "id": "worker-session-intent-4",
                     "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_REMOTE_SUCCEEDED,
+                    "worker_id": "remote-succeeded",
+                    "cleanup_requested": True,
+                    "session_id": "ses_remote_succeeded",
+                },
+                {
+                    "id": "worker-session-intent-5",
+                    "kind": "worker_session_create",
                     "outbox_state": OUTBOX_STATE_INTENT,
                     "worker_id": "pending",
                     "cleanup_requested": True,
@@ -580,6 +641,7 @@ class WorkerExecutionTest(unittest.TestCase):
             {
                 "worker": ["ses_worker_cleanup", "ses_duplicate", "ses_created"],
                 "other": ["ses_other"],
+                "remote-succeeded": ["ses_remote_succeeded"],
             },
         )
 
@@ -606,6 +668,14 @@ class WorkerExecutionTest(unittest.TestCase):
                 {
                     "id": "worker-session-intent-3",
                     "kind": "worker_session_create",
+                    "outbox_state": OUTBOX_STATE_REMOTE_SUCCEEDED,
+                    "worker_id": "remote-succeeded",
+                    "cleanup_requested": True,
+                    "session_id": "ses_remote_succeeded",
+                },
+                {
+                    "id": "worker-session-intent-4",
+                    "kind": "worker_session_create",
                     "outbox_state": OUTBOX_STATE_INTENT,
                     "worker_id": "pending",
                     "cleanup_requested": True,
@@ -616,7 +686,7 @@ class WorkerExecutionTest(unittest.TestCase):
 
         self.assertEqual(
             recoverable_worker_session_creations_by_worker(run),
-            {"worker": ["ses_created", "ses_duplicate"]},
+            {"worker": ["ses_created", "ses_duplicate"], "remote-succeeded": ["ses_remote_succeeded"]},
         )
 
     def test_execute_worker_attempts_rejects_create_response_without_session_id_before_execution(self):

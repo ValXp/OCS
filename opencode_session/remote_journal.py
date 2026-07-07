@@ -19,17 +19,20 @@ _ResultHandler = Callable[[Any, "RemoteJournalRecord"], Optional["RemoteMutation
 _PERSISTENCE_ERRORS = (RunStoreError, OSError)
 _RECORD_IDENTITY_FIELDS = {"id", "kind"}
 OUTBOX_STATE_INTENT = "intent"
+OUTBOX_STATE_REMOTE_SUCCEEDED = "remote_succeeded"
 OUTBOX_STATE_APPLIED = "applied"
 OUTBOX_STATE_UNCERTAIN = "uncertain"
 _PENDING_OUTBOX_STATES: FrozenSet[str] = frozenset(
     {
         OUTBOX_STATE_INTENT,
+        OUTBOX_STATE_REMOTE_SUCCEEDED,
         OUTBOX_STATE_APPLIED,
         OUTBOX_STATE_UNCERTAIN,
     }
 )
 _LEGACY_STATUS_OUTBOX_STATES: Dict[str, str] = {
     "intent": OUTBOX_STATE_INTENT,
+    "remote_succeeded": OUTBOX_STATE_REMOTE_SUCCEEDED,
     "created": OUTBOX_STATE_APPLIED,
     "applied": OUTBOX_STATE_APPLIED,
     "uncertain": OUTBOX_STATE_UNCERTAIN,
@@ -217,6 +220,21 @@ class RemoteMutationTransaction:
             missing_intent_policy=missing_intent_policy,
         )
 
+    def mark_remote_succeeded(
+        self,
+        run: _RemoteMutationRun,
+        record: RemoteJournalRecord,
+        *,
+        missing_intent_policy: str = MISSING_INTENT_IGNORE,
+    ) -> _RemoteMutationRun:
+        self._validate_record_identity(record)
+        return self.journal.mark_remote_succeeded(
+            run,
+            self.entry_id,
+            record,
+            missing_intent_policy=missing_intent_policy,
+        )
+
     def finalize(self, run: _RemoteMutationRun, *, run_update: Optional[_RunUpdate] = None) -> _RemoteMutationRun:
         return self.journal.finalize(run, self.entry_id, run_update=run_update)
 
@@ -294,6 +312,19 @@ class RemoteMutationRunner:
             result = apply_result(remote_result, intent)
             if result is None:
                 result = RemoteMutationResult.finalize()
+        if not isinstance(result, RemoteMutationResult):
+            raise TypeError("remote mutation result must be a RemoteMutationResult")
+        if result.outbox_action != REMOTE_MUTATION_RESULT_KEEP_PENDING:
+            succeeded_record = intent
+            missing_intent_policy = MISSING_INTENT_IGNORE
+            if result.outbox_action == REMOTE_MUTATION_RESULT_RECORD_APPLIED:
+                succeeded_record = result.applied_record
+                missing_intent_policy = result.missing_intent_policy
+            run = self.transaction.mark_remote_succeeded(
+                run,
+                succeeded_record,
+                missing_intent_policy=missing_intent_policy,
+            )
         run = self.transaction.apply_result(run, result)
         return RemoteMutationExecution(run=run, remote_result=remote_result, intent=intent)
 
@@ -379,6 +410,30 @@ class RemoteMutationJournal:
             journal = []
             run[self.field] = journal
         entry = _with_outbox_state(_journal_entry(record), OUTBOX_STATE_APPLIED)
+        if entry.get("id") != entry_id:
+            raise ValueError(f"remote journal record id must be {entry_id!r}")
+        update = _journal_update(entry)
+        for journal_entry in journal:
+            if isinstance(journal_entry, dict) and journal_entry.get("id") == entry_id:
+                journal_entry.update(update)
+                return
+        if missing_intent_policy == MISSING_INTENT_RECORD_APPLIED:
+            journal.append(entry)
+
+    def mark_remote_succeeded(
+        self,
+        run: _RemoteMutationRun,
+        entry_id: str,
+        record: RemoteJournalRecord,
+        *,
+        missing_intent_policy: str = MISSING_INTENT_IGNORE,
+    ) -> None:
+        _require_known_missing_intent_policy(missing_intent_policy)
+        journal = run.get(self.field)
+        if not isinstance(journal, list):
+            journal = []
+            run[self.field] = journal
+        entry = _with_outbox_state(_journal_entry(record), OUTBOX_STATE_REMOTE_SUCCEEDED)
         if entry.get("id") != entry_id:
             raise ValueError(f"remote journal record id must be {entry_id!r}")
         update = _journal_update(entry)
@@ -485,6 +540,24 @@ class PersistedRemoteMutationJournal:
             if run_update is not None:
                 _apply_run_update(run_update, latest_run)
             self.journal.mark_applied(latest_run, entry_id, record, missing_intent_policy=missing_intent_policy)
+
+        return self.persist_run_mutation(run, persisted_mutation)
+
+    def mark_remote_succeeded(
+        self,
+        run: _RemoteMutationRun,
+        entry_id: str,
+        record: RemoteJournalRecord,
+        *,
+        missing_intent_policy: str = MISSING_INTENT_IGNORE,
+    ) -> _RemoteMutationRun:
+        def persisted_mutation(latest_run: _RemoteMutationRun) -> None:
+            self.journal.mark_remote_succeeded(
+                latest_run,
+                entry_id,
+                record,
+                missing_intent_policy=missing_intent_policy,
+            )
 
         return self.persist_run_mutation(run, persisted_mutation)
 

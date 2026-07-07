@@ -8,7 +8,7 @@ from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
 )
-from opencode_session.remote_journal import OUTBOX_STATE_APPLIED, OUTBOX_STATE_INTENT
+from opencode_session.remote_journal import OUTBOX_STATE_INTENT, OUTBOX_STATE_REMOTE_SUCCEEDED
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_start_core import RunStartCapabilityProbe
 from opencode_session.run_store import RunStore, RunStoreError
@@ -356,17 +356,14 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(len(journal), 1)
         entry = journal[0]
         self.assertEqual(entry["kind"], "worker_session_create")
-        self.assertEqual(entry["outbox_state"], OUTBOX_STATE_APPLIED)
+        self.assertEqual(entry["outbox_state"], OUTBOX_STATE_REMOTE_SUCCEEDED)
         self.assertEqual(entry["worker_id"], "worker")
         self.assertEqual(entry["session_id"], "ses_initial")
         self.assertEqual(entry["created_session_ids"], ["ses_initial"])
         self.assertTrue(entry["cleanup_requested"])
         worker = run["workers"]["worker"]
-        self.assertEqual(worker_field(worker, "session_id"), "ses_initial")
-        self.assertEqual(
-            worker_field(worker, "cleanup"),
-            {"requested": True, "deleted": False, "sessions": ["ses_initial"]},
-        )
+        self.assertIsNone(worker_field(worker, "session_id"))
+        self.assertIsNone(worker_field(worker, "cleanup"))
 
     def test_command_service_start_passes_injected_dependencies_to_orchestration(self):
         with DependencyOrderedSerialServiceScenario(self, client=FakeClient([])) as scenario:
@@ -462,7 +459,7 @@ def _has_created_session_journal(run):
     return any(
         isinstance(entry, dict)
         and entry.get("kind") == "worker_session_create"
-        and entry.get("outbox_state") == OUTBOX_STATE_APPLIED
+        and entry.get("outbox_state") == OUTBOX_STATE_REMOTE_SUCCEEDED
         for entry in journal
     )
 

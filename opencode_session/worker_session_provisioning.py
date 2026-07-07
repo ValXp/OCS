@@ -4,6 +4,8 @@ from typing import Optional
 
 from opencode_session.remote_journal import (
     MISSING_INTENT_RECORD_APPLIED,
+    OUTBOX_STATE_APPLIED,
+    OUTBOX_STATE_REMOTE_SUCCEEDED,
     PersistedRemoteMutationJournal,
     RemoteJournalRecord,
     RemoteMutationOperation,
@@ -304,7 +306,11 @@ def worker_session_creation_metadata(run, intent):
 
 def recoverable_worker_session_creations_by_worker(run):
     session_ids_by_worker = {}
-    for entry in _WORKER_SESSION_RECOVERY.applied_entries(run, kind=WORKER_SESSION_CREATE_KIND):
+    for entry in _WORKER_SESSION_RECOVERY.pending_entries(
+        run,
+        kind=WORKER_SESSION_CREATE_KIND,
+        outbox_states=(OUTBOX_STATE_REMOTE_SUCCEEDED, OUTBOX_STATE_APPLIED),
+    ):
         creation = WorkerSessionCreationJournalEntry.from_journal_entry(entry)
         if creation is None or not creation.cleanup_requested:
             continue

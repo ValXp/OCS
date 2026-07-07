@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from opencode_session.remote_journal import OUTBOX_STATE_UNCERTAIN
+from opencode_session.remote_journal import OUTBOX_STATE_REMOTE_SUCCEEDED, OUTBOX_STATE_UNCERTAIN
 from opencode_session.run_services import (
     REMOTE_MUTATION_JOURNAL_FIELD,
     RunCommandService,
@@ -219,7 +219,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
     def test_steer_keeps_journal_when_final_prompt_persistence_fails_after_api_success(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             inner_store = _active_worker_store(store_root, directory)
-            store = FailingUpdateStore(inner_store, fail_on_update=2)
+            store = FailingUpdateStore(inner_store, fail_on_update=3)
             client = RecordingRunClient(
                 prompt_response={
                     "sessionID": "ses_plan",
@@ -250,6 +250,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(len(run[REMOTE_MUTATION_JOURNAL_FIELD]), 1)
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "steer_prompt")
+        self.assertEqual(journal["outbox_state"], OUTBOX_STATE_REMOTE_SUCCEEDED)
         self.assertEqual(journal["message_id"], "msg_steer_1")
         self.assertEqual(journal["text"], "Continue with the plan")
         self.assertEqual(recoverable_remote_mutation_entries(run, kind="steer_prompt"), (journal,))
@@ -385,7 +386,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
     def test_abort_keeps_journal_when_final_abort_persistence_fails_after_api_success(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             inner_store = _active_worker_store(store_root, directory)
-            store = FailingUpdateStore(inner_store, fail_on_update=2)
+            store = FailingUpdateStore(inner_store, fail_on_update=3)
             client = RecordingRunClient(
                 abort_response={"sessionID": "ses_plan", "accepted": True, "status": "aborted"}
             )
@@ -404,6 +405,7 @@ class RunCommandServiceRemoteMutationJournalTest(unittest.TestCase):
         self.assertEqual(len(run[REMOTE_MUTATION_JOURNAL_FIELD]), 1)
         journal = run[REMOTE_MUTATION_JOURNAL_FIELD][0]
         self.assertEqual(journal["kind"], "abort_worker")
+        self.assertEqual(journal["outbox_state"], OUTBOX_STATE_REMOTE_SUCCEEDED)
         self.assertEqual(journal["session_id"], "ses_plan")
         self.assertEqual(recoverable_remote_mutation_entries(run, kind="abort_worker"), (journal,))
 
