@@ -5,18 +5,14 @@ import unittest
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import BlockingProviderFailure
 from opencode_session.multi_worker_orchestration import (
-    DependencyOrderedSerialPlanner,
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
-    EXECUTION_POLICY_FAIL_FAST,
-    SelectedSerialWorkerExecutor,
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
 from opencode_session.run_start_core import RunStartCapabilityProbe
 from opencode_session.run_store import RunStore, RunStoreError
-from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
-from opencode_session.worker_state import normalize_worker, worker_field, worker_output_field
+from opencode_session.worker_state import worker_field, worker_output_field
 
 try:
     from tests.multi_worker_orchestration_helpers import (
@@ -71,185 +67,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertIsNotNone(client.route_plan)
         self.assertEqual(client.requests, [])
 
-    def test_selected_worker_executor_invokes_worker_execution_pipeline_directly(self):
-        run = {
-            "workers": {
-                "worker": normalize_worker(
-                    {
-                        "id": "worker",
-                        "prompt": "Finish the worker task",
-                        "agent": "build",
-                        "model": "openai/gpt-5.5",
-                    },
-                    "worker",
-                )
-            }
-        }
-        client = object()
-
-        class RecordingWorkerExecution:
-            def __init__(self):
-                self.calls = []
-
-            def execute(
-                self,
-                client,
-                run,
-                worker,
-                prompt,
-                capabilities,
-                *,
-                session_id=None,
-                agent=None,
-                model=None,
-                create_session=True,
-                cleanup_requested=False,
-            ):
-                self.calls.append(
-                    {
-                        "client": client,
-                        "run": run,
-                        "worker": worker,
-                        "prompt": prompt,
-                        "capabilities": capabilities,
-                        "session_id": session_id,
-                        "agent": agent,
-                        "model": model,
-                        "create_session": create_session,
-                        "cleanup_requested": cleanup_requested,
-                    }
-                )
-                updated_run = deepcopy(run)
-                updated_run["workers"][worker.worker_id].update_canonical_fields(lifecycle_state="done_collect")
-                return WorkerExecutionOutcome("completed", run=updated_run)
-
-        class RecordingSessionTracker:
-            def __init__(self):
-                self.remembered = []
-
-            def remember_worker_outcome(self, run, fallback_worker, outcome):
-                self.remembered.append((run, fallback_worker, outcome.kind))
-
-        worker_execution = RecordingWorkerExecution()
-        session_tracker = RecordingSessionTracker()
-
-        outcome = SelectedSerialWorkerExecutor(worker_execution).execute_next(
-            run,
-            "worker",
-            client,
-            CAPABILITIES,
-            session_tracker=session_tracker,
-            execution_policy=EXECUTION_POLICY_FAIL_FAST,
-        )
-
-        self.assertEqual(worker_output_field(outcome.run["workers"]["worker"], "status"), "done")
-        self.assertEqual(len(worker_execution.calls), 1)
-        self.assertIs(worker_execution.calls[0]["client"], client)
-        self.assertIs(worker_execution.calls[0]["run"], run)
-        self.assertIs(worker_execution.calls[0]["worker"], run["workers"]["worker"])
-        self.assertEqual(worker_execution.calls[0]["prompt"], "Finish the worker task")
-        self.assertEqual(worker_execution.calls[0]["capabilities"], CAPABILITIES)
-        self.assertIsNone(worker_execution.calls[0]["session_id"])
-        self.assertEqual(worker_execution.calls[0]["agent"], "build")
-        self.assertEqual(worker_execution.calls[0]["model"], "openai/gpt-5.5")
-        self.assertTrue(worker_execution.calls[0]["create_session"])
-        self.assertFalse(worker_execution.calls[0]["cleanup_requested"])
-        self.assertEqual(worker_output_field(session_tracker.remembered[0][1], "status"), "done")
-        self.assertEqual(session_tracker.remembered[0][2], "completed")
-
-    def test_next_eligible_worker_executor_returns_retry_scheduled_without_retrying_inline(self):
-        run = {
-            "workers": {
-                "worker": normalize_worker(
-                    {
-                        "id": "worker",
-                        "prompt": "Finish the worker task",
-                        "retry_limit": 1,
-                        "retryable_failures": ["provider"],
-                    },
-                    "worker",
-                )
-            }
-        }
-        client = object()
-        test_case = self
-
-        class RetryWorkerExecution:
-            def __init__(self):
-                self.calls = 0
-
-            def execute(
-                self,
-                client,
-                run,
-                worker,
-                prompt,
-                capabilities,
-                *,
-                session_id=None,
-                agent=None,
-                model=None,
-                create_session=True,
-                cleanup_requested=False,
-            ):
-                self.calls += 1
-                if self.calls > 1:
-                    test_case.fail("selected serial worker execution should not retry inline")
-                updated_run = deepcopy(run)
-                updated_worker = updated_run["workers"][worker.worker_id]
-                updated_worker.update_canonical_fields(
-                    lifecycle_state="active_retry",
-                    retry_count=1,
-                    last_failure_category="provider",
-                    last_failure_reason="transient provider outage",
-                )
-                return WorkerExecutionOutcome("retry_scheduled", failure_category="provider", run=updated_run)
-
-        class RecordingSessionTracker:
-            def __init__(self):
-                self.remembered = []
-
-            def remember_worker_outcome(self, run, fallback_worker, outcome):
-                self.remembered.append((run, fallback_worker, outcome.kind))
-
-        worker_execution = RetryWorkerExecution()
-        session_tracker = RecordingSessionTracker()
-
-        outcome = SelectedSerialWorkerExecutor(worker_execution).execute_next(
-            run,
-            "worker",
-            client,
-            CAPABILITIES,
-            session_tracker=session_tracker,
-            execution_policy=EXECUTION_POLICY_FAIL_FAST,
-        )
-
-        self.assertEqual(worker_execution.calls, 1)
-        worker = outcome.run["workers"]["worker"]
-        self.assertEqual(worker_output_field(worker, "status"), "active")
-        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "retry")
-        self.assertEqual(worker_field(worker, "retry_count"), 1)
-        self.assertIsNone(outcome.first_error_outcome)
-        self.assertIsNone(outcome.fail_fast_outcome)
-        self.assertEqual(session_tracker.remembered[0][2], "retry_scheduled")
-
     def test_start_replans_from_persisted_retry_state_before_retry_attempt(self):
-        class RecordingPlanner:
-            def __init__(self):
-                self.delegate = DependencyOrderedSerialPlanner()
-                self.snapshots = []
-
-            def plan(self, workers):
-                worker = workers["worker"]
-                self.snapshots.append(
-                    (
-                        worker_output_field(worker, "status"),
-                        worker_output_field(worker, "next_eligible_action"),
-                        worker_field(worker, "retry_count"),
-                    )
-                )
-                return self.delegate.plan(workers)
-
         with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_initial"]) as scenario:
             scenario.add_worker(
                 "worker",
@@ -265,17 +83,30 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
                     raise BlockingProviderFailure("transient provider outage", prompt_id="msg_user_failed")
                 return {"status": "done", "message_ids": {"user": "msg_user_retry", "assistant": "msg_assistant"}}
 
-            planner = RecordingPlanner()
             service = scenario.service(executor=execute_prompt)
-            service.scheduler.planner = planner
+            snapshots = []
+            original_plan = service._plan_serial_step
+
+            def record_plan(workers):
+                worker = workers["worker"]
+                snapshots.append(
+                    (
+                        worker_output_field(worker, "status"),
+                        worker_output_field(worker, "next_eligible_action"),
+                        worker_field(worker, "retry_count"),
+                    )
+                )
+                return original_plan(workers)
+
+            service._plan_serial_step = record_plan
             outcome = service.start(scenario.request("worker"))
             run = scenario.load_run()
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertEqual(executions, ["ses_initial", "ses_initial"])
-        self.assertEqual(planner.snapshots[0], ("queued", "start", 0))
-        self.assertIn(("active", "retry", 1), planner.snapshots)
-        self.assertEqual(planner.snapshots[-1], ("done", "collect", 1))
+        self.assertEqual(snapshots[0], ("queued", "start", 0))
+        self.assertIn(("active", "retry", 1), snapshots)
+        self.assertEqual(snapshots[-1], ("done", "collect", 1))
         worker = run["workers"]["worker"]
         self.assertEqual(worker_output_field(worker, "status"), "done")
         self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_user_retry"])

@@ -1,13 +1,9 @@
 import unittest
 
 from opencode_session.multi_worker_orchestration import (
-    DependencyOrderedSerialRunLoopPlanner,
-    DependencyOrderedSerialStep,
-    SerialWorkerExecutionOutcome,
     plan_dependency_ordered_serial_step,
 )
 from opencode_session.run_persistence import persist_worker_transitions
-from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_storage_adapter import hydrate_worker_record
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import (
@@ -211,35 +207,6 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual(second_step.worker_id, "review")
         self.assertEqual(third_step.worker_id, "deploy")
         self.assertIsNone(final_step.worker_id)
-
-    def test_serial_run_loop_planner_keeps_next_worker_policy_pure(self):
-        planner = DependencyOrderedSerialRunLoopPlanner()
-        first_step = DependencyOrderedSerialStep("alpha", (), {})
-        next_step = DependencyOrderedSerialStep("beta", (), {})
-        empty_step = DependencyOrderedSerialStep(None, (), {})
-        failure = WorkerExecutionOutcome("failed", error="provider failure: alpha failed")
-
-        first_plan = planner.initial_plan(first_step)
-        continue_plan = planner.after_worker(
-            first_plan,
-            SerialWorkerExecutionOutcome({"name": "demo"}, failure),
-            next_step,
-        )
-        fail_fast_plan = planner.after_worker(
-            first_plan,
-            SerialWorkerExecutionOutcome({"name": "demo"}, failure, failure),
-            next_step,
-        )
-
-        self.assertEqual(first_plan.worker_id, "alpha")
-        self.assertIsNone(planner.initial_plan(empty_step).worker_id)
-        self.assertEqual(continue_plan.worker_id, "beta")
-        self.assertIs(continue_plan.first_error_outcome, failure)
-        self.assertIsNone(continue_plan.fail_fast_outcome)
-        self.assertIsNone(fail_fast_plan.worker_id)
-        self.assertIs(fail_fast_plan.first_error_outcome, failure)
-        self.assertIs(fail_fast_plan.fail_fast_outcome, failure)
-
 
 def _hydrated_workers(workers):
     return {worker_id: hydrate_worker_record(worker, worker_id) for worker_id, worker in workers.items()}

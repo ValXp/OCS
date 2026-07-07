@@ -26,10 +26,7 @@ from opencode_session.run_start_core import (
 from opencode_session.run_start_policy import mark_orchestration_start_failed
 from opencode_session.run_store import RunStoreError
 from opencode_session.schema_run import RunRecord
-from opencode_session.worker_execution import (
-    WorkerExecutionExecutor,
-    WorkerExecutionOutcome,
-)
+from opencode_session.worker_execution import WorkerExecutionExecutor
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournal
 from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_state import (
@@ -76,214 +73,12 @@ class DependencyOrderedSerialRunStartOutcome:
 class DependencyOrderedSerialStep:
     worker_id: Optional[str]
     dependency_blocked_transitions: tuple
-    blockers_by_worker_id: dict
-
-
-class DependencyOrderedSerialPlanner:
-    def plan(self, workers):
-        workers = workers if isinstance(workers, dict) else {}
-        analysis = analyze_worker_dependencies(workers)
-        blocked_worker_ids = set(analysis.blockers_by_worker_id)
-
-        # Serial orchestration intentionally selects one ready worker per persisted step.
-        selected_worker_id = analysis.ready_worker_ids[0] if analysis.ready_worker_ids else None
-        return DependencyOrderedSerialStep(
-            worker_id=selected_worker_id,
-            dependency_blocked_transitions=tuple(
-                _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
-                for worker_id in sorted(blocked_worker_ids)
-                if is_worker_record(workers.get(worker_id))
-            ),
-            blockers_by_worker_id=analysis.blockers_by_worker_id,
-        )
-
-
-class DurableDependencySerialScheduler:
-    def __init__(self, store, *, now, planner=None):
-        self.store = store
-        self.now = now
-        self.planner = planner or DependencyOrderedSerialPlanner()
-
-    def persist_next_step(self, run):
-        step = self.planner.plan(run.get("workers", {}))
-        if step.dependency_blocked_transitions:
-            result = persist_worker_transitions(
-                self.store,
-                run,
-                step.dependency_blocked_transitions,
-                refresh_run_summary=refresh_orchestration_run_summary,
-                now=self.now,
-            )
-            return result.run, step
-        else:
-            run = persist_run_summary(
-                self.store,
-                run,
-                refresh_run_summary=refresh_orchestration_run_summary,
-                now=self.now,
-            )
-        return run, step
-
-
-@dataclass
-class SerialWorkerExecutionOutcome:
-    run: RunRecord
-    first_error_outcome: Optional[WorkerExecutionOutcome] = None
-    fail_fast_outcome: Optional[WorkerExecutionOutcome] = None
-
-
-@dataclass(frozen=True)
-class SerialRunLoopPlan:
-    worker_id: Optional[str]
-    first_error_outcome: Optional[WorkerExecutionOutcome] = None
-    fail_fast_outcome: Optional[WorkerExecutionOutcome] = None
-
-
-class DependencyOrderedSerialRunLoopPlanner:
-    def initial_plan(self, serial_step):
-        return SerialRunLoopPlan(worker_id=serial_step.worker_id)
-
-    def after_worker(self, previous_plan, worker_outcome, next_step):
-        first_error_outcome = previous_plan.first_error_outcome or worker_outcome.first_error_outcome
-        if worker_outcome.fail_fast_outcome is not None:
-            return SerialRunLoopPlan(None, first_error_outcome, worker_outcome.fail_fast_outcome)
-        return SerialRunLoopPlan(next_step.worker_id, first_error_outcome)
-
-
-class DependencyOrderedSerialRunLoopExecutor:
-    def __init__(self, scheduler, worker_executor, *, planner=None):
-        self.scheduler = scheduler
-        self.worker_executor = worker_executor
-        self.planner = planner or DependencyOrderedSerialRunLoopPlanner()
-
-    def execute(
-        self,
-        run,
-        serial_step,
-        client,
-        capabilities,
-        session_tracker,
-        *,
-        execution_policy,
-    ):
-        loop_plan = self.planner.initial_plan(serial_step)
-        while loop_plan.worker_id is not None:
-            worker_outcome = self.worker_executor.execute_next(
-                run,
-                loop_plan.worker_id,
-                client,
-                capabilities,
-                session_tracker=session_tracker,
-                execution_policy=execution_policy,
-            )
-            run = worker_outcome.run
-            run, serial_step = self.scheduler.persist_next_step(run)
-            loop_plan = self.planner.after_worker(loop_plan, worker_outcome, serial_step)
-            if loop_plan.fail_fast_outcome is not None:
-                return SerialWorkerExecutionOutcome(
-                    run,
-                    loop_plan.first_error_outcome,
-                    loop_plan.fail_fast_outcome,
-                )
-        return SerialWorkerExecutionOutcome(run, loop_plan.first_error_outcome)
-
-
-class DependencyOrderedSerialRunStartOutcomePolicy:
-    def no_selected_worker(self, run):
-        return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
-
-    def unsupported_probe(self, run, start_error):
-        return DependencyOrderedSerialRunStartOutcome(run, EX_UNSUPPORTED, start_error)
-
-    def api_failure(self, run, error):
-        return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
-
-    def execution_finished(self, run, first_error_outcome):
-        return DependencyOrderedSerialRunStartOutcome(
-            run,
-            _exit_code_for_orchestration_run(run),
-            first_error_outcome.error if first_error_outcome is not None else None,
-        )
-
-
-class DisposableSessionTracker:
-    def __init__(self, enabled=False, *, cleanup_planner=None):
-        self.enabled = enabled
-        self.cleanup_planner = cleanup_planner or CreatedWorkerCleanupPlanner()
-        self.created_session_ids_by_worker = {}
-
-    def remember_worker_outcome(self, run, fallback_worker, outcome):
-        if not self.enabled:
-            return
-        current_worker = (outcome.run or run).get("workers", {}).get(fallback_worker.worker_id, fallback_worker)
-        remember_created_worker_sessions(
-            self.created_session_ids_by_worker,
-            current_worker,
-            outcome.created_session_ids,
-        )
-
-    def cleanup(self, cleanup_executor, client, run):
-        if not self.enabled or client is None:
-            return run, None
-        cleanup_plan = self.cleanup_planner.plan(self.created_session_ids_by_worker, run)
-        if not cleanup_plan.steps:
-            return run, None
-        cleanup_result = cleanup_executor.cleanup(client, run, cleanup_plan)
-        if cleanup_result.error is not None:
-            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
-                cleanup_result.run,
-                cleanup_result.exit_code,
-                cleanup_result.error,
-            )
-        return cleanup_result.run, None
-
-
-class SelectedSerialWorkerExecutor:
-    def __init__(self, worker_executor):
-        self.worker_executor = worker_executor
-
-    def execute_next(
-        self,
-        run,
-        worker_id,
-        client,
-        capabilities,
-        *,
-        session_tracker,
-        execution_policy,
-    ):
-        first_error_outcome = None
-        worker = _worker_by_id(run.get("workers", {}), worker_id)
-        if worker is None:
-            return SerialWorkerExecutionOutcome(run)
-        outcome = self._execute_single_worker(client, run, worker, capabilities, session_tracker)
-        run = outcome.run or run
-        current_worker = run.get("workers", {}).get(worker.worker_id, worker)
-        session_tracker.remember_worker_outcome(run, current_worker, outcome)
-        if outcome.error is not None:
-            first_error_outcome = outcome
-            if execution_policy == EXECUTION_POLICY_FAIL_FAST:
-                return SerialWorkerExecutionOutcome(run, first_error_outcome, outcome)
-        return SerialWorkerExecutionOutcome(run, first_error_outcome)
-
-    def _execute_single_worker(self, client, run, worker, capabilities, session_tracker):
-        return self.worker_executor.execute(
-            client,
-            run,
-            worker,
-            _worker_prompt(worker),
-            capabilities,
-            agent=worker.agent,
-            model=worker.model,
-            create_session=True,
-            cleanup_requested=getattr(session_tracker, "enabled", False),
-        )
 
 
 class DependencyOrderedSerialRunOrchestrationService:
     """Run prompted workers one at a time after their dependencies are satisfied.
 
-    Serial execution is a product guarantee: each scheduler step persists blockers, selects at most one ready
+    Serial execution is a product guarantee: each loop step persists blockers, selects at most one ready
     worker, executes it, and replans from durable state before selecting the next worker.
     """
 
@@ -301,7 +96,6 @@ class DependencyOrderedSerialRunOrchestrationService:
         self.capability_detector = capability_detector
         self.executor = executor
         self.now = now or _utc_now
-        self.scheduler = DurableDependencySerialScheduler(self.store, now=self.now)
         self.capability_probe = RunStartCapabilityProbe(
             client_factory=self.client_factory,
             capability_detector=self.capability_detector,
@@ -310,15 +104,12 @@ class DependencyOrderedSerialRunOrchestrationService:
             persist_worker_transition=self._persist_worker_transition,
             refresh_run_summary=refresh_orchestration_run_summary,
         )
-        self.outcome_policy = DependencyOrderedSerialRunStartOutcomePolicy()
         self.worker_execution_executor = WorkerExecutionExecutor(
             apply_transition=self._persist_worker_execution_transition,
             executor=self.executor,
             now=self.now,
             session_journal=self._worker_session_journal(),
         )
-        self.worker_executor = SelectedSerialWorkerExecutor(self.worker_execution_executor)
-        self.run_loop_executor = DependencyOrderedSerialRunLoopExecutor(self.scheduler, self.worker_executor)
 
     def start(self, request):
         run = self.store.load_run(request.name)
@@ -332,42 +123,139 @@ class DependencyOrderedSerialRunOrchestrationService:
         return self._start_prompted_workers(run, cleanup=request.cleanup, execution_policy=execution_policy)
 
     def _start_prompted_workers(self, run, *, cleanup=False, execution_policy=EXECUTION_POLICY_FAIL_FAST):
-        run, serial_step = self.scheduler.persist_next_step(run)
+        run, serial_step = self._persist_next_serial_step(run)
         if serial_step.worker_id is None:
-            return self.outcome_policy.no_selected_worker(run)
+            return DependencyOrderedSerialRunStartOutcome(run, _exit_code_for_orchestration_run(run))
 
         client = None
-        session_tracker = DisposableSessionTracker(cleanup)
+        created_session_ids_by_worker = {} if cleanup else None
 
         try:
             probe_outcome = self.capability_probe.probe(run)
             if probe_outcome.start_error is not None:
                 run = self._mark_prompted_workers_failed(run, probe_outcome.start_error)
-                return self.outcome_policy.unsupported_probe(run, probe_outcome.start_error)
+                return DependencyOrderedSerialRunStartOutcome(run, EX_UNSUPPORTED, probe_outcome.start_error)
 
             client = probe_outcome.client
             run = self._activate_run(run)
-            execution_outcome = self.run_loop_executor.execute(
+            run, first_error_outcome, fail_fast_outcome = self._execute_serial_workers(
                 run,
                 serial_step,
                 client,
                 probe_outcome.capabilities,
-                session_tracker,
+                created_session_ids_by_worker,
                 execution_policy=execution_policy,
             )
-            run = execution_outcome.run
-            if execution_outcome.fail_fast_outcome is not None:
-                run, cleanup_error = session_tracker.cleanup(self.cleanup_executor, client, run)
-                return cleanup_error or self.outcome_policy.execution_finished(run, execution_outcome.fail_fast_outcome)
+            if fail_fast_outcome is not None:
+                run, cleanup_error = self._cleanup_disposable_sessions(client, run, created_session_ids_by_worker)
+                return cleanup_error or self._execution_finished_outcome(run, fail_fast_outcome)
         except OpenCodeApiError as error:
             run = self._mark_prompted_workers_failed(run, str(error))
-            run, cleanup_error = session_tracker.cleanup(self.cleanup_executor, client, run)
+            run, cleanup_error = self._cleanup_disposable_sessions(client, run, created_session_ids_by_worker)
             if cleanup_error:
                 return cleanup_error
-            return self.outcome_policy.api_failure(run, error)
+            return DependencyOrderedSerialRunStartOutcome(run, EX_UNAVAILABLE, f"api failure: {error}")
 
-        run, cleanup_error = session_tracker.cleanup(self.cleanup_executor, client, run)
-        return cleanup_error or self.outcome_policy.execution_finished(run, execution_outcome.first_error_outcome)
+        run, cleanup_error = self._cleanup_disposable_sessions(client, run, created_session_ids_by_worker)
+        return cleanup_error or self._execution_finished_outcome(run, first_error_outcome)
+
+    def _persist_next_serial_step(self, run):
+        step = self._plan_serial_step(run.get("workers", {}))
+        if step.dependency_blocked_transitions:
+            result = persist_worker_transitions(
+                self.store,
+                run,
+                step.dependency_blocked_transitions,
+                refresh_run_summary=refresh_orchestration_run_summary,
+                now=self.now,
+            )
+            return result.run, step
+        run = persist_run_summary(
+            self.store,
+            run,
+            refresh_run_summary=refresh_orchestration_run_summary,
+            now=self.now,
+        )
+        return run, step
+
+    def _plan_serial_step(self, workers):
+        return plan_dependency_ordered_serial_step(workers)
+
+    def _execute_serial_workers(
+        self,
+        run,
+        serial_step,
+        client,
+        capabilities,
+        created_session_ids_by_worker,
+        *,
+        execution_policy,
+    ):
+        first_error_outcome = None
+        fail_fast_outcome = None
+        worker_id = serial_step.worker_id
+        while worker_id is not None:
+            run, worker_outcome = self._execute_selected_worker(
+                run,
+                worker_id,
+                client,
+                capabilities,
+                created_session_ids_by_worker,
+            )
+            if worker_outcome is not None and worker_outcome.error is not None:
+                first_error_outcome = first_error_outcome or worker_outcome
+                if execution_policy == EXECUTION_POLICY_FAIL_FAST:
+                    fail_fast_outcome = worker_outcome
+
+            # Persist the replan before returning on fail-fast so dependents record their blockers.
+            run, serial_step = self._persist_next_serial_step(run)
+            if fail_fast_outcome is not None:
+                break
+            worker_id = serial_step.worker_id
+        return run, first_error_outcome, fail_fast_outcome
+
+    def _execute_selected_worker(self, run, worker_id, client, capabilities, created_session_ids_by_worker):
+        worker = _worker_by_id(run.get("workers", {}), worker_id)
+        if worker is None:
+            return run, None
+        outcome = self.worker_execution_executor.execute(
+            client,
+            run,
+            worker,
+            _worker_prompt(worker),
+            capabilities,
+            agent=worker.agent,
+            model=worker.model,
+            create_session=True,
+            cleanup_requested=created_session_ids_by_worker is not None,
+        )
+        run = outcome.run or run
+        if created_session_ids_by_worker is not None:
+            current_worker = run.get("workers", {}).get(worker.worker_id, worker)
+            remember_created_worker_sessions(created_session_ids_by_worker, current_worker, outcome.created_session_ids)
+        return run, outcome
+
+    def _cleanup_disposable_sessions(self, client, run, created_session_ids_by_worker):
+        if created_session_ids_by_worker is None or client is None:
+            return run, None
+        cleanup_plan = CreatedWorkerCleanupPlanner().plan(created_session_ids_by_worker, run)
+        if not cleanup_plan.steps:
+            return run, None
+        cleanup_result = self.cleanup_executor.cleanup(client, run, cleanup_plan)
+        if cleanup_result.error is not None:
+            return cleanup_result.run, DependencyOrderedSerialRunStartOutcome(
+                cleanup_result.run,
+                cleanup_result.exit_code,
+                cleanup_result.error,
+            )
+        return cleanup_result.run, None
+
+    def _execution_finished_outcome(self, run, first_error_outcome):
+        return DependencyOrderedSerialRunStartOutcome(
+            run,
+            _exit_code_for_orchestration_run(run),
+            first_error_outcome.error if first_error_outcome is not None else None,
+        )
 
     def _activate_run(self, run):
         return self._persist_mutation(run, _mark_run_active)
@@ -421,7 +309,20 @@ def _mark_run_active(run):
 
 
 def plan_dependency_ordered_serial_step(workers):
-    return DependencyOrderedSerialPlanner().plan(workers)
+    workers = workers if isinstance(workers, dict) else {}
+    analysis = analyze_worker_dependencies(workers)
+    blocked_worker_ids = set(analysis.blockers_by_worker_id)
+
+    # Serial orchestration intentionally selects one ready worker per persisted step.
+    selected_worker_id = analysis.ready_worker_ids[0] if analysis.ready_worker_ids else None
+    return DependencyOrderedSerialStep(
+        worker_id=selected_worker_id,
+        dependency_blocked_transitions=tuple(
+            _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
+            for worker_id in sorted(blocked_worker_ids)
+            if is_worker_record(workers.get(worker_id))
+        ),
+    )
 
 
 def apply_dependency_ordered_start_request(run, request):

@@ -163,6 +163,34 @@ class DependencyOrderedSerialOrchestrationServiceDependencyTest(unittest.TestCas
         self.assertEqual(worker_output_field(run["workers"]["beta"], "status"), "done")
         self.assertEqual(worker_field(run["workers"]["beta"], "output_refs"), ["assistant:msg_beta_assistant"])
 
+    def test_fail_fast_policy_stops_before_next_independent_ready_worker(self):
+        with DependencyOrderedSerialServiceScenario(self, session_ids=["ses_alpha"]) as scenario:
+            scenario.add_worker("alpha", role="build", prompt="Run alpha")
+            scenario.add_worker("beta", role="write", prompt="Run beta")
+
+            def execute_prompt(client, session_id, prompt, capabilities):
+                client.requests.append(("execute", session_id, prompt))
+                if session_id != "ses_alpha":
+                    self.fail("fail-fast should not execute the next independent worker")
+                raise BlockingProviderFailure("alpha failed", prompt_id="msg_alpha_user")
+
+            outcome = scenario.service(executor=execute_prompt).start(scenario.request("alpha", role="build"))
+            run = scenario.load_run()
+
+        self.assertEqual(outcome.exit_code, 69)
+        self.assertEqual(outcome.error, "provider failure: alpha failed")
+        self.assertEqual(
+            scenario.client.requests,
+            [
+                ("create", scenario.directory, None, None),
+                ("execute", "ses_alpha", "Run alpha"),
+            ],
+        )
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(worker_output_field(run["workers"]["alpha"], "status"), "failed")
+        self.assertEqual(worker_output_field(run["workers"]["beta"], "status"), "queued")
+        self.assertIsNone(worker_field(run["workers"]["beta"], "session_id"))
+
     def test_start_does_not_probe_capabilities_when_partially_completed_cycle_blocks_worker(self):
         with DependencyOrderedSerialServiceScenario(self) as scenario:
             scenario.add_worker(
