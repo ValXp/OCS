@@ -9,12 +9,15 @@ from opencode_session.commands.rendering import render_command_result
 from opencode_session.run_record import normalize_run, normalize_run_for_storage, run_record_for_output
 from opencode_session.schema_run import HydratedRunRecord, PersistedRunRecord, RunRecord
 from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
+from opencode_session.worker_storage_adapter import migrate_persisted_worker_snapshot
 from opencode_session.worker_state import WorkerRecord, worker_field, worker_output_field
 
 
 class RunRecordHydrationBoundaryTest(unittest.TestCase):
     def test_schema_types_separate_hydrated_and_persisted_workers(self):
         self.assertIs(RunRecord, HydratedRunRecord)
+        self.assertEqual(get_type_hints(HydratedRunRecord)["schema_version"], int)
+        self.assertEqual(get_type_hints(PersistedRunRecord)["schema_version"], int)
         self.assertEqual(get_type_hints(HydratedRunRecord)["workers"], Dict[str, HydratedWorker])
         self.assertEqual(get_type_hints(PersistedRunRecord)["workers"], Dict[str, WorkerSnapshotRecord])
 
@@ -72,6 +75,51 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         self.assertIsNone(worker_field(worker, "status"))
         self.assertIsNone(worker_field(worker, "next_eligible_action"))
         self.assertEqual(output["status"], "active")
+        self.assertEqual(output["next_eligible_action"], "retry")
+
+    def test_versioned_worker_snapshot_migration_runs_before_hydration(self):
+        legacy_worker = {
+            "id": "",
+            "role": "review",
+            "status": "failed",
+            "next_eligible_action": "retry",
+            "failure_category": "provider",
+            "retryable_failures": ["provider"],
+            "retry_count": "0",
+            "retry_limit": "1",
+            "dependencies": "build",
+            "timeout_policy": "custom",
+        }
+
+        migrated = migrate_persisted_worker_snapshot(legacy_worker, "review", run_schema_version=1)
+        run = normalize_run(
+            {
+                "schema_version": 1,
+                "name": "demo",
+                "workers": {"review": legacy_worker},
+            },
+            fallback_name="demo",
+        )
+        worker = run["workers"]["review"]
+        snapshot = worker.to_snapshot()
+        output = run_record_for_output(run)["workers"]["review"]
+
+        self.assertEqual(migrated["id"], "review")
+        self.assertEqual(migrated["lifecycle_state"], "failed_retry")
+        self.assertEqual(migrated["retry_count"], 0)
+        self.assertEqual(migrated["retry_limit"], 1)
+        self.assertEqual(migrated["dependencies"], [])
+        self.assertEqual(migrated["timeout_policy"], "timeout")
+        self.assertNotIn("status", migrated)
+        self.assertNotIn("next_eligible_action", migrated)
+        self.assertIsInstance(worker, WorkerRecord)
+        self.assertEqual(worker.worker_id, "review")
+        self.assertEqual(worker.lifecycle_state, "failed_retry")
+        self.assertEqual(worker.retry_count, 0)
+        self.assertEqual(worker.retry_limit, 1)
+        self.assertNotIn("status", snapshot)
+        self.assertNotIn("next_eligible_action", snapshot)
+        self.assertEqual(output["status"], "failed")
         self.assertEqual(output["next_eligible_action"], "retry")
 
     def test_worker_state_core_rejects_legacy_public_status(self):

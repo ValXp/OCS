@@ -50,6 +50,7 @@ STORAGE_WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELDS = (
     "manual_retry_required",
 )
 STORAGE_WORKER_ACCEPTED_ABORT_PASSTHROUGH_FIELDS = ("cleanup",)
+PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION = 1
 _LEGACY_LIFECYCLE_PROJECTION_WORKER_ID = "__legacy_worker__"
 
 
@@ -130,46 +131,100 @@ def _legacy_worker_timeout_origin(worker, status):
     )
 
 
-def canonicalize_legacy_worker_record(worker, worker_id=None):
+def migrate_persisted_worker_snapshot(
+    worker,
+    worker_id=None,
+    *,
+    run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION,
+):
     fields = _worker_fields(worker)
+    schema_version = _coerced_schema_version(run_schema_version)
+    if schema_version <= PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION:
+        return _migrate_v1_persisted_worker_snapshot(fields, worker_id)
+    # No newer worker snapshot schema exists yet; keep public/legacy fields out of WorkerRecord.
+    return _migrate_v1_persisted_worker_snapshot(fields, worker_id)
+
+
+def canonicalize_legacy_worker_record(worker, worker_id=None):
+    return migrate_persisted_worker_snapshot(worker, worker_id, run_schema_version=1)
+
+
+def _migrate_v1_persisted_worker_snapshot(fields, worker_id=None):
+    fields = dict(fields)
+    _repair_persisted_worker_identity(fields, worker_id)
+    _repair_persisted_worker_lifecycle(fields)
+    _remove_legacy_public_worker_state(fields)
+    _coerce_persisted_worker_retry_budget(fields)
+    _coerce_persisted_worker_lists(fields)
+    _coerce_persisted_worker_timeout_policy(fields)
+    return fields
+
+
+def _repair_persisted_worker_identity(fields, worker_id):
     if worker_id:
         fields["id"] = str(worker_id)
     elif "id" in fields and not fields["id"]:
         fields.pop("id", None)
     elif "id" in fields and not isinstance(fields["id"], str):
         fields["id"] = str(fields["id"])
+
+
+def _repair_persisted_worker_lifecycle(fields):
     if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
         fields["lifecycle_state"] = _lifecycle_state_from_legacy_public_worker_state(fields)
+
+
+def _remove_legacy_public_worker_state(fields):
     for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
         fields.pop(public_field_name, None)
+
+
+def _coerce_persisted_worker_retry_budget(fields):
     for field_name in ("retry_count", "retry_limit"):
         if field_name in fields:
             fields[field_name] = _coerced_storage_int(fields[field_name])
+
+
+def _coerce_persisted_worker_lists(fields):
     for field_name in (*WORKER_LIST_FIELDS, *WORKER_OPTIONAL_LIST_FIELDS):
         if field_name in fields and not isinstance(fields[field_name], list):
             fields[field_name] = []
+
+
+def _coerce_persisted_worker_timeout_policy(fields):
     if "timeout_policy" in fields:
         timeout_policy = short_status(fields["timeout_policy"])
         fields["timeout_policy"] = (
             timeout_policy if timeout_policy in WORKER_TIMEOUT_POLICY_STATUSES else WORKER_STATUS_TIMEOUT
         )
-    return fields
 
 
-def hydrate_worker_record(worker, worker_id):
+def hydrate_worker_record(worker, worker_id, *, run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION):
     return WorkerRecord.from_worker(
-        canonicalize_legacy_worker_record(worker, worker_id),
+        migrate_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version),
         worker_id,
         allow_extra_fields=True,
     ).to_worker()
 
 
-def normalize_worker_snapshot_for_storage(worker, worker_id):
+def normalize_worker_snapshot_for_storage(
+    worker,
+    worker_id,
+    *,
+    run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION,
+):
     return WorkerRecord.from_worker(
-        canonicalize_legacy_worker_record(worker, worker_id),
+        migrate_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version),
         worker_id,
         allow_extra_fields=True,
     ).to_snapshot()
+
+
+def _coerced_schema_version(value):
+    try:
+        return int(value or PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION)
+    except (TypeError, ValueError):
+        return PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION
 
 
 def _coerced_storage_int(value):

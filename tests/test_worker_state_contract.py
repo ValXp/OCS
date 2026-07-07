@@ -1,8 +1,8 @@
 import unittest
 
 from opencode_session.worker_storage_adapter import (
-    canonicalize_legacy_worker_record,
     hydrate_worker_record,
+    migrate_persisted_worker_snapshot,
     normalize_worker_snapshot_for_storage,
     worker_snapshot_transition,
 )
@@ -394,7 +394,7 @@ class WorkerStateContractTest(unittest.TestCase):
 
         for name, worker, expected_lifecycle, expected_status, expected_action, executable in cases:
             with self.subTest(name=name):
-                canonical = canonicalize_legacy_worker_record(worker)
+                canonical = migrate_persisted_worker_snapshot(worker)
                 record = hydrate_worker_record(worker, worker["id"])
 
                 self.assertEqual(canonical["lifecycle_state"], expected_lifecycle)
@@ -500,7 +500,7 @@ class WorkerStateContractTest(unittest.TestCase):
 
         for name, worker, expected_lifecycle, expected_status, expected_action in cases:
             with self.subTest(name=name):
-                canonical = canonicalize_legacy_worker_record(worker)
+                canonical = migrate_persisted_worker_snapshot(worker)
                 snapshot = normalize_worker_snapshot_for_storage(worker, worker["id"])
                 record = hydrate_worker_record(worker, worker["id"])
 

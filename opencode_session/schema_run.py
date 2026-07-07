@@ -5,6 +5,7 @@ from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
 
 
 class PersistedRunRecord(TypedDict, total=False):
+    schema_version: int
     name: str
     run_id: str
     directory: str
@@ -20,6 +21,7 @@ class PersistedRunRecord(TypedDict, total=False):
 
 
 class HydratedRunRecord(TypedDict, total=False):
+    schema_version: int
     name: str
     run_id: str
     directory: str

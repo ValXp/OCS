@@ -44,13 +44,14 @@ def new_run_record(name, *, directory, server_url, now):
 
 def upsert_worker_record(run, worker_id, changes, *, now):
     workers = run.setdefault("workers", {})
+    run_schema_version = _worker_snapshot_schema_version(run)
     existing = workers.get(worker_id)
     if existing is None:
         if not changes.get("role"):
             raise RunRecordError(f"worker '{worker_id}' does not exist; --role is required to create it")
         worker = default_worker_record(worker_id)
     else:
-        worker = hydrate_worker_record(existing, worker_id)
+        worker = hydrate_worker_record(existing, worker_id, run_schema_version=run_schema_version)
 
     for public_field_name in ("status", "next_eligible_action"):
         if changes.get(public_field_name) is not None:
@@ -80,7 +81,7 @@ def upsert_worker_record(run, worker_id, changes, *, now):
         output_refs=changes.get("output_refs"),
     )
 
-    workers[worker_id] = hydrate_worker_record(worker, worker_id)
+    workers[worker_id] = hydrate_worker_record(worker, worker_id, run_schema_version=run_schema_version)
     run["updated_at"] = now
 
 
@@ -100,12 +101,16 @@ def normalize_run(run, *, fallback_name):
     normalized.setdefault("timeout_seconds", None)
     normalized.setdefault("blockers", [])
     normalized.setdefault("output_refs", [])
+    run_schema_version = _worker_snapshot_schema_version(normalized)
     workers = normalized.get("workers")
     if workers is None:
         workers = {}
     elif not isinstance(workers, dict):
         raise RunRecordError(f"run record for '{fallback_name}' is corrupted: workers must be an object")
-    normalized["workers"] = {worker_id: hydrate_worker_record(worker, worker_id) for worker_id, worker in workers.items()}
+    normalized["workers"] = {
+        worker_id: hydrate_worker_record(worker, worker_id, run_schema_version=run_schema_version)
+        for worker_id, worker in workers.items()
+    }
     normalized.setdefault("created_at", None)
     normalized.setdefault("updated_at", None)
     return normalized
@@ -113,11 +118,16 @@ def normalize_run(run, *, fallback_name):
 
 def normalize_run_for_storage(run, *, fallback_name):
     normalized = normalize_run(run, fallback_name=fallback_name)
+    run_schema_version = _worker_snapshot_schema_version(normalized)
     normalized["workers"] = {
-        worker_id: normalize_worker_snapshot_for_storage(worker, worker_id)
+        worker_id: normalize_worker_snapshot_for_storage(worker, worker_id, run_schema_version=run_schema_version)
         for worker_id, worker in normalized["workers"].items()
     }
     return normalized
+
+
+def _worker_snapshot_schema_version(run):
+    return run.get("schema_version", SCHEMA_VERSION) if isinstance(run, dict) else SCHEMA_VERSION
 
 
 def run_record_for_output(run):
