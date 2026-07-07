@@ -2,6 +2,7 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.multi_worker_execution_outcome import (
     DependencyOrderedSerialExecutionResult,
     DependencyOrderedSerialRunStartOutcome,
+    skipped_dependency_ordered_serial_outcome,
 )
 from opencode_session.multi_worker_orchestration_contracts import (
     EXECUTION_POLICY_FAIL_FAST,
@@ -12,16 +13,21 @@ from opencode_session.multi_worker_orchestration_contracts import (
     DependencyOrderedSerialPlanningResult,
     DependencyOrderedSerialRecoveryRequest,
     DependencyOrderedSerialRecoveryResult,
-    mark_run_active,
-    pending_prompted_workers,
-    plan_dependency_ordered_serial_step,
-    worker_by_id,
+    DependencyOrderedSerialStep,
 )
-from opencode_session.run_record import run_worker, run_workers
+from opencode_session.run_record import run_worker, run_workers, set_run_status
 from opencode_session.run_start_core import CreatedWorkerCleanupPlanner, remember_created_worker_sessions
 from opencode_session.run_start_policy import mark_orchestration_start_failed
+from opencode_session.worker_dependencies import analyze_worker_dependencies
 from opencode_session.worker_active_attempt_recovery import recover_expired_active_attempts
-from opencode_session.worker_state import worker_prompt as _worker_prompt
+from opencode_session.worker_state import (
+    WorkerTransition,
+    is_executable_worker,
+    is_worker_record,
+    refresh_run_summary as _refresh_worker_run_summary,
+    worker_prompt as _worker_prompt,
+    workers_in_dependency_order,
+)
 
 
 class DependencyOrderedSerialRecoveryPhase:
@@ -192,7 +198,12 @@ class DependencyOrderedSerialRunFlow:
     def start(self, request):
         recovery = self.recovery_phase.recover(DependencyOrderedSerialRecoveryRequest(request.run))
         planning = self.planning_phase.plan(DependencyOrderedSerialPlanningRequest(recovery.run))
-        skipped_outcome = planning.skipped_outcome(recovery.error, request.execution_policy)
+        skipped_outcome = skipped_dependency_ordered_serial_outcome(
+            planning.run,
+            planning.serial_step,
+            recovery.error,
+            request.execution_policy,
+        )
         if skipped_outcome is not None:
             return skipped_outcome
 
@@ -214,3 +225,47 @@ class DependencyOrderedSerialRunFlow:
         if cleanup_result.outcome is not None:
             return cleanup_result.outcome
         return execution.finish_outcome(cleanup_result.run, recovery.error)
+
+
+def refresh_orchestration_run_summary(run):
+    _refresh_worker_run_summary(run, include_unprompted_when_no_prompts=True)
+
+
+def plan_dependency_ordered_serial_step(workers):
+    workers = workers if isinstance(workers, dict) else {}
+    analysis = analyze_worker_dependencies(workers)
+    blocked_worker_ids = set(analysis.blockers_by_worker_id)
+    selected_worker_id = analysis.ready_worker_ids[0] if analysis.ready_worker_ids else None
+    return DependencyOrderedSerialStep(
+        worker_id=selected_worker_id,
+        dependency_blocked_transitions=tuple(
+            _dependency_blocked_transition(workers[worker_id], analysis.blockers_by_worker_id[worker_id])
+            for worker_id in sorted(blocked_worker_ids)
+            if is_worker_record(workers.get(worker_id))
+        ),
+    )
+
+
+def mark_run_active(run):
+    set_run_status(run, "active")
+
+
+def worker_by_id(workers, worker_id):
+    worker = workers.get(worker_id) if isinstance(workers, dict) else None
+    return worker if is_worker_record(worker) else None
+
+
+def pending_prompted_workers(workers):
+    return [workers[worker_id] for worker_id in pending_prompted_worker_ids(workers)]
+
+
+def pending_prompted_worker_ids(workers):
+    return tuple(
+        worker_id
+        for worker_id in sorted(workers)
+        if is_worker_record(workers.get(worker_id)) and is_executable_worker(workers[worker_id])
+    )
+
+
+def _dependency_blocked_transition(worker, blockers):
+    return WorkerTransition.dependency_blocked(worker.worker_id, blockers)

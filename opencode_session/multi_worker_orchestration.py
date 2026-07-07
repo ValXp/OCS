@@ -17,18 +17,18 @@ from opencode_session.multi_worker_orchestration_contracts import (
     DependencyOrderedSerialRecoveryRequest,
     DependencyOrderedSerialRecoveryResult,
     DependencyOrderedSerialRunFlowRequest,
-    DependencyOrderedSerialRunPersistence,
     DependencyOrderedSerialStep,
-    plan_dependency_ordered_serial_step,
-    refresh_orchestration_run_summary,
-    workers_in_dependency_order,
 )
+from opencode_session.multi_worker_orchestration_persistence import DependencyOrderedSerialRunPersistence
 from opencode_session.multi_worker_orchestration_phases import (
     DependencyOrderedSerialCleanupPhase,
     DependencyOrderedSerialExecutionPhase,
     DependencyOrderedSerialPlanningPhase,
     DependencyOrderedSerialRecoveryPhase,
     DependencyOrderedSerialRunFlow,
+    plan_dependency_ordered_serial_step,
+    refresh_orchestration_run_summary,
+    workers_in_dependency_order,
 )
 from opencode_session.run_record import (
     ensure_run_worker,
@@ -85,7 +85,11 @@ class DependencyOrderedSerialRunOrchestrationService:
         self.capability_detector = capability_detector
         self.executor = executor
         self.now = now or utc_now
-        self.persistence = DependencyOrderedSerialRunPersistence(self.store, now=self.now)
+        self.persistence = DependencyOrderedSerialRunPersistence(
+            self.store,
+            now=self.now,
+            refresh_run_summary=refresh_orchestration_run_summary,
+        )
         self.capability_probe = RunStartCapabilityProbe(
             client_factory=self.client_factory,
             capability_detector=self.capability_detector,

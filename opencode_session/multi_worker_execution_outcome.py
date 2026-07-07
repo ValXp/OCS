@@ -6,6 +6,7 @@ from opencode_session.cli_policy import (
     EX_UNSUPPORTED,
     exit_code_for_run as _exit_code_for_orchestration_run,
 )
+from opencode_session.multi_worker_orchestration_contracts import EXECUTION_POLICY_FAIL_FAST
 from opencode_session.schema_run import RunRecord
 
 
@@ -103,3 +104,19 @@ class DependencyOrderedSerialExecutionResult:
 
     def finish_outcome(self, run, recovery_error):
         return self.outcome.finish_outcome(run, recovery_error)
+
+
+def skipped_dependency_ordered_serial_outcome(run, serial_step, recovery_error, execution_policy):
+    if recovery_error is not None and execution_policy == EXECUTION_POLICY_FAIL_FAST:
+        return DependencyOrderedSerialRunStartOutcome(
+            run,
+            _exit_code_for_orchestration_run(run),
+            recovery_error,
+        )
+    if serial_step.worker_id is None:
+        return DependencyOrderedSerialRunStartOutcome(
+            run,
+            _exit_code_for_orchestration_run(run),
+            recovery_error,
+        )
+    return None

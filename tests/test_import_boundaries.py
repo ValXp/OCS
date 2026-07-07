@@ -282,6 +282,29 @@ class ImportBoundaryTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse(hasattr(worker_state, name))
 
+    def test_orchestration_contracts_import_without_planning_persistence_cli_or_worker_state(self):
+        blocked_module_names = {
+            "opencode_session.cli_policy",
+            "opencode_session.multi_worker_execution_outcome",
+            "opencode_session.run_persistence",
+            "opencode_session.worker_dependencies",
+            "opencode_session.worker_state",
+        }
+        blocked = BlockedModuleFinder(blocked_module_names)
+        with temporarily_unimported(
+            "opencode_session.multi_worker_orchestration_contracts",
+            *blocked_module_names,
+        ):
+            sys.meta_path.insert(0, blocked)
+            try:
+                contracts = importlib.import_module("opencode_session.multi_worker_orchestration_contracts")
+            finally:
+                sys.meta_path.remove(blocked)
+
+        self.assertTrue(hasattr(contracts, "DependencyOrderedSerialPlanningResult"))
+        self.assertFalse(hasattr(contracts, "DependencyOrderedSerialRunPersistence"))
+        self.assertFalse(hasattr(contracts, "plan_dependency_ordered_serial_step"))
+
     def test_python_39_claim_avoids_pep604_type_union_annotations(self):
         project_root = Path(__file__).resolve().parents[1]
         package_dir = project_root / "opencode_session"

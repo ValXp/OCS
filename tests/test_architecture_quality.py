@@ -51,7 +51,6 @@ WORKER_STATE_MODULE = "opencode_session.worker_state"
 GRANDFATHERED_WORKER_STATE_DIRECT_IMPORTERS = {
     "opencode_session.cli_policy",
     "opencode_session.multi_worker_orchestration",
-    "opencode_session.multi_worker_orchestration_contracts",
     "opencode_session.multi_worker_orchestration_phases",
     "opencode_session.run_formatting",
     "opencode_session.run_persistence",
