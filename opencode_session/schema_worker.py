@@ -58,7 +58,6 @@ class WorkerRequiredFields(TypedDict):
     session_id: Optional[str]
     agent: Optional[str]
     model: Optional[str]
-    lifecycle_state: str
     dependencies: List[str]
     prompt_ids: List[str]
     retry_count: int
@@ -68,6 +67,7 @@ class WorkerRequiredFields(TypedDict):
     timeout_policy: str
     timeout_started_at: JsonValue
     timed_out_at: JsonValue
+    lifecycle_state: str
     failure_category: Optional[str]
     failure_reason: Optional[str]
     last_failure_category: Optional[str]

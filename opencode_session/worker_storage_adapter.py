@@ -16,6 +16,7 @@ from opencode_session.worker_state import (
     WORKER_TIMEOUT_POLICY_STATUSES,
     WorkerRecord,
     is_blocked_status,
+    worker_default_snapshot_fields,
     worker_failed_lifecycle_state,
     worker_lifecycle_state_for_public_state,
     worker_lifecycle_state_for_status_alias,
@@ -262,35 +263,9 @@ def _canonical_worker_snapshot_fields(snapshot, worker_id):
     resolved_worker_id = runtime_fields.get("id") or worker_id
     if not resolved_worker_id:
         raise ValueError("worker snapshot requires id")
-    normalized = _default_worker_snapshot_fields(str(resolved_worker_id))
+    normalized = worker_default_snapshot_fields(str(resolved_worker_id))
     normalized.update(runtime_fields)
     return normalized
-
-
-def _default_worker_snapshot_fields(worker_id):
-    return {
-        "id": worker_id,
-        "role": None,
-        "session_id": None,
-        "agent": None,
-        "model": None,
-        "dependencies": [],
-        "prompt_ids": [],
-        "retry_count": 0,
-        "retry_limit": 0,
-        "retryable_failures": [],
-        "timeout_seconds": None,
-        "timeout_policy": WORKER_STATUS_TIMEOUT,
-        "timeout_started_at": None,
-        "timed_out_at": None,
-        "lifecycle_state": WORKER_LIFECYCLE_QUEUED,
-        "failure_category": None,
-        "failure_reason": None,
-        "last_failure_category": None,
-        "last_failure_reason": None,
-        "blockers": [],
-        "output_refs": [],
-    }
 
 
 def _coerced_schema_version(value):

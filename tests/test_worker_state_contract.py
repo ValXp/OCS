@@ -5,7 +5,23 @@ from opencode_session.worker_storage_adapter import (
     migrate_persisted_worker_snapshot,
     normalize_worker_snapshot_for_storage,
 )
-from opencode_session.worker_state import WorkerRecord
+from opencode_session.run_record import upsert_worker_record
+from opencode_session.schema_worker import (
+    WORKER_REQUIRED_FIELD_NAMES as SCHEMA_WORKER_REQUIRED_FIELD_NAMES,
+    WorkerRequiredFields,
+)
+from opencode_session.worker_state import (
+    WORKER_FIELD_SPECS,
+    WORKER_LIST_FIELDS,
+    WORKER_OPTIONAL_LIST_FIELDS,
+    WORKER_RECORD_CANONICAL_FIELD_NAMES,
+    WORKER_RECORD_OPTIONAL_FIELD_NAMES,
+    WORKER_RECORD_UPDATE_FIELD_NAMES,
+    WORKER_REQUIRED_FIELD_NAMES,
+    WORKER_RUN_UPSERT_FIELD_NAMES,
+    WorkerRecord,
+    worker_default_snapshot_fields,
+)
 
 
 class WorkerStateContractTest(unittest.TestCase):
@@ -62,6 +78,99 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertEqual(snapshot["prompt_ids"], ["msg_review"])
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_worker_field_spec_owns_runtime_field_projections(self):
+        spec_names = tuple(spec.name for spec in WORKER_FIELD_SPECS)
+
+        self.assertEqual(WORKER_RECORD_CANONICAL_FIELD_NAMES, frozenset(spec_names))
+        self.assertEqual(
+            WORKER_REQUIRED_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.required),
+        )
+        self.assertEqual(
+            WORKER_RECORD_OPTIONAL_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if not spec.required),
+        )
+        self.assertEqual(
+            WORKER_LIST_FIELDS,
+            tuple(
+                spec.name
+                for spec in WORKER_FIELD_SPECS
+                if spec.required and spec.validator == "list"
+            ),
+        )
+        self.assertEqual(
+            WORKER_OPTIONAL_LIST_FIELDS,
+            tuple(
+                spec.name
+                for spec in WORKER_FIELD_SPECS
+                if not spec.required and spec.validator == "list"
+            ),
+        )
+        self.assertEqual(
+            WORKER_RECORD_UPDATE_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.record_update),
+        )
+        self.assertEqual(
+            WORKER_RUN_UPSERT_FIELD_NAMES,
+            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.run_upsert),
+        )
+        self.assertEqual(
+            SCHEMA_WORKER_REQUIRED_FIELD_NAMES,
+            tuple(WorkerRequiredFields.__annotations__),
+        )
+        self.assertEqual(SCHEMA_WORKER_REQUIRED_FIELD_NAMES, WORKER_REQUIRED_FIELD_NAMES)
+
+    def test_worker_defaults_storage_and_output_use_field_spec(self):
+        defaults = worker_default_snapshot_fields("review")
+        worker = WorkerRecord.default_fields("review")
+        stored = normalize_worker_snapshot_for_storage({"id": "review"}, "review")
+        output = worker.to_output_dict()
+
+        self.assertEqual(WorkerRecord.default_snapshot_fields("review"), defaults)
+        self.assertEqual(stored, defaults)
+        for field_name in WORKER_REQUIRED_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(output[field_name], defaults[field_name])
+        self.assertEqual(output["status"], "queued")
+        self.assertEqual(output["next_eligible_action"], "start")
+
+        defaults["dependencies"].append("mutated")
+        self.assertEqual(WorkerRecord.default_snapshot_fields("review")["dependencies"], [])
+
+    def test_run_worker_upsert_uses_field_spec_upsert_projection(self):
+        upsert_values = {
+            "role": "reviewer",
+            "session_id": "ses_review",
+            "agent": "review-agent",
+            "model": "review-model",
+            "dependencies": ["build"],
+            "prompt_ids": ["prompt-review"],
+            "retry_count": 1,
+            "retry_limit": 2,
+            "retryable_failures": ["provider"],
+            "timeout_seconds": 30.0,
+            "timeout_policy": "failed",
+            "lifecycle_state": "active_wait",
+            "blockers": ["dependency"],
+            "output_refs": ["assistant:msg_review"],
+            "prompt": "Review the change",
+        }
+        run = {"workers": {}}
+
+        self.assertEqual(set(WORKER_RUN_UPSERT_FIELD_NAMES), set(upsert_values))
+        upsert_worker_record(
+            run,
+            "review",
+            upsert_values,
+            now="2026-07-06T00:00:00Z",
+        )
+
+        worker = run["workers"]["review"]
+        for field_name in WORKER_RUN_UPSERT_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(getattr(worker, field_name), upsert_values[field_name])
+        self.assertEqual(run["updated_at"], "2026-07-06T00:00:00Z")
 
     def test_hydration_boundary_normalizes_legacy_public_state_for_output(self):
         cases = (

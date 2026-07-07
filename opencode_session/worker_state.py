@@ -4,7 +4,6 @@ from dataclasses import dataclass, field as dataclass_field
 from enum import Enum
 from typing import Optional, Union
 
-from opencode_session.schema_worker import WORKER_REQUIRED_FIELD_NAMES
 from opencode_session.status import short_status
 
 
@@ -522,14 +521,6 @@ WORKER_RETRYABLE_LIFECYCLE_STATES = _lifecycle_states_matching(retryable=True)
 WORKER_BLOCKED_LIFECYCLE_STATES = _lifecycle_states_matching(status=WORKER_STATUS_BLOCKED)
 WORKER_ABORTED_LIFECYCLE_STATES = _lifecycle_states_matching(status=WORKER_STATUS_ABORTED)
 
-WORKER_LIST_FIELDS = (
-    "dependencies",
-    "prompt_ids",
-    "retryable_failures",
-    "blockers",
-    "output_refs",
-)
-WORKER_OPTIONAL_LIST_FIELDS = ("attempts",)
 WORKER_TIMEOUT_POLICY_STATUSES = frozenset(
     (
         WORKER_STATUS_TIMEOUT,
@@ -538,22 +529,163 @@ WORKER_TIMEOUT_POLICY_STATUSES = frozenset(
         WORKER_STATUS_ABORTED,
     )
 )
-REMOVABLE_WORKER_TRANSITION_FIELDS = ("error", "failure_retryable", "manual_retry_required")
 UNSET_TRANSITION_FIELD = object()
 PUBLIC_WORKER_STATE_FIELD_NAMES = frozenset(("status", "next_eligible_action"))
-WORKER_RECORD_OPTIONAL_FIELD_NAMES = (
-    "name",
-    "title",
-    "prompt",
-    "error",
-    "failure_retryable",
-    "manual_retry_required",
-    "cleanup",
-    "abort",
-    "attempts",
-    "result",
+
+
+@dataclass(frozen=True)
+class WorkerFieldSpec:
+    """Canonical runtime metadata for worker fields and their boundary projections."""
+
+    name: str
+    default: object = None
+    required: bool = True
+    validator: str = "any"
+    default_from_worker_id: bool = False
+    record_update: bool = False
+    run_upsert: bool = False
+    removable_transition_field: bool = False
+
+    def default_value(self, worker_id):
+        if self.default_from_worker_id:
+            return worker_id
+        return deepcopy(self.default)
+
+
+WORKER_FIELD_SPECS = (
+    WorkerFieldSpec("id", default_from_worker_id=True, validator="id"),
+    WorkerFieldSpec("role", record_update=True, run_upsert=True),
+    WorkerFieldSpec("session_id", record_update=True, run_upsert=True),
+    WorkerFieldSpec("agent", record_update=True, run_upsert=True),
+    WorkerFieldSpec("model", record_update=True, run_upsert=True),
+    WorkerFieldSpec(
+        "dependencies",
+        default=[],
+        validator="list",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec(
+        "prompt_ids",
+        default=[],
+        validator="list",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec(
+        "retry_count",
+        default=0,
+        validator="int",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec(
+        "retry_limit",
+        default=0,
+        validator="int",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec(
+        "retryable_failures",
+        default=[],
+        validator="list",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec("timeout_seconds", record_update=True, run_upsert=True),
+    WorkerFieldSpec(
+        "timeout_policy",
+        default=WORKER_STATUS_TIMEOUT,
+        validator="timeout_policy",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec("timeout_started_at", record_update=True),
+    WorkerFieldSpec("timed_out_at", record_update=True),
+    WorkerFieldSpec(
+        "lifecycle_state",
+        default=WORKER_LIFECYCLE_QUEUED,
+        validator="lifecycle_state",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec("failure_category", record_update=True),
+    WorkerFieldSpec("failure_reason", record_update=True),
+    WorkerFieldSpec("last_failure_category", record_update=True),
+    WorkerFieldSpec("last_failure_reason", record_update=True),
+    WorkerFieldSpec(
+        "blockers",
+        default=[],
+        validator="list",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec(
+        "output_refs",
+        default=[],
+        validator="list",
+        record_update=True,
+        run_upsert=True,
+    ),
+    WorkerFieldSpec("name", required=False),
+    WorkerFieldSpec("title", required=False),
+    WorkerFieldSpec("prompt", required=False, record_update=True, run_upsert=True),
+    WorkerFieldSpec("error", required=False, record_update=True, removable_transition_field=True),
+    WorkerFieldSpec(
+        "failure_retryable",
+        required=False,
+        record_update=True,
+        removable_transition_field=True,
+    ),
+    WorkerFieldSpec(
+        "manual_retry_required",
+        required=False,
+        record_update=True,
+        removable_transition_field=True,
+    ),
+    WorkerFieldSpec("cleanup", required=False, record_update=True),
+    WorkerFieldSpec("abort", required=False, record_update=True),
+    WorkerFieldSpec(
+        "attempts",
+        default=[],
+        required=False,
+        validator="list",
+        record_update=True,
+    ),
+    WorkerFieldSpec("result", required=False, record_update=True),
 )
-WORKER_RECORD_CANONICAL_FIELD_NAMES = frozenset((*WORKER_REQUIRED_FIELD_NAMES, *WORKER_RECORD_OPTIONAL_FIELD_NAMES))
+WORKER_FIELD_SPEC_BY_NAME = {spec.name: spec for spec in WORKER_FIELD_SPECS}
+WORKER_REQUIRED_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.required
+)
+WORKER_RECORD_OPTIONAL_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if not spec.required
+)
+WORKER_RECORD_CANONICAL_FIELD_NAMES = frozenset(spec.name for spec in WORKER_FIELD_SPECS)
+WORKER_LIST_FIELDS = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.required and spec.validator == "list"
+)
+WORKER_OPTIONAL_LIST_FIELDS = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if not spec.required and spec.validator == "list"
+)
+WORKER_RECORD_UPDATE_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.record_update
+)
+WORKER_RUN_UPSERT_FIELD_NAMES = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.run_upsert
+)
+REMOVABLE_WORKER_TRANSITION_FIELDS = tuple(
+    spec.name for spec in WORKER_FIELD_SPECS if spec.removable_transition_field
+)
+
+
+def worker_default_snapshot_fields(worker_id):
+    return {
+        spec.name: spec.default_value(worker_id)
+        for spec in WORKER_FIELD_SPECS
+        if spec.required
+    }
 
 
 @dataclass(frozen=True)
@@ -1595,24 +1727,27 @@ class WorkerRecord:
         return value if isinstance(value, list) else []
 
     def _canonical_field_value(self, field_name, value):
+        spec = WORKER_FIELD_SPEC_BY_NAME.get(field_name)
         value = deepcopy(value)
-        if field_name == "id":
+        if spec is None:
+            return value
+        if spec.validator == "id":
             if not isinstance(value, str) or not value:
                 raise ValueError("worker id must be a non-empty string")
             return value
-        if field_name == "lifecycle_state":
+        if spec.validator == "lifecycle_state":
             if value not in WORKER_LIFECYCLE_STATES:
                 raise ValueError(f"worker lifecycle_state must be canonical: {value}")
             return value
-        if field_name in ("retry_count", "retry_limit"):
+        if spec.validator == "int":
             if type(value) is not int:
                 raise TypeError(f"worker {field_name} must be an int")
             return value
-        if field_name in WORKER_LIST_FIELDS or field_name in WORKER_OPTIONAL_LIST_FIELDS:
+        if spec.validator == "list":
             if not isinstance(value, list):
                 raise TypeError(f"worker {field_name} must be a list")
             return value
-        if field_name == "timeout_policy":
+        if spec.validator == "timeout_policy":
             if value not in WORKER_TIMEOUT_POLICY_STATUSES:
                 raise ValueError(f"worker timeout_policy must be canonical: {value}")
             return value
@@ -1673,29 +1808,7 @@ class WorkerRecord:
 
     @classmethod
     def default_snapshot_fields(cls, worker_id):
-        return {
-            "id": worker_id,
-            "role": None,
-            "session_id": None,
-            "agent": None,
-            "model": None,
-            "dependencies": [],
-            "prompt_ids": [],
-            "retry_count": 0,
-            "retry_limit": 0,
-            "retryable_failures": [],
-            "timeout_seconds": None,
-            "timeout_policy": WORKER_STATUS_TIMEOUT,
-            "timeout_started_at": None,
-            "timed_out_at": None,
-            "lifecycle_state": WORKER_LIFECYCLE_QUEUED,
-            "failure_category": None,
-            "failure_reason": None,
-            "last_failure_category": None,
-            "last_failure_reason": None,
-            "blockers": [],
-            "output_refs": [],
-        }
+        return worker_default_snapshot_fields(worker_id)
 
     @classmethod
     def default_fields(cls, worker_id):
@@ -1748,36 +1861,20 @@ class WorkerRecord:
         attempts=_UNSET_WORKER_UPDATE,
         result=_UNSET_WORKER_UPDATE,
     ):
-        for field_name, value in (
-            ("role", role),
-            ("session_id", session_id),
-            ("agent", agent),
-            ("model", model),
-            ("prompt", prompt),
-            ("lifecycle_state", lifecycle_state),
-            ("dependencies", dependencies),
-            ("prompt_ids", prompt_ids),
-            ("retry_count", retry_count),
-            ("retry_limit", retry_limit),
-            ("retryable_failures", retryable_failures),
-            ("timeout_seconds", timeout_seconds),
-            ("timeout_policy", timeout_policy),
-            ("timeout_started_at", timeout_started_at),
-            ("timed_out_at", timed_out_at),
-            ("failure_category", failure_category),
-            ("failure_reason", failure_reason),
-            ("last_failure_category", last_failure_category),
-            ("last_failure_reason", last_failure_reason),
-            ("blockers", blockers),
-            ("output_refs", output_refs),
-            ("error", error),
-            ("failure_retryable", failure_retryable),
-            ("manual_retry_required", manual_retry_required),
-            ("cleanup", cleanup),
-            ("abort", abort),
-            ("attempts", attempts),
-            ("result", result),
-        ):
+        return self.update_canonical_fields_from_mapping(
+            locals(),
+            skip_none=skip_none,
+            field_names=WORKER_RECORD_UPDATE_FIELD_NAMES,
+        )
+
+    def update_canonical_fields_from_mapping(self, fields, *, skip_none=False, field_names=None):
+        field_names = (
+            WORKER_RECORD_UPDATE_FIELD_NAMES
+            if field_names is None
+            else tuple(field_names)
+        )
+        for field_name in field_names:
+            value = fields.get(field_name, _UNSET_WORKER_UPDATE)
             if value is _UNSET_WORKER_UPDATE or (skip_none and value is None):
                 continue
             self._set_canonical_field(field_name, value)
