@@ -228,9 +228,8 @@ class ImportBoundaryTest(unittest.TestCase):
 
         self.assertEqual([], offenders)
 
-    def test_worker_lifecycle_reducer_applies_public_transition(self):
-        from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
-        from opencode_session.worker_state import WorkerRecord, WorkerTransition
+    def test_worker_state_reducer_applies_public_transition(self):
+        from opencode_session.worker_state import WorkerRecord, WorkerTransition, apply_worker_transition_to_record
 
         worker = WorkerRecord.default_fields("review")
         result = apply_worker_transition_to_record(worker, WorkerTransition.active("review"))
