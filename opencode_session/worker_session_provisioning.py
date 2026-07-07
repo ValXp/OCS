@@ -4,9 +4,15 @@ from typing import Optional
 
 from opencode_session.remote_journal import (
     PersistedRemoteMutationJournal,
-    RemoteMutationApplication,
+    RemoteJournalRecord,
+    RemoteJournalUpdate,
+    RemoteMutationApplied,
+    RemoteMutationKind,
     RemoteMutationOperation,
+    RemoteMutationOperationName,
+    RemoteMutationPending,
     RemoteMutationRecovery,
+    RemoteRunMutation,
 )
 from opencode_session.schema_run import RunRecord
 from opencode_session.schema_worker import HydratedWorker
@@ -19,13 +25,25 @@ from opencode_session.worker_state import (
 
 
 WORKER_SESSION_JOURNAL_FIELD = "worker_session_journal"
-WORKER_SESSION_CREATE_KIND = "worker_session_create"
+
+
+class WorkerSessionRemoteMutationKind(RemoteMutationKind):
+    WORKER_SESSION_CREATE = "worker_session_create"
+
+
+class WorkerSessionRemoteMutationOperationName(RemoteMutationOperationName):
+    DISCARD_WORKER_SESSION_CREATE = "discard_worker_session_create"
+    FINALIZE_WORKER_SESSION_CREATE = "finalize_worker_session_create"
+    CALL_WORKER_SESSION_CREATE = "call_worker_session_create"
+
+
 WORKER_SESSION_CREATE_OPERATION = RemoteMutationOperation(
-    kind=WORKER_SESSION_CREATE_KIND,
-    discard_cleanup_operation="discard_worker_session_create",
-    finalize_cleanup_operation="finalize_worker_session_create",
-    call_remote_operation="call_worker_session_create",
+    kind=WorkerSessionRemoteMutationKind.WORKER_SESSION_CREATE,
+    discard_cleanup_operation=WorkerSessionRemoteMutationOperationName.DISCARD_WORKER_SESSION_CREATE,
+    finalize_cleanup_operation=WorkerSessionRemoteMutationOperationName.FINALIZE_WORKER_SESSION_CREATE,
+    call_remote_operation=WorkerSessionRemoteMutationOperationName.CALL_WORKER_SESSION_CREATE,
 )
+WORKER_SESSION_CREATE_KIND = WORKER_SESSION_CREATE_OPERATION.kind_value
 _WORKER_SESSION_RECOVERY = RemoteMutationRecovery(WORKER_SESSION_JOURNAL_FIELD)
 
 
@@ -36,7 +54,7 @@ class WorkerSessionOutcome:
 
 
 @dataclass(frozen=True)
-class WorkerSessionCreationIntent:
+class WorkerSessionCreationIntent(RemoteJournalRecord):
     id: str
     worker_id: str
     directory: Optional[str] = None
@@ -48,7 +66,7 @@ class WorkerSessionCreationIntent:
     def to_journal_entry(self):
         entry = {
             "id": self.id,
-            "kind": WORKER_SESSION_CREATE_OPERATION.kind,
+            "kind": WORKER_SESSION_CREATE_OPERATION.kind_value,
             "status": "intent",
             "worker_id": self.worker_id,
             "directory": self.directory,
@@ -74,7 +92,7 @@ class WorkerSessionCreationIntent:
 
 
 @dataclass(frozen=True)
-class WorkerSessionCreatedRecord:
+class WorkerSessionCreatedRecord(RemoteJournalUpdate, RemoteRunMutation):
     id: str
     worker_id: str
     session_id: str
@@ -94,7 +112,7 @@ class WorkerSessionCreatedRecord:
     def to_journal_entry(self):
         return {
             "id": self.id,
-            "kind": WORKER_SESSION_CREATE_OPERATION.kind,
+            "kind": WORKER_SESSION_CREATE_OPERATION.kind_value,
             "worker_id": self.worker_id,
             "cleanup_requested": self.cleanup_requested,
             **self.to_journal_update(),
@@ -135,7 +153,7 @@ class WorkerSessionCreationOutbox:
 
     def apply_created_session(self, session_outcome, intent):
         if session_outcome.created_session_id is None:
-            return RemoteMutationApplication(finalize=False)
+            return RemoteMutationPending()
         return _created_session_application(
             intent,
             session_outcome.created_session_id,
@@ -424,9 +442,9 @@ def _created_session_application(intent, session_id, *, created_at, agent=None, 
         agent=agent,
         model=model,
     )
-    return RemoteMutationApplication(
+    return RemoteMutationApplied(
         journal_update=created_record,
-        run_update=created_record,
+        run_mutation=created_record,
         append_if_missing=True,
         finalize=False,
     )

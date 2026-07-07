@@ -1,4 +1,6 @@
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 from opencode_session.run_store import RunStoreError
@@ -7,33 +9,95 @@ from opencode_session.run_store import RunStoreError
 _PERSISTENCE_ERRORS = (RunStoreError, OSError)
 
 
+class RemoteMutationKind(str, Enum):
+    pass
+
+
+class RemoteMutationOperationName(str, Enum):
+    pass
+
+
+class RemoteJournalRecord(ABC):
+    @abstractmethod
+    def to_journal_entry(self):
+        raise NotImplementedError
+
+
+class RemoteJournalUpdate(RemoteJournalRecord):
+    @abstractmethod
+    def to_journal_update(self):
+        raise NotImplementedError
+
+
+class RemoteRunMutation(ABC):
+    @abstractmethod
+    def apply_to_run(self, latest_run):
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
 class RemoteMutationOperation:
-    kind: str
-    discard_cleanup_operation: str
-    finalize_cleanup_operation: str
-    call_remote_operation: Optional[str] = None
+    kind: RemoteMutationKind
+    discard_cleanup_operation: RemoteMutationOperationName
+    finalize_cleanup_operation: RemoteMutationOperationName
+    call_remote_operation: RemoteMutationOperationName
+
+    def __post_init__(self):
+        _require_remote_mutation_kind(self.kind, "kind")
+        _require_remote_mutation_operation_name(
+            self.discard_cleanup_operation,
+            "discard_cleanup_operation",
+        )
+        _require_remote_mutation_operation_name(
+            self.finalize_cleanup_operation,
+            "finalize_cleanup_operation",
+        )
+        _require_remote_mutation_operation_name(
+            self.call_remote_operation,
+            "call_remote_operation",
+        )
 
     @property
-    def call_operation(self):
-        return self.call_remote_operation or f"call_{self.kind}"
+    def kind_value(self):
+        return self.kind.value
+
+
+class RemoteMutationApplication(ABC):
+    @abstractmethod
+    def apply_to_transaction(self, transaction, run):
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
-class RemoteMutationApplication:
-    run_update: object = None
-    mutate_run: object = None
-    journal_update: object = None
+class RemoteMutationFinalized(RemoteMutationApplication):
+    run_mutation: Optional[RemoteRunMutation] = None
+
+    def apply_to_transaction(self, transaction, run):
+        return transaction.finalize(run, mutate_run=self.run_mutation)
+
+
+@dataclass(frozen=True)
+class RemoteMutationApplied(RemoteMutationApplication):
+    journal_update: RemoteJournalUpdate
+    run_mutation: Optional[RemoteRunMutation] = None
     append_if_missing: bool = False
     finalize: bool = True
 
-    def __post_init__(self):
-        if self.run_update is not None and self.mutate_run is not None:
-            raise ValueError("remote mutation application accepts either run_update or mutate_run")
+    def apply_to_transaction(self, transaction, run):
+        run = transaction.mark_applied(
+            run,
+            self.journal_update,
+            mutate_run=self.run_mutation,
+            append_if_missing=self.append_if_missing,
+        )
+        if self.finalize:
+            return transaction.finalize(run)
+        return run
 
-    @property
-    def run_mutation(self):
-        return self.run_update if self.run_update is not None else self.mutate_run
+
+class RemoteMutationPending(RemoteMutationApplication):
+    def apply_to_transaction(self, transaction, run):
+        return run
 
 
 @dataclass(frozen=True)
@@ -105,7 +169,7 @@ class RemoteMutationTransaction:
             run,
             self.entry_id,
             error,
-            operation=self.operation.call_operation,
+            operation=self.operation.call_remote_operation,
         )
 
     def _validated_record(self, record):
@@ -116,8 +180,8 @@ class RemoteMutationTransaction:
         entry = _journal_entry(record)
         if entry.get("id") != self.entry_id:
             raise ValueError(f"remote journal record id must be {self.entry_id!r}")
-        if entry.get("kind") != self.operation.kind:
-            raise ValueError(f"remote journal record kind must be {self.operation.kind!r}")
+        if entry.get("kind") != self.operation.kind_value:
+            raise ValueError(f"remote journal record kind must be {self.operation.kind_value!r}")
 
 
 class RemoteMutationRunner:
@@ -134,33 +198,15 @@ class RemoteMutationRunner:
             self.transaction.mark_uncertain_best_effort(run, remote_error)
             raise
 
-        application = RemoteMutationApplication()
+        application = RemoteMutationFinalized()
         if apply_result is not None:
             application = apply_result(remote_result, intent)
             if application is None:
-                application = RemoteMutationApplication()
+                application = RemoteMutationFinalized()
             if not isinstance(application, RemoteMutationApplication):
                 raise TypeError("remote mutation application must be a RemoteMutationApplication")
-        run = self._apply(run, application)
+        run = application.apply_to_transaction(self.transaction, run)
         return RemoteMutationExecution(run=run, remote_result=remote_result, intent=intent)
-
-    def _apply(self, run, application):
-        run_mutation = application.run_mutation
-        if application.journal_update is not None:
-            run = self.transaction.mark_applied(
-                run,
-                application.journal_update,
-                mutate_run=run_mutation,
-                append_if_missing=application.append_if_missing,
-            )
-            if application.finalize:
-                return self.transaction.finalize(run)
-            return run
-        if application.finalize:
-            return self.transaction.finalize(run, mutate_run=run_mutation)
-        if run_mutation is not None:
-            raise ValueError("remote mutation application without a journal update must finalize")
-        return run
 
 
 class RemoteMutationRecovery:
@@ -328,7 +374,7 @@ class PersistedRemoteMutationJournal:
 
     def mark_uncertain_best_effort(self, run, entry_id, remote_error, *, operation):
         uncertainty = {
-            "operation": operation,
+            "operation": _remote_mutation_operation_name(operation),
             "error_type": type(remote_error).__name__,
             "message": str(remote_error),
             "recorded_at": self.now(),
@@ -354,7 +400,7 @@ class PersistedRemoteMutationJournal:
 
     def record_cleanup_failure_best_effort(self, run, entry_id, cleanup_error, *, operation):
         cleanup_failure = {
-            "operation": operation,
+            "operation": _remote_mutation_operation_name(operation),
             "error_type": type(cleanup_error).__name__,
             "message": str(cleanup_error),
             "recorded_at": self.now(),
@@ -383,31 +429,39 @@ def _append_unique(values, value):
 
 
 def _apply_run_update(run_update, run):
-    if hasattr(run_update, "apply_to_run"):
-        run_update.apply_to_run(run)
-        return
-    if callable(run_update):
-        run_update(run)
-        return
-    raise TypeError("remote mutation run updates must be callable or provide apply_to_run")
+    if not isinstance(run_update, RemoteRunMutation):
+        raise TypeError("remote mutation run updates must be RemoteRunMutation records")
+    run_update.apply_to_run(run)
 
 
 def _journal_entry(record):
-    if hasattr(record, "to_journal_entry"):
-        entry = record.to_journal_entry()
-    elif isinstance(record, dict):
-        entry = record
-    else:
-        raise TypeError("remote journal records must provide to_journal_entry")
+    if not isinstance(record, RemoteJournalRecord):
+        raise TypeError("remote journal records must be RemoteJournalRecord instances")
+    entry = record.to_journal_entry()
     if not isinstance(entry, dict):
         raise TypeError("remote journal record serialization must be a dict")
     return dict(entry)
 
 
 def _journal_update(record):
-    if hasattr(record, "to_journal_update"):
-        update = record.to_journal_update()
-        if not isinstance(update, dict):
-            raise TypeError("remote journal record update serialization must be a dict")
-        return dict(update)
-    return _journal_entry(record)
+    if not isinstance(record, RemoteJournalUpdate):
+        raise TypeError("remote journal updates must be RemoteJournalUpdate instances")
+    update = record.to_journal_update()
+    if not isinstance(update, dict):
+        raise TypeError("remote journal record update serialization must be a dict")
+    return dict(update)
+
+
+def _require_remote_mutation_kind(kind, field_name):
+    if not isinstance(kind, RemoteMutationKind):
+        raise TypeError(f"remote mutation {field_name} must be a RemoteMutationKind")
+
+
+def _require_remote_mutation_operation_name(operation, field_name):
+    if not isinstance(operation, RemoteMutationOperationName):
+        raise TypeError(f"remote mutation {field_name} must be a RemoteMutationOperationName")
+
+
+def _remote_mutation_operation_name(operation):
+    _require_remote_mutation_operation_name(operation, "operation")
+    return operation.value

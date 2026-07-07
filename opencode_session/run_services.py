@@ -15,9 +15,13 @@ from opencode_session.multi_worker_orchestration import (
 from opencode_session.prompt_admission import admit_prompt
 from opencode_session.remote_journal import (
     PersistedRemoteMutationJournal,
-    RemoteMutationApplication,
+    RemoteJournalRecord,
+    RemoteMutationFinalized,
+    RemoteMutationKind,
     RemoteMutationOperation,
+    RemoteMutationOperationName,
     RemoteMutationRecovery,
+    RemoteRunMutation,
 )
 from opencode_session.run_prompt_worker import ensure_prompt_worker
 from opencode_session.run_record import RunRecordError, upsert_worker_record
@@ -39,22 +43,36 @@ from opencode_session.worker_state import (
 
 REMOTE_MUTATION_JOURNAL_FIELD = "remote_mutation_journal"
 _REMOTE_MUTATION_RECOVERY = RemoteMutationRecovery(REMOTE_MUTATION_JOURNAL_FIELD)
+
+
+class RunRemoteMutationKind(RemoteMutationKind):
+    STEER_PROMPT = "steer_prompt"
+    ABORT_WORKER = "abort_worker"
+
+
+class RunRemoteMutationOperationName(RemoteMutationOperationName):
+    DISCARD_REMOTE_MUTATION = "discard_remote_mutation"
+    FINALIZE_REMOTE_MUTATION = "finalize_remote_mutation"
+    CALL_STEER_PROMPT = "call_steer_prompt"
+    CALL_ABORT_WORKER = "call_abort_worker"
+
+
 STEER_PROMPT_REMOTE_MUTATION = RemoteMutationOperation(
-    kind="steer_prompt",
-    discard_cleanup_operation="discard_remote_mutation",
-    finalize_cleanup_operation="finalize_remote_mutation",
-    call_remote_operation="call_steer_prompt",
+    kind=RunRemoteMutationKind.STEER_PROMPT,
+    discard_cleanup_operation=RunRemoteMutationOperationName.DISCARD_REMOTE_MUTATION,
+    finalize_cleanup_operation=RunRemoteMutationOperationName.FINALIZE_REMOTE_MUTATION,
+    call_remote_operation=RunRemoteMutationOperationName.CALL_STEER_PROMPT,
 )
 ABORT_WORKER_REMOTE_MUTATION = RemoteMutationOperation(
-    kind="abort_worker",
-    discard_cleanup_operation="discard_remote_mutation",
-    finalize_cleanup_operation="finalize_remote_mutation",
-    call_remote_operation="call_abort_worker",
+    kind=RunRemoteMutationKind.ABORT_WORKER,
+    discard_cleanup_operation=RunRemoteMutationOperationName.DISCARD_REMOTE_MUTATION,
+    finalize_cleanup_operation=RunRemoteMutationOperationName.FINALIZE_REMOTE_MUTATION,
+    call_remote_operation=RunRemoteMutationOperationName.CALL_ABORT_WORKER,
 )
 
 
 @dataclass(frozen=True)
-class SteerPromptIntentRecord:
+class SteerPromptIntentRecord(RemoteJournalRecord):
     id: str
     worker_id: str
     session_id: str
@@ -65,7 +83,7 @@ class SteerPromptIntentRecord:
     def to_journal_entry(self):
         return {
             "id": self.id,
-            "kind": STEER_PROMPT_REMOTE_MUTATION.kind,
+            "kind": STEER_PROMPT_REMOTE_MUTATION.kind_value,
             "worker_id": self.worker_id,
             "session_id": self.session_id,
             "message_id": self.message_id,
@@ -75,7 +93,7 @@ class SteerPromptIntentRecord:
 
 
 @dataclass(frozen=True)
-class SteerPromptAdmittedRecord:
+class SteerPromptAdmittedRecord(RemoteRunMutation):
     id: str
     worker_id: str
     message_id: str
@@ -123,8 +141,8 @@ class SteerPromptOutbox:
 
     def apply_result(self, result, intent):
         admission = result.record
-        return RemoteMutationApplication(
-            run_update=SteerPromptAdmittedRecord(
+        return RemoteMutationFinalized(
+            run_mutation=SteerPromptAdmittedRecord(
                 id=intent.id,
                 worker_id=intent.worker_id,
                 message_id=admission["message_id"],
@@ -133,7 +151,7 @@ class SteerPromptOutbox:
 
 
 @dataclass(frozen=True)
-class AbortWorkerIntentRecord:
+class AbortWorkerIntentRecord(RemoteJournalRecord):
     id: str
     worker_id: str
     session_id: str
@@ -141,14 +159,14 @@ class AbortWorkerIntentRecord:
     def to_journal_entry(self):
         return {
             "id": self.id,
-            "kind": ABORT_WORKER_REMOTE_MUTATION.kind,
+            "kind": ABORT_WORKER_REMOTE_MUTATION.kind_value,
             "worker_id": self.worker_id,
             "session_id": self.session_id,
         }
 
 
 @dataclass(frozen=True)
-class AbortWorkerAppliedRecord:
+class AbortWorkerAppliedRecord(RemoteRunMutation):
     id: str
     worker_id: str
     session_id: str
@@ -189,8 +207,8 @@ class AbortWorkerOutbox:
             raise
 
     def apply_result(self, response, intent):
-        return RemoteMutationApplication(
-            run_update=AbortWorkerAppliedRecord(
+        return RemoteMutationFinalized(
+            run_mutation=AbortWorkerAppliedRecord(
                 id=intent.id,
                 worker_id=intent.worker_id,
                 session_id=intent.session_id,
