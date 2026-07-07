@@ -13,9 +13,6 @@ from opencode_session.worker_state import (
     mark_worker_aborted,
     normalize_worker,
     refresh_run_summary,
-    worker_field,
-    worker_has_field,
-    worker_output_field,
 )
 
 try:
@@ -103,7 +100,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             stored = json.loads(run_path.read_text(encoding="utf-8"))
 
         worker = loaded["workers"]["planner"]
-        self.assertIsNone(worker_field(worker, "unknown_plugin_state"))
+        self.assertFalse(hasattr(worker, "unknown_plugin_state"))
         self.assertNotIn("unknown_plugin_state", worker.to_snapshot())
         self.assertEqual(stored["workers"]["planner"]["unknown_plugin_state"], {"attempt": 2})
         self.assertEqual(stored["workers"]["planner"]["lifecycle_state"], "active_wait")
@@ -200,7 +197,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
         self.assertEqual(run["status"], "active")
         self.assertIn("planner", run["workers"])
-        self.assertEqual(worker_field(run["workers"]["planner"], "role"), "plan")
+        self.assertEqual(run["workers"]["planner"].role, "plan")
 
     def test_concurrent_worker_upserts_preserve_both_workers(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
@@ -255,9 +252,9 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             ).run
             stored = json.loads((Path(store) / "demo.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(worker_output_field(run["workers"]["build"], "status"), "active")
-        self.assertFalse(worker_has_field(run["workers"]["build"], "result"))
-        self.assertEqual(worker_output_field(persisted["workers"]["build"], "status"), "done")
+        self.assertEqual(run["workers"]["build"].to_output_dict()["status"], "active")
+        self.assertNotIn("result", run["workers"]["build"].to_snapshot())
+        self.assertEqual(persisted["workers"]["build"].to_output_dict()["status"], "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
         self.assertEqual(stored["workers"]["build"]["lifecycle_state"], "done_collect")
         self.assertNotIn("status", stored["workers"]["build"])
@@ -309,8 +306,8 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
             persisted = RunStore(store).load_run("demo")
 
-        self.assertEqual(worker_field(persisted["workers"]["docs"], "prompt_ids"), ["prompt-docs"])
-        self.assertEqual(worker_output_field(persisted["workers"]["build"], "status"), "done")
+        self.assertEqual(persisted["workers"]["docs"].prompt_ids, ["prompt-docs"])
+        self.assertEqual(persisted["workers"]["build"].to_output_dict()["status"], "done")
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
 
     def test_worker_patch_preserves_concurrent_prompt_id_on_same_worker(self):
@@ -341,8 +338,8 @@ class RunStoreConcurrencyTest(unittest.TestCase):
 
             persisted = RunStore(store).load_run("demo")
 
-        self.assertEqual(worker_field(persisted["workers"]["build"], "prompt_ids"), ["prompt-steer", "prompt-build"])
-        self.assertEqual(worker_output_field(persisted["workers"]["build"], "status"), "done")
+        self.assertEqual(persisted["workers"]["build"].prompt_ids, ["prompt-steer", "prompt-build"])
+        self.assertEqual(persisted["workers"]["build"].to_output_dict()["status"], "done")
 
     def test_worker_patch_preserves_concurrent_worker_configuration_edits_on_same_worker(self):
         with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as directory:
@@ -384,18 +381,18 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         build = persisted["workers"]["build"]
-        self.assertEqual(worker_output_field(build, "status"), "done")
-        self.assertEqual(worker_field(build, "prompt"), "Build with new instructions")
-        self.assertEqual(worker_field(build, "dependencies"), ["docs"])
-        self.assertEqual(worker_field(build, "retry_limit"), 3)
-        self.assertEqual(worker_field(build, "retryable_failures"), ["api"])
-        self.assertEqual(worker_field(build, "timeout_seconds"), 45)
-        self.assertEqual(worker_field(build, "timeout_policy"), "blocked")
-        self.assertEqual(worker_field(build, "session_id"), "ses_user")
-        self.assertEqual(worker_field(build, "agent"), "plan")
-        self.assertEqual(worker_field(build, "model"), "openai/gpt-5.5")
-        self.assertEqual(worker_field(build, "prompt_ids"), ["prompt-build"])
-        self.assertEqual(worker_field(build, "output_refs"), ["assistant:msg_build"])
+        self.assertEqual(build.to_output_dict()["status"], "done")
+        self.assertEqual(build.prompt, "Build with new instructions")
+        self.assertEqual(build.dependencies, ["docs"])
+        self.assertEqual(build.retry_limit, 3)
+        self.assertEqual(build.retryable_failures, ["api"])
+        self.assertEqual(build.timeout_seconds, 45)
+        self.assertEqual(build.timeout_policy, "blocked")
+        self.assertEqual(build.session_id, "ses_user")
+        self.assertEqual(build.agent, "plan")
+        self.assertEqual(build.model, "openai/gpt-5.5")
+        self.assertEqual(build.prompt_ids, ["prompt-build"])
+        self.assertEqual(build.output_refs, ["assistant:msg_build"])
         self.assertEqual(persisted["output_refs"], ["build:msg_build"])
 
     def test_worker_patch_does_not_overwrite_concurrent_abort(self):
@@ -441,9 +438,9 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             persisted = RunStore(store).load_run("demo")
 
         build = persisted["workers"]["build"]
-        self.assertEqual(worker_output_field(build, "status"), "aborted")
-        self.assertEqual(worker_field(build, "abort"), {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}})
-        self.assertFalse(worker_has_field(build, "result"))
+        self.assertEqual(build.to_output_dict()["status"], "aborted")
+        self.assertEqual(build.abort, {"session_id": "ses_build", "accepted": True, "raw": {"ok": True}})
+        self.assertNotIn("result", build.to_snapshot())
         self.assertEqual(persisted["status"], "aborted")
         self.assertEqual(persisted["output_refs"], [])
 

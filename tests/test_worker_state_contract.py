@@ -1,5 +1,4 @@
 import unittest
-from typing import get_args
 
 from opencode_session.worker_storage_adapter import (
     hydrate_worker_record,
@@ -8,33 +7,8 @@ from opencode_session.worker_storage_adapter import (
 )
 from opencode_session.worker_snapshot_transition import worker_snapshot_transition_patch
 from opencode_session.run_record import upsert_worker_record
-from opencode_session.schema_worker import (
-    WORKER_REQUIRED_FIELD_NAMES as SCHEMA_WORKER_REQUIRED_FIELD_NAMES,
-    WorkerRequiredFields,
-)
-from opencode_session.worker_state import (
-    WORKER_FIELD_SPECS,
-    WORKER_FIELD_VALIDATOR_NAMES,
-    WORKER_LIST_FIELDS,
-    WORKER_OPTIONAL_LIST_FIELDS,
-    WORKER_RECORD_CANONICAL_FIELD_NAMES,
-    WORKER_RECORD_OPTIONAL_FIELD_NAMES,
-    WORKER_RECORD_UPDATE_FIELD_NAMES,
-    WORKER_REQUIRED_FIELD_NAMES,
-    WORKER_RUN_UPSERT_FIELD_NAMES,
-    WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES,
-    WORKER_SNAPSHOT_PROMPT_ID_FIELD_NAMES,
-    WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES,
-    WORKER_SNAPSHOT_REPLAY_FIELD_NAMES,
-    WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES,
-    WORKER_STORAGE_INT_FIELD_NAMES,
-    WORKER_STORAGE_LIST_FIELD_NAMES,
-    WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
-    WorkerFieldSpec,
-    WorkerFieldValidatorName,
-    WorkerRecord,
-    worker_default_snapshot_fields,
-)
+from opencode_session.schema_worker import WorkerRequiredFields
+from opencode_session.worker_state import WorkerRecord
 
 
 class WorkerStateContractTest(unittest.TestCase):
@@ -92,130 +66,87 @@ class WorkerStateContractTest(unittest.TestCase):
         self.assertNotIn("status", snapshot)
         self.assertNotIn("next_eligible_action", snapshot)
 
-    def test_worker_field_spec_owns_runtime_field_projections(self):
-        spec_names = tuple(spec.name for spec in WORKER_FIELD_SPECS)
-
-        self.assertEqual(WORKER_RECORD_CANONICAL_FIELD_NAMES, frozenset(spec_names))
-        self.assertEqual(
-            WORKER_REQUIRED_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.required),
-        )
-        self.assertEqual(
-            WORKER_RECORD_OPTIONAL_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if not spec.required),
-        )
-        self.assertEqual(
-            WORKER_LIST_FIELDS,
-            tuple(
-                spec.name
-                for spec in WORKER_FIELD_SPECS
-                if spec.required and spec.validator == "list"
-            ),
-        )
-        self.assertEqual(
-            WORKER_OPTIONAL_LIST_FIELDS,
-            tuple(
-                spec.name
-                for spec in WORKER_FIELD_SPECS
-                if not spec.required and spec.validator == "list"
-            ),
-        )
-        self.assertEqual(
-            WORKER_RECORD_UPDATE_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.record_update),
-        )
-        self.assertEqual(
-            WORKER_RUN_UPSERT_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.run_upsert),
-        )
-        self.assertEqual(
-            WORKER_STORAGE_INT_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "int"),
-        )
-        self.assertEqual(
-            WORKER_STORAGE_LIST_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "list"),
-        )
-        self.assertEqual(
-            WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.validator == "timeout_policy"),
-        )
-        self.assertEqual(
-            WORKER_SNAPSHOT_REPLAY_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_replay_field),
-        )
-        self.assertEqual(
-            WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_set_if_missing),
-        )
-        self.assertEqual(
-            WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.removable_transition_field),
-        )
-        self.assertEqual(
-            WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_accepted_abort_passthrough),
-        )
-        self.assertEqual(
-            WORKER_SNAPSHOT_PROMPT_ID_FIELD_NAMES,
-            tuple(spec.name for spec in WORKER_FIELD_SPECS if spec.snapshot_prompt_ids),
-        )
-        self.assertEqual(
-            SCHEMA_WORKER_REQUIRED_FIELD_NAMES,
-            tuple(WorkerRequiredFields.__annotations__),
-        )
-        self.assertEqual(SCHEMA_WORKER_REQUIRED_FIELD_NAMES, WORKER_REQUIRED_FIELD_NAMES)
-
-    def test_worker_field_type_boundary_uses_explicit_contracts(self):
-        self.assertEqual(set(get_args(WorkerFieldValidatorName)), set(WORKER_FIELD_VALIDATOR_NAMES))
-        self.assertEqual(WorkerFieldSpec.__annotations__["validator"], WorkerFieldValidatorName)
-        with self.assertRaisesRegex(ValueError, "unknown worker field validator"):
-            WorkerFieldSpec("bad", validator="missing")
-
-    def test_worker_defaults_storage_and_output_use_field_spec(self):
-        defaults = worker_default_snapshot_fields("review")
+    def test_worker_default_storage_and_output_follow_required_schema_contract(self):
+        expected_defaults = {
+            "id": "review",
+            "role": None,
+            "session_id": None,
+            "agent": None,
+            "model": None,
+            "dependencies": [],
+            "prompt_ids": [],
+            "retry_count": 0,
+            "retry_limit": 0,
+            "retryable_failures": [],
+            "timeout_seconds": None,
+            "timeout_policy": "timeout",
+            "timeout_started_at": None,
+            "timed_out_at": None,
+            "lifecycle_state": "queued",
+            "failure_category": None,
+            "failure_reason": None,
+            "last_failure_category": None,
+            "last_failure_reason": None,
+            "blockers": [],
+            "output_refs": [],
+        }
+        defaults = WorkerRecord.default_snapshot_fields("review")
         worker = WorkerRecord.default_fields("review")
         stored = normalize_worker_snapshot_for_storage({"id": "review"}, "review")
         output = worker.to_output_dict()
 
-        self.assertEqual(WorkerRecord.default_snapshot_fields("review"), defaults)
-        self.assertEqual(stored, defaults)
-        for field_name in WORKER_REQUIRED_FIELD_NAMES:
+        self.assertEqual(defaults, expected_defaults)
+        self.assertEqual(stored, expected_defaults)
+        self.assertEqual(set(defaults), set(WorkerRequiredFields.__annotations__))
+        for field_name, expected_value in expected_defaults.items():
             with self.subTest(field_name=field_name):
-                self.assertEqual(output[field_name], defaults[field_name])
+                self.assertEqual(output[field_name], expected_value)
         self.assertEqual(output["status"], "queued")
         self.assertEqual(output["next_eligible_action"], "start")
 
         defaults["dependencies"].append("mutated")
         self.assertEqual(WorkerRecord.default_snapshot_fields("review")["dependencies"], [])
 
-    def test_storage_migration_coercion_uses_field_spec_validators(self):
+    def test_storage_migration_coerces_persisted_runtime_fields(self):
         legacy_worker = {
             "id": "review",
             "lifecycle_state": "active_wait",
+            "dependencies": "not-a-list",
+            "prompt_ids": "not-a-list",
+            "retry_count": "2",
+            "retry_limit": "3",
+            "retryable_failures": "not-a-list",
+            "timeout_policy": "failed",
+            "blockers": "not-a-list",
+            "output_refs": "not-a-list",
+            "attempts": "not-a-list",
             "unknown_plugin_state": {"attempt": 2},
         }
-        for field_name in WORKER_STORAGE_INT_FIELD_NAMES:
-            legacy_worker[field_name] = "2"
-        for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
-            legacy_worker[field_name] = "not-a-list"
-        for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES:
-            legacy_worker[field_name] = "failed"
 
         migrated = migrate_persisted_worker_snapshot(legacy_worker, "review")
 
-        for field_name in WORKER_STORAGE_INT_FIELD_NAMES:
-            with self.subTest(field_name=field_name):
-                self.assertEqual(migrated[field_name], 2)
-        for field_name in WORKER_STORAGE_LIST_FIELD_NAMES:
+        self.assertEqual(migrated["retry_count"], 2)
+        self.assertEqual(migrated["retry_limit"], 3)
+        for field_name in (
+            "dependencies",
+            "prompt_ids",
+            "retryable_failures",
+            "blockers",
+            "output_refs",
+            "attempts",
+        ):
             with self.subTest(field_name=field_name):
                 self.assertEqual(migrated[field_name], [])
-        for field_name in WORKER_STORAGE_TIMEOUT_POLICY_FIELD_NAMES:
-            with self.subTest(field_name=field_name):
-                self.assertEqual(migrated[field_name], "failed")
+        self.assertEqual(migrated["timeout_policy"], "failed")
         self.assertEqual(migrated["unknown_plugin_state"], {"attempt": 2})
 
-    def test_snapshot_replay_patch_uses_field_spec_policy(self):
+        invalid_timeout_policy = migrate_persisted_worker_snapshot(
+            {"id": "review", "timeout_policy": "unknown-policy"},
+            "review",
+        )
+        self.assertEqual(invalid_timeout_policy["timeout_policy"], "timeout")
+
+    def test_snapshot_replay_patch_projects_storage_replay_behavior(self):
         worker = WorkerRecord.default_fields("review")
         worker.update_canonical_fields(
             session_id="ses_review",
@@ -240,37 +171,40 @@ class WorkerStateContractTest(unittest.TestCase):
         worker.remember_prompt_id("prompt-review")
 
         patch = worker_snapshot_transition_patch(worker)
-        snapshot = worker.to_snapshot()
-        expected_patch_fields = {
-            "id",
-            *(field_name for field_name in WORKER_SNAPSHOT_REPLAY_FIELD_NAMES if field_name in snapshot),
+        expected_replayed_fields = {
+            "id": "review",
+            "retry_count": 1,
+            "timeout_started_at": "2026-07-06T00:00:00Z",
+            "timed_out_at": "2026-07-06T00:01:00Z",
+            "lifecycle_state": "failed_terminal",
+            "failure_category": "provider",
+            "failure_reason": "provider failed",
+            "last_failure_category": "provider",
+            "last_failure_reason": "provider failed",
+            "blockers": ["provider"],
+            "output_refs": ["assistant:msg_review"],
+            "error": "provider failed",
+            "failure_retryable": False,
+            "manual_retry_required": True,
+            "cleanup": {"requested": True, "deleted": False},
+            "abort": {"accepted": False},
+            "attempts": [{"id": "attempt-1"}],
+            "result": {"status": "failed"},
         }
 
-        self.assertEqual(set(patch.fields), expected_patch_fields)
-        for field_name in WORKER_SNAPSHOT_REPLAY_FIELD_NAMES:
-            with self.subTest(field_name=field_name):
-                self.assertEqual(patch.fields[field_name], snapshot[field_name])
-        for field_name in WORKER_RECORD_CANONICAL_FIELD_NAMES - expected_patch_fields:
-            with self.subTest(non_replayed_field_name=field_name):
-                self.assertNotIn(field_name, patch.fields)
-        self.assertEqual(
-            patch.set_if_missing_fields,
-            {field_name: snapshot[field_name] for field_name in WORKER_SNAPSHOT_SET_IF_MISSING_FIELD_NAMES},
-        )
+        self.assertEqual(patch.fields, expected_replayed_fields)
+        self.assertEqual(patch.set_if_missing_fields, {"session_id": "ses_review"})
         self.assertEqual(patch.prompt_ids, ("prompt-review",))
         self.assertEqual(patch.accepted_abort_prompt_ids, ("prompt-review",))
-        self.assertEqual(
-            patch.accepted_abort_fields,
-            {field_name: snapshot[field_name] for field_name in WORKER_SNAPSHOT_ACCEPTED_ABORT_PASSTHROUGH_FIELD_NAMES},
-        )
+        self.assertEqual(patch.accepted_abort_fields, {"cleanup": {"requested": True, "deleted": False}})
 
-    def test_snapshot_replay_absent_removals_use_field_spec_policy(self):
+    def test_snapshot_replay_absent_removals_clear_stale_transient_failure_fields(self):
         patch = worker_snapshot_transition_patch({"id": "review"}, "review")
 
-        self.assertEqual(patch.remove_fields, WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELD_NAMES)
+        self.assertEqual(set(patch.remove_fields), {"error", "failure_retryable", "manual_retry_required"})
         self.assertEqual(patch.accepted_abort_fields, {})
 
-    def test_run_worker_upsert_uses_field_spec_upsert_projection(self):
+    def test_run_worker_upsert_persists_supported_worker_changes(self):
         upsert_values = {
             "role": "reviewer",
             "session_id": "ses_review",
@@ -290,7 +224,6 @@ class WorkerStateContractTest(unittest.TestCase):
         }
         run = {"workers": {}}
 
-        self.assertEqual(set(WORKER_RUN_UPSERT_FIELD_NAMES), set(upsert_values))
         upsert_worker_record(
             run,
             "review",
@@ -299,9 +232,9 @@ class WorkerStateContractTest(unittest.TestCase):
         )
 
         worker = run["workers"]["review"]
-        for field_name in WORKER_RUN_UPSERT_FIELD_NAMES:
+        for field_name, expected_value in upsert_values.items():
             with self.subTest(field_name=field_name):
-                self.assertEqual(getattr(worker, field_name), upsert_values[field_name])
+                self.assertEqual(getattr(worker, field_name), expected_value)
         self.assertEqual(run["updated_at"], "2026-07-06T00:00:00Z")
 
     def test_hydration_boundary_normalizes_legacy_public_state_for_output(self):

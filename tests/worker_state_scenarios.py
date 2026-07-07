@@ -4,9 +4,6 @@ from dataclasses import dataclass
 from opencode_session.worker_state import (
     apply_worker_transition_to_worker,
     normalize_worker,
-    worker_field,
-    worker_has_field,
-    worker_output_field,
 )
 
 
@@ -44,14 +41,17 @@ def assert_worker_outcome(
     blockers=None,
     output_refs=None,
 ):
-    test_case.assertEqual(worker_output_field(worker, "status"), status)
-    test_case.assertEqual(worker_output_field(worker, "next_eligible_action"), action)
+    output = worker.to_output_dict()
+    snapshot = worker.to_snapshot()
+
+    test_case.assertEqual(output["status"], status)
+    test_case.assertEqual(output["next_eligible_action"], action)
     if lifecycle is not None:
-        test_case.assertEqual(worker_field(worker, "lifecycle_state"), lifecycle)
+        test_case.assertEqual(snapshot["lifecycle_state"], lifecycle)
     if blockers is not None:
-        test_case.assertEqual(worker_field(worker, "blockers"), blockers)
+        test_case.assertEqual(snapshot["blockers"], blockers)
     if output_refs is not None:
-        test_case.assertEqual(worker_field(worker, "output_refs"), output_refs)
+        test_case.assertEqual(snapshot["output_refs"], output_refs)
 
 
 def assert_worker_transition_case(test_case, case, *, worker_id="review"):
@@ -62,8 +62,9 @@ def assert_worker_transition_case(test_case, case, *, worker_id="review"):
     apply_worker_transition_to_worker(worker, transition)
 
     assert_worker_outcome(test_case, worker, **case.expected_outcome)
+    snapshot = worker.to_snapshot()
     for field_name, expected_value in (case.expected_fields or {}).items():
-        test_case.assertEqual(worker_field(worker, field_name), expected_value)
+        test_case.assertEqual(snapshot.get(field_name), expected_value)
     for field_name in case.absent_fields:
-        test_case.assertFalse(worker_has_field(worker, field_name))
+        test_case.assertNotIn(field_name, snapshot)
     return worker
