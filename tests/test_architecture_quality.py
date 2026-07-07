@@ -10,10 +10,11 @@ MAX_SOURCE_LINES = 300
 LONG_SOURCE_FILE_DECOMPOSITION_PLAN = PROJECT_ROOT / "docs" / "ocs" / "architecture-quality.md"
 
 # Existing long source files are grandfathered at their current size so this
-# gate prevents further growth without forcing skipped decomposition work.
+# gate prevents further growth, and fails when a file shrinks without lowering
+# its ceiling, without forcing skipped decomposition work.
 GRANDFATHERED_LONG_SOURCE_FILES = {
     "opencode_session/api_profile.py": 337,
-    "opencode_session/multi_worker_orchestration.py": 569,
+    "opencode_session/multi_worker_orchestration.py": 500,
     "opencode_session/remote_journal.py": 732,
     "opencode_session/run_services.py": 418,
     "opencode_session/schema_event_adapter.py": 378,
@@ -21,12 +22,13 @@ GRANDFATHERED_LONG_SOURCE_FILES = {
     "opencode_session/validation_live.py": 303,
     "opencode_session/worker_field_spec.py": 386,
     "opencode_session/worker_session_provisioning.py": 438,
-    "opencode_session/worker_state.py": 2398,
+    "opencode_session/worker_state.py": 2395,
 }
 
 # Long-file exceptions are temporary. Each one must declare the intended
-# reduction target here and appear in the decomposition plan, but current debt is
-# only failed on growth so skipped worker_state decomposition stays non-blocking.
+# reduction target here and appear in the decomposition plan, but debt above the
+# target is not failed while it stays at the recorded current ceiling so skipped
+# worker_state decomposition stays non-blocking.
 LONG_SOURCE_FILE_RATCHET_TARGETS = {
     "opencode_session/api_profile.py": MAX_SOURCE_LINES,
     "opencode_session/multi_worker_orchestration.py": MAX_SOURCE_LINES,
@@ -191,6 +193,11 @@ class ArchitectureQualityGateTest(unittest.TestCase):
                 elif line_count <= MAX_SOURCE_LINES:
                     offenders.append(
                         f"{relative_path} is now {line_count} lines; remove its grandfathered exception"
+                    )
+                elif line_count < grandfathered_limit:
+                    offenders.append(
+                        f"{relative_path} shrank from {grandfathered_limit} to {line_count} lines; "
+                        "lower its grandfathered ceiling to keep the ratchet current"
                     )
             elif line_count > MAX_SOURCE_LINES:
                 offenders.append(f"{relative_path} has {line_count} lines; max is {MAX_SOURCE_LINES}")
