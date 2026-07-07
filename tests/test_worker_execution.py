@@ -27,6 +27,7 @@ from opencode_session.worker_session_provisioning import (
     WorkerSessionProvisioner,
     ensure_worker_session,
     provision_worker_session,
+    recoverable_worker_session_creations_by_worker,
 )
 from opencode_session.worker_state import (
     WorkerRecord,
@@ -145,6 +146,29 @@ class WorkerExecutionTest(unittest.TestCase):
                 "created_session_ids": ["ses_new"],
                 "created_at": "2026-07-05T00:00:00Z",
             },
+        )
+
+    def test_worker_session_created_record_applies_worker_update(self):
+        run = {"workers": {"worker": WorkerRecord.default_fields("worker")}}
+        created = WorkerSessionCreatedRecord(
+            id="worker-session-intent-1",
+            worker_id="worker",
+            session_id="ses_new",
+            cleanup_requested=True,
+            created_at="2026-07-05T00:00:00Z",
+            agent="build",
+            model="openai/gpt-5.5",
+        )
+
+        created.apply_to_run(run)
+
+        worker = run["workers"]["worker"]
+        self.assertEqual(worker_field(worker, "session_id"), "ses_new")
+        self.assertEqual(worker_field(worker, "agent"), "build")
+        self.assertEqual(worker_field(worker, "model"), "openai/gpt-5.5")
+        self.assertEqual(
+            worker_field(worker, "cleanup"),
+            {"requested": True, "deleted": False, "sessions": ["ses_new"]},
         )
 
     def test_ensure_worker_session_uses_worker_record_boundary(self):
@@ -567,6 +591,32 @@ class WorkerExecutionTest(unittest.TestCase):
                 "worker": ["ses_worker_cleanup", "ses_duplicate", "ses_created"],
                 "other": ["ses_other"],
             },
+        )
+
+    def test_worker_session_creation_recovery_reads_domain_records(self):
+        run = {
+            WORKER_SESSION_JOURNAL_FIELD: [
+                {
+                    "id": "worker-session-intent-1",
+                    "kind": "worker_session_create",
+                    "worker_id": "worker",
+                    "cleanup_requested": True,
+                    "created_session_ids": ["ses_created", "ses_duplicate"],
+                    "session_id": "ses_created",
+                },
+                {
+                    "id": "worker-session-intent-2",
+                    "kind": "worker_session_create",
+                    "worker_id": "skipped",
+                    "cleanup_requested": False,
+                    "session_id": "ses_skipped",
+                },
+            ]
+        }
+
+        self.assertEqual(
+            recoverable_worker_session_creations_by_worker(run),
+            {"worker": ["ses_created", "ses_duplicate"]},
         )
 
     def test_execute_worker_attempts_rejects_create_response_without_session_id_before_execution(self):

@@ -6,6 +6,7 @@ from opencode_session.remote_journal import (
     PersistedRemoteMutationJournal,
     RemoteMutationApplication,
     RemoteMutationOperation,
+    RemoteMutationRecovery,
 )
 from opencode_session.schema_run import RunRecord
 from opencode_session.schema_worker import HydratedWorker
@@ -23,7 +24,9 @@ WORKER_SESSION_CREATE_OPERATION = RemoteMutationOperation(
     kind=WORKER_SESSION_CREATE_KIND,
     discard_cleanup_operation="discard_worker_session_create",
     finalize_cleanup_operation="finalize_worker_session_create",
+    call_remote_operation="call_worker_session_create",
 )
+_WORKER_SESSION_RECOVERY = RemoteMutationRecovery(WORKER_SESSION_JOURNAL_FIELD)
 
 
 @dataclass
@@ -58,6 +61,17 @@ class WorkerSessionCreationIntent:
             entry["model"] = self.model
         return entry
 
+    def created_record(self, session_id, *, created_at, agent=None, model=None):
+        return WorkerSessionCreatedRecord(
+            id=self.id,
+            worker_id=self.worker_id,
+            session_id=session_id,
+            cleanup_requested=self.cleanup_requested,
+            created_at=created_at,
+            agent=agent,
+            model=model,
+        )
+
 
 @dataclass(frozen=True)
 class WorkerSessionCreatedRecord:
@@ -66,6 +80,8 @@ class WorkerSessionCreatedRecord:
     session_id: str
     cleanup_requested: bool
     created_at: str
+    agent: Optional[str] = None
+    model: Optional[str] = None
 
     def to_journal_update(self):
         return {
@@ -83,6 +99,96 @@ class WorkerSessionCreatedRecord:
             "cleanup_requested": self.cleanup_requested,
             **self.to_journal_update(),
         }
+
+    def apply_to_run(self, latest_run):
+        latest_worker = _ensure_latest_worker(latest_run, self.worker_id)
+        latest_record = worker_record_for_mutation(latest_worker, self.worker_id)
+        latest_record.set_session(self.session_id, agent=self.agent, model=self.model)
+        if self.cleanup_requested:
+            latest_record.remember_session_for_cleanup(self.session_id)
+
+
+@dataclass(frozen=True)
+class WorkerSessionCreationOutbox:
+    id: str
+    worker: HydratedWorker
+    now: object
+    agent: Optional[str] = None
+    model: Optional[str] = None
+    cleanup_requested: bool = False
+
+    @property
+    def operation(self):
+        return WORKER_SESSION_CREATE_OPERATION
+
+    def intent_from_run(self, latest_run):
+        latest_worker = _coerce_worker_record(latest_run, self.worker)
+        return WorkerSessionCreationIntent(
+            id=self.id,
+            worker_id=latest_worker.worker_id,
+            directory=latest_run.get("directory"),
+            agent=self.agent,
+            model=self.model,
+            cleanup_requested=bool(self.cleanup_requested),
+            intent_recorded_at=self.now(),
+        )
+
+    def apply_created_session(self, session_outcome, intent):
+        if session_outcome.created_session_id is None:
+            return RemoteMutationApplication(finalize=False)
+        return _created_session_application(
+            intent,
+            session_outcome.created_session_id,
+            created_at=self.now(),
+            agent=self.agent,
+            model=self.model,
+        )
+
+
+@dataclass(frozen=True)
+class WorkerSessionCreationRemoteCall:
+    client: object
+    session_id: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
+    create_session: bool = True
+
+    def __call__(self, latest_run, intent):
+        latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
+        return provision_worker_session(
+            self.client,
+            latest_run,
+            latest_worker,
+            session_id=self.session_id,
+            agent=self.agent,
+            model=self.model,
+            create_session=self.create_session,
+            session_metadata=worker_session_creation_metadata(latest_run, intent),
+        )
+
+
+@dataclass(frozen=True)
+class WorkerSessionCreationJournalEntry:
+    worker_id: str
+    cleanup_requested: bool
+    session_ids: tuple
+
+    @classmethod
+    def from_journal_entry(cls, entry):
+        if not isinstance(entry, dict) or entry.get("kind") != WORKER_SESSION_CREATE_KIND:
+            return None
+        worker_id = entry.get("worker_id")
+        if not isinstance(worker_id, str) or not worker_id:
+            return None
+        session_ids = []
+        for session_id in _string_list(entry.get("created_session_ids")):
+            _append_unique_session_id(session_ids, session_id)
+        _append_unique_session_id(session_ids, entry.get("session_id"))
+        return cls(
+            worker_id=worker_id,
+            cleanup_requested=entry.get("cleanup_requested") is True,
+            session_ids=tuple(session_ids),
+        )
 
 
 @dataclass
@@ -106,35 +212,21 @@ class WorkerSessionCreationJournal:
 
     def run_creation(self, run, worker, *, call_remote, agent=None, model=None, cleanup_requested=False):
         intent_id = self.id_factory()
-        transaction = self.transactions.transaction(intent_id, WORKER_SESSION_CREATE_OPERATION)
-
-        def creation_intent(latest_run):
-            latest_worker = _coerce_worker_record(latest_run, worker)
-            return WorkerSessionCreationIntent(
-                id=intent_id,
-                worker_id=latest_worker.worker_id,
-                directory=latest_run.get("directory"),
-                agent=agent,
-                model=model,
-                cleanup_requested=bool(cleanup_requested),
-                intent_recorded_at=self.now(),
-            )
-
-        def apply_created_session(session_outcome, intent):
-            if session_outcome.created_session_id is None:
-                return RemoteMutationApplication(finalize=False)
-            return self._created_session_application(
-                intent,
-                session_outcome.created_session_id,
-                agent=agent,
-                model=model,
-            )
+        outbox = WorkerSessionCreationOutbox(
+            id=intent_id,
+            worker=worker,
+            now=self.now,
+            agent=agent,
+            model=model,
+            cleanup_requested=cleanup_requested,
+        )
+        transaction = self.transactions.transaction(outbox.id, outbox.operation)
 
         execution = transaction.runner().execute(
             run,
-            intent_factory=creation_intent,
+            intent_factory=outbox.intent_from_run,
             call_remote=call_remote,
-            apply_result=apply_created_session,
+            apply_result=outbox.apply_created_session,
         )
         return execution.run, _latest_worker(execution.run, worker), execution.remote_result, execution.intent
 
@@ -157,7 +249,7 @@ class WorkerSessionCreationJournal:
         updated_run = self._transaction(intent).mark_applied(
             run,
             application.journal_update,
-            mutate_run=application.mutate_run,
+            mutate_run=application.run_mutation,
             append_if_missing=application.append_if_missing,
         )
         return updated_run, _latest_worker(updated_run, worker)
@@ -177,26 +269,12 @@ class WorkerSessionCreationJournal:
         )
 
     def _created_session_application(self, intent, session_id, *, agent=None, model=None):
-        created_record = WorkerSessionCreatedRecord(
-            id=intent.id,
-            worker_id=intent.worker_id,
-            session_id=session_id,
-            cleanup_requested=intent.cleanup_requested,
+        return _created_session_application(
+            intent,
+            session_id,
             created_at=self.now(),
-        )
-
-        def update_worker(latest_run):
-            latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
-            latest_record = worker_record_for_mutation(latest_worker, intent.worker_id)
-            latest_record.set_session(session_id, agent=agent, model=model)
-            if intent.cleanup_requested:
-                latest_record.remember_session_for_cleanup(session_id)
-
-        return RemoteMutationApplication(
-            journal_update=created_record,
-            mutate_run=update_worker,
-            append_if_missing=True,
-            finalize=False,
+            agent=agent,
+            model=model,
         )
 
 
@@ -221,23 +299,16 @@ class WorkerSessionProvisioner:
             session_id=session_id,
             create_session=create_session,
         ):
-            def create_worker_session(latest_run, intent):
-                latest_worker = _ensure_latest_worker(latest_run, intent.worker_id)
-                return provision_worker_session(
+            run, worker, session_outcome, session_intent = self.session_journal.run_creation(
+                run,
+                worker,
+                call_remote=WorkerSessionCreationRemoteCall(
                     client,
-                    latest_run,
-                    latest_worker,
                     session_id=session_id,
                     agent=agent,
                     model=model,
                     create_session=create_session,
-                    session_metadata=worker_session_creation_metadata(latest_run, intent),
-                )
-
-            run, worker, session_outcome, session_intent = self.session_journal.run_creation(
-                run,
-                worker,
-                call_remote=create_worker_session,
+                ),
                 agent=agent,
                 model=model,
                 cleanup_requested=cleanup_requested,
@@ -334,6 +405,33 @@ def worker_session_creation_metadata(run, intent):
     return metadata
 
 
+def recoverable_worker_session_creations_by_worker(run):
+    session_ids_by_worker = {}
+    for entry in _WORKER_SESSION_RECOVERY.pending_entries(run, kind=WORKER_SESSION_CREATE_KIND):
+        creation = WorkerSessionCreationJournalEntry.from_journal_entry(entry)
+        if creation is None or not creation.cleanup_requested:
+            continue
+        session_ids = session_ids_by_worker.setdefault(creation.worker_id, [])
+        for session_id in creation.session_ids:
+            _append_unique_session_id(session_ids, session_id)
+    return {worker_id: session_ids for worker_id, session_ids in session_ids_by_worker.items() if session_ids}
+
+
+def _created_session_application(intent, session_id, *, created_at, agent=None, model=None):
+    created_record = intent.created_record(
+        session_id,
+        created_at=created_at,
+        agent=agent,
+        model=model,
+    )
+    return RemoteMutationApplication(
+        journal_update=created_record,
+        run_update=created_record,
+        append_if_missing=True,
+        finalize=False,
+    )
+
+
 def _latest_worker(run, fallback_worker):
     worker_id = fallback_worker.worker_id if is_worker_record(fallback_worker) else None
     if isinstance(run, dict) and worker_id:
@@ -363,6 +461,17 @@ def _coerce_worker_record(run, worker):
     if isinstance(run, dict) and worker_id:
         return _ensure_latest_worker(run, worker_id)
     return worker_record_for_mutation(worker, worker_id).to_worker()
+
+
+def _string_list(value):
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _append_unique_session_id(session_ids, session_id):
+    if isinstance(session_id, str) and session_id and session_id not in session_ids:
+        session_ids.append(session_id)
 
 
 def _new_worker_session_journal_id():

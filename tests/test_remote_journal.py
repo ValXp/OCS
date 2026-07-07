@@ -47,6 +47,14 @@ class TestAppliedRecord:
         return {"id": self.id, "kind": self.kind, **self.to_journal_update()}
 
 
+@dataclass(frozen=True)
+class TestRunUpdate:
+    message_id: str
+
+    def apply_to_run(self, run):
+        run["applied_message_id"] = self.message_id
+
+
 class RemoteMutationJournalTest(unittest.TestCase):
     def test_records_marks_applied_finalizes_and_filters_pending_entries(self):
         run = {"journal": "corrupt"}
@@ -246,10 +254,7 @@ class RemoteMutationJournalTest(unittest.TestCase):
             return {"message_id": "msg_1"}
 
         def apply_result(remote_result, intent):
-            def remember_message(latest_run):
-                latest_run["applied_message_id"] = remote_result["message_id"]
-
-            return RemoteMutationApplication(mutate_run=remember_message)
+            return RemoteMutationApplication(run_update=TestRunUpdate(remote_result["message_id"]))
 
         execution = transaction.runner().execute(
             run,

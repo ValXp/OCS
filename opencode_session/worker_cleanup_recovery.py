@@ -3,15 +3,10 @@ from typing import Optional
 
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.disposable_session_lifecycle import cleanup_disposable_sessions
-from opencode_session.remote_journal import RemoteMutationRecovery
 from opencode_session.worker_session_provisioning import (
-    WORKER_SESSION_CREATE_KIND,
-    WORKER_SESSION_JOURNAL_FIELD,
+    recoverable_worker_session_creations_by_worker,
 )
 from opencode_session.worker_state import is_worker_record, worker_record_for_mutation
-
-
-_WORKER_SESSION_RECOVERY = RemoteMutationRecovery(WORKER_SESSION_JOURNAL_FIELD)
 
 
 @dataclass
@@ -64,14 +59,7 @@ def recoverable_created_worker_sessions_by_worker(run):
                 continue
             for session_id in _string_list(cleanup.get("sessions")):
                 _append_unique_session_id(session_ids_by_worker.setdefault(worker_id, []), session_id)
-    recovered_session_ids_by_worker = _WORKER_SESSION_RECOVERY.values_by_owner(
-        run,
-        kind=WORKER_SESSION_CREATE_KIND,
-        owner_field="worker_id",
-        list_fields=("created_session_ids",),
-        value_fields=("session_id",),
-        required_fields={"cleanup_requested": True},
-    )
+    recovered_session_ids_by_worker = recoverable_worker_session_creations_by_worker(run)
     for worker_id, session_ids in recovered_session_ids_by_worker.items():
         for session_id in session_ids:
             _append_unique_session_id(session_ids_by_worker.setdefault(worker_id, []), session_id)

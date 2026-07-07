@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 from opencode_session.run_store import RunStoreError
 
@@ -11,14 +12,28 @@ class RemoteMutationOperation:
     kind: str
     discard_cleanup_operation: str
     finalize_cleanup_operation: str
+    call_remote_operation: Optional[str] = None
+
+    @property
+    def call_operation(self):
+        return self.call_remote_operation or f"call_{self.kind}"
 
 
 @dataclass(frozen=True)
 class RemoteMutationApplication:
+    run_update: object = None
     mutate_run: object = None
     journal_update: object = None
     append_if_missing: bool = False
     finalize: bool = True
+
+    def __post_init__(self):
+        if self.run_update is not None and self.mutate_run is not None:
+            raise ValueError("remote mutation application accepts either run_update or mutate_run")
+
+    @property
+    def run_mutation(self):
+        return self.run_update if self.run_update is not None else self.mutate_run
 
 
 @dataclass(frozen=True)
@@ -90,7 +105,7 @@ class RemoteMutationTransaction:
             run,
             self.entry_id,
             error,
-            operation=f"call_{self.operation.kind}",
+            operation=self.operation.call_operation,
         )
 
     def _validated_record(self, record):
@@ -130,19 +145,20 @@ class RemoteMutationRunner:
         return RemoteMutationExecution(run=run, remote_result=remote_result, intent=intent)
 
     def _apply(self, run, application):
+        run_mutation = application.run_mutation
         if application.journal_update is not None:
             run = self.transaction.mark_applied(
                 run,
                 application.journal_update,
-                mutate_run=application.mutate_run,
+                mutate_run=run_mutation,
                 append_if_missing=application.append_if_missing,
             )
             if application.finalize:
                 return self.transaction.finalize(run)
             return run
         if application.finalize:
-            return self.transaction.finalize(run, mutate_run=application.mutate_run)
-        if application.mutate_run is not None:
+            return self.transaction.finalize(run, mutate_run=run_mutation)
+        if run_mutation is not None:
             raise ValueError("remote mutation application without a journal update must finalize")
         return run
 
@@ -288,7 +304,7 @@ class PersistedRemoteMutationJournal:
     def mark_applied(self, run, entry_id, record, *, mutate_run=None, append_if_missing=False):
         def persisted_mutation(latest_run):
             if mutate_run is not None:
-                mutate_run(latest_run)
+                _apply_run_update(mutate_run, latest_run)
             self.journal.mark_applied(latest_run, entry_id, record, append_if_missing=append_if_missing)
 
         return self.persist_run_mutation(run, persisted_mutation)
@@ -296,7 +312,7 @@ class PersistedRemoteMutationJournal:
     def finalize(self, run, entry_id, *, mutate_run=None):
         def persisted_mutation(latest_run):
             if mutate_run is not None:
-                mutate_run(latest_run)
+                _apply_run_update(mutate_run, latest_run)
             self.journal.finalize(latest_run, entry_id)
 
         return self.persist_run_mutation(run, persisted_mutation)
@@ -364,6 +380,16 @@ def _string_list(value):
 def _append_unique(values, value):
     if isinstance(value, str) and value and value not in values:
         values.append(value)
+
+
+def _apply_run_update(run_update, run):
+    if hasattr(run_update, "apply_to_run"):
+        run_update.apply_to_run(run)
+        return
+    if callable(run_update):
+        run_update(run)
+        return
+    raise TypeError("remote mutation run updates must be callable or provide apply_to_run")
 
 
 def _journal_entry(record):

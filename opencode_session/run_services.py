@@ -43,11 +43,13 @@ STEER_PROMPT_REMOTE_MUTATION = RemoteMutationOperation(
     kind="steer_prompt",
     discard_cleanup_operation="discard_remote_mutation",
     finalize_cleanup_operation="finalize_remote_mutation",
+    call_remote_operation="call_steer_prompt",
 )
 ABORT_WORKER_REMOTE_MUTATION = RemoteMutationOperation(
     kind="abort_worker",
     discard_cleanup_operation="discard_remote_mutation",
     finalize_cleanup_operation="finalize_remote_mutation",
+    call_remote_operation="call_abort_worker",
 )
 
 
@@ -73,6 +75,64 @@ class SteerPromptIntentRecord:
 
 
 @dataclass(frozen=True)
+class SteerPromptAdmittedRecord:
+    id: str
+    worker_id: str
+    message_id: str
+
+    def apply_to_run(self, latest_run):
+        latest_worker = _run_worker_with_session(latest_run, self.worker_id)
+        latest_record = worker_record_for_mutation(latest_worker, self.worker_id)
+        latest_record.remember_prompt_id(self.message_id)
+
+
+@dataclass(frozen=True)
+class SteerPromptOutbox:
+    id: str
+    worker_id: str
+    text: str
+    delivery: str
+    message_id: str
+    client: object
+    capabilities: object
+
+    @property
+    def operation(self):
+        return STEER_PROMPT_REMOTE_MUTATION
+
+    def intent_from_run(self, latest_run):
+        latest_worker = _run_worker_with_session(latest_run, self.worker_id)
+        return SteerPromptIntentRecord(
+            id=self.id,
+            worker_id=self.worker_id,
+            session_id=latest_worker.session_id,
+            message_id=self.message_id,
+            delivery=self.delivery,
+            text=self.text,
+        )
+
+    def call_remote(self, latest_run, intent):
+        return admit_prompt(
+            self.client,
+            self.capabilities,
+            intent.session_id,
+            intent.text,
+            intent.delivery,
+            message_id=intent.message_id,
+        )
+
+    def apply_result(self, result, intent):
+        admission = result.record
+        return RemoteMutationApplication(
+            run_update=SteerPromptAdmittedRecord(
+                id=intent.id,
+                worker_id=intent.worker_id,
+                message_id=admission["message_id"],
+            )
+        )
+
+
+@dataclass(frozen=True)
 class AbortWorkerIntentRecord:
     id: str
     worker_id: str
@@ -85,6 +145,58 @@ class AbortWorkerIntentRecord:
             "worker_id": self.worker_id,
             "session_id": self.session_id,
         }
+
+
+@dataclass(frozen=True)
+class AbortWorkerAppliedRecord:
+    id: str
+    worker_id: str
+    session_id: str
+    response_data: object
+
+    def apply_to_run(self, latest_run):
+        latest_worker = _run_worker_with_session(latest_run, self.worker_id)
+        latest_record = worker_record_for_mutation(latest_worker, self.worker_id)
+        abort = abort_record(self.session_id, self.response_data)
+        latest_record.apply_transition(mark_worker_aborted(latest_record, abort))
+        refresh_orchestration_run_summary(latest_run)
+
+
+@dataclass(frozen=True)
+class AbortWorkerOutbox:
+    id: str
+    worker_id: str
+    client: object
+
+    @property
+    def operation(self):
+        return ABORT_WORKER_REMOTE_MUTATION
+
+    def intent_from_run(self, latest_run):
+        latest_worker = _run_worker_with_session(latest_run, self.worker_id)
+        return AbortWorkerIntentRecord(
+            id=self.id,
+            worker_id=self.worker_id,
+            session_id=latest_worker.session_id,
+        )
+
+    def call_remote(self, latest_run, intent):
+        try:
+            return self.client.abort_session_response(intent.session_id)
+        except OpenCodeApiError as error:
+            if is_session_not_found_error(error):
+                raise RunWorkerSessionNotFound(intent.session_id) from error
+            raise
+
+    def apply_result(self, response, intent):
+        return RemoteMutationApplication(
+            run_update=AbortWorkerAppliedRecord(
+                id=intent.id,
+                worker_id=intent.worker_id,
+                session_id=intent.session_id,
+                response_data=response.data,
+            )
+        )
 
 
 @dataclass
@@ -233,45 +345,22 @@ class RunCommandService:
         configure_client_route_plan(client, capabilities)
         prompt_message_id = message_id or _new_prompt_message_id()
         mutation_id = _new_remote_mutation_id()
-        transaction = self._remote_transaction(mutation_id, STEER_PROMPT_REMOTE_MUTATION)
-
-        def prompt_intent(latest_run):
-            latest_worker = _run_worker_with_session(latest_run, worker_id)
-            return SteerPromptIntentRecord(
-                id=mutation_id,
-                worker_id=worker_id,
-                session_id=latest_worker.session_id,
-                message_id=prompt_message_id,
-                delivery=delivery,
-                text=text,
-            )
-
-        def admit_remote_prompt(latest_run, intent):
-            return admit_prompt(
-                client,
-                capabilities,
-                intent.session_id,
-                text,
-                delivery,
-                message_id=prompt_message_id,
-            )
-
-        def apply_prompt_admission(result, intent):
-            admission = result.record
-            admitted_message_id = admission["message_id"]
-
-            def record_prompt_admission(latest_run):
-                latest_worker = _run_worker_with_session(latest_run, worker_id)
-                latest_record = worker_record_for_mutation(latest_worker, worker_id)
-                latest_record.remember_prompt_id(admitted_message_id)
-
-            return RemoteMutationApplication(mutate_run=record_prompt_admission)
+        outbox = SteerPromptOutbox(
+            id=mutation_id,
+            worker_id=worker_id,
+            text=text,
+            delivery=delivery,
+            message_id=prompt_message_id,
+            client=client,
+            capabilities=capabilities,
+        )
+        transaction = self._remote_transaction(outbox.id, outbox.operation)
 
         execution = transaction.runner().execute(
             run,
-            intent_factory=prompt_intent,
-            call_remote=admit_remote_prompt,
-            apply_result=apply_prompt_admission,
+            intent_factory=outbox.intent_from_run,
+            call_remote=outbox.call_remote,
+            apply_result=outbox.apply_result,
         )
         run = execution.run
         admission = execution.remote_result.record
@@ -282,40 +371,18 @@ class RunCommandService:
         _run_worker_with_session(run, worker_id)
         client = self.client_factory(run["server_url"])
         mutation_id = _new_remote_mutation_id()
-        transaction = self._remote_transaction(mutation_id, ABORT_WORKER_REMOTE_MUTATION)
-
-        def abort_intent(latest_run):
-            latest_worker = _run_worker_with_session(latest_run, worker_id)
-            return AbortWorkerIntentRecord(
-                id=mutation_id,
-                worker_id=worker_id,
-                session_id=latest_worker.session_id,
-            )
-
-        def abort_remote_session(latest_run, intent):
-            try:
-                return client.abort_session_response(intent.session_id)
-            except OpenCodeApiError as error:
-                if is_session_not_found_error(error):
-                    raise RunWorkerSessionNotFound(intent.session_id) from error
-                raise
-
-        def apply_abort_response(response, intent):
-            abort = abort_record(intent.session_id, response.data)
-
-            def mark_aborted(latest_run):
-                latest_worker = _run_worker_with_session(latest_run, worker_id)
-                latest_record = worker_record_for_mutation(latest_worker, worker_id)
-                latest_record.apply_transition(mark_worker_aborted(latest_record, abort))
-                refresh_orchestration_run_summary(latest_run)
-
-            return RemoteMutationApplication(mutate_run=mark_aborted)
+        outbox = AbortWorkerOutbox(
+            id=mutation_id,
+            worker_id=worker_id,
+            client=client,
+        )
+        transaction = self._remote_transaction(outbox.id, outbox.operation)
 
         execution = transaction.runner().execute(
             run,
-            intent_factory=abort_intent,
-            call_remote=abort_remote_session,
-            apply_result=apply_abort_response,
+            intent_factory=outbox.intent_from_run,
+            call_remote=outbox.call_remote,
+            apply_result=outbox.apply_result,
         )
         run = execution.run
         response = execution.remote_result
