@@ -14,46 +14,16 @@ from opencode_session.worker_state import (
     WORKER_STATUS_FAILED,
     WORKER_STATUS_TIMEOUT,
     WORKER_TIMEOUT_POLICY_STATUSES,
-    WorkerSnapshotTransitionPatch,
     WorkerRecord,
-    WorkerTransition,
     is_blocked_status,
     worker_failed_lifecycle_state,
     worker_lifecycle_state_for_public_state,
     worker_lifecycle_state_for_status_alias,
-    worker_retry_available,
     worker_timeout_lifecycle_state,
 )
 
 
-STORAGE_WORKER_SNAPSHOT_STATE_FIELDS = (
-    "lifecycle_state",
-    "retry_count",
-    "timeout_started_at",
-    "timed_out_at",
-    "failure_category",
-    "failure_reason",
-    "last_failure_category",
-    "last_failure_reason",
-    "blockers",
-    "output_refs",
-    "error",
-    "failure_retryable",
-    "manual_retry_required",
-    "result",
-    "attempts",
-    "cleanup",
-    "abort",
-)
-STORAGE_WORKER_SNAPSHOT_SET_IF_MISSING_FIELDS = ("session_id",)
-STORAGE_WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELDS = (
-    "error",
-    "failure_retryable",
-    "manual_retry_required",
-)
-STORAGE_WORKER_ACCEPTED_ABORT_PASSTHROUGH_FIELDS = ("cleanup",)
 PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION = 1
-_LEGACY_LIFECYCLE_PROJECTION_WORKER_ID = "__legacy_worker__"
 
 
 @dataclass(frozen=True)
@@ -98,54 +68,47 @@ def _raw_worker_field(worker, field_name, default=None):
     return default
 
 
-def _legacy_worker_record_for_lifecycle_projection(worker):
-    fields = _worker_fields(worker)
-    for public_field_name in PUBLIC_WORKER_STATE_FIELD_NAMES:
-        fields.pop(public_field_name, None)
-    worker_id = fields.get("id") or _LEGACY_LIFECYCLE_PROJECTION_WORKER_ID
-    fields["id"] = str(worker_id)
-    if fields.get("lifecycle_state") not in WORKER_LIFECYCLE_STATES:
-        fields["lifecycle_state"] = WORKER_LIFECYCLE_QUEUED
-    _coerce_legacy_retry_budget_for_lifecycle_projection(fields)
-    for field_name in (*WORKER_LIST_FIELDS, *WORKER_OPTIONAL_LIST_FIELDS):
-        if field_name in fields and not isinstance(fields[field_name], list):
-            fields[field_name] = []
-    if "timeout_policy" in fields:
-        timeout_policy = short_status(fields["timeout_policy"])
-        fields["timeout_policy"] = (
-            timeout_policy if timeout_policy in WORKER_TIMEOUT_POLICY_STATUSES else WORKER_STATUS_TIMEOUT
-        )
-    return WorkerRecord.from_worker(_PersistedWorkerSnapshot(fields).runtime_fields, fields["id"])
-
-
-def _coerce_legacy_retry_budget_for_lifecycle_projection(fields):
-    try:
-        fields["retry_count"] = int(fields.get("retry_count") or 0)
-        fields["retry_limit"] = int(fields.get("retry_limit") or 0)
-    except (TypeError, ValueError):
-        fields["retry_count"] = 0
-        fields["retry_limit"] = 0
-
-
 def _lifecycle_state_from_legacy_public_worker_state(worker):
     worker = worker if isinstance(worker, Mapping) else {}
     status = short_status(_raw_worker_field(worker, "status"))
-    projected_worker = _legacy_worker_record_for_lifecycle_projection(worker)
     if _legacy_worker_timeout_origin(worker, status):
         return worker_timeout_lifecycle_state(
             status,
-            worker_retry_available(projected_worker, WORKER_STATUS_TIMEOUT),
+            _legacy_worker_retry_available(worker, WORKER_STATUS_TIMEOUT),
         )
     if status == WORKER_STATUS_FAILED:
         return worker_failed_lifecycle_state(
             retryable=True,
-            retry_available=worker_retry_available(projected_worker),
+            retry_available=_legacy_worker_retry_available(worker),
         )
     return (
         worker_lifecycle_state_for_public_state(status, _raw_worker_field(worker, "next_eligible_action"))
         or worker_lifecycle_state_for_status_alias(status)
         or WORKER_LIFECYCLE_QUEUED
     )
+
+
+def _legacy_worker_retry_available(fields, category=None):
+    if fields.get("failure_retryable") is False:
+        return False
+    retryable_failures = _legacy_worker_list_field(fields, "retryable_failures")
+    if not retryable_failures:
+        return False
+    if category is None:
+        category = fields.get("failure_category") or fields.get("last_failure_category")
+    if category and category not in retryable_failures and "all" not in retryable_failures:
+        return False
+    try:
+        retry_count = int(fields.get("retry_count") or 0)
+        retry_limit = int(fields.get("retry_limit") or 0)
+    except (TypeError, ValueError):
+        return False
+    return retry_count < retry_limit
+
+
+def _legacy_worker_list_field(fields, field_name):
+    value = fields.get(field_name)
+    return value if isinstance(value, list) else []
 
 
 def _legacy_worker_timeout_origin(worker, status):
@@ -248,6 +211,18 @@ def hydrate_worker_record(worker, worker_id, *, run_schema_version=PERSISTED_WOR
     ).to_worker()
 
 
+def canonical_worker_snapshot_fields(
+    worker,
+    worker_id,
+    *,
+    run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION,
+):
+    if isinstance(worker, WorkerRecord):
+        return _worker_record_snapshot_fields(worker, worker_id)
+    snapshot = _migrated_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version)
+    return _canonical_worker_snapshot_fields(snapshot, worker_id)
+
+
 def normalize_worker_snapshot_for_storage(
     worker,
     worker_id,
@@ -255,11 +230,12 @@ def normalize_worker_snapshot_for_storage(
     run_schema_version=PERSISTED_WORKER_SNAPSHOT_SCHEMA_VERSION,
     persisted_worker=None,
 ):
-    snapshot = _migrated_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version)
-    runtime_snapshot = WorkerRecord.from_worker(
-        snapshot.runtime_fields,
-        worker_id,
-    ).to_snapshot()
+    if isinstance(worker, WorkerRecord):
+        snapshot = None
+        runtime_snapshot = _worker_record_snapshot_fields(worker, worker_id)
+    else:
+        snapshot = _migrated_persisted_worker_snapshot(worker, worker_id, run_schema_version=run_schema_version)
+        runtime_snapshot = _canonical_worker_snapshot_fields(snapshot, worker_id)
     if persisted_worker is not None and not isinstance(persisted_worker, WorkerRecord):
         persisted_snapshot = _migrated_persisted_worker_snapshot(
             persisted_worker,
@@ -269,9 +245,52 @@ def normalize_worker_snapshot_for_storage(
         storage_snapshot = deepcopy(runtime_snapshot)
         storage_snapshot.update(persisted_snapshot.unknown_fields)
         return storage_snapshot
-    if isinstance(worker, WorkerRecord):
+    if snapshot is None:
         return runtime_snapshot
     return snapshot.to_storage_fields(runtime_snapshot)
+
+
+def _worker_record_snapshot_fields(worker, worker_id):
+    snapshot = worker.to_snapshot()
+    if worker_id:
+        snapshot["id"] = str(worker_id)
+    return snapshot
+
+
+def _canonical_worker_snapshot_fields(snapshot, worker_id):
+    runtime_fields = snapshot.runtime_fields
+    resolved_worker_id = runtime_fields.get("id") or worker_id
+    if not resolved_worker_id:
+        raise ValueError("worker snapshot requires id")
+    normalized = _default_worker_snapshot_fields(str(resolved_worker_id))
+    normalized.update(runtime_fields)
+    return normalized
+
+
+def _default_worker_snapshot_fields(worker_id):
+    return {
+        "id": worker_id,
+        "role": None,
+        "session_id": None,
+        "agent": None,
+        "model": None,
+        "dependencies": [],
+        "prompt_ids": [],
+        "retry_count": 0,
+        "retry_limit": 0,
+        "retryable_failures": [],
+        "timeout_seconds": None,
+        "timeout_policy": WORKER_STATUS_TIMEOUT,
+        "timeout_started_at": None,
+        "timed_out_at": None,
+        "lifecycle_state": WORKER_LIFECYCLE_QUEUED,
+        "failure_category": None,
+        "failure_reason": None,
+        "last_failure_category": None,
+        "last_failure_reason": None,
+        "blockers": [],
+        "output_refs": [],
+    }
 
 
 def _coerced_schema_version(value):
@@ -286,60 +305,3 @@ def _coerced_storage_int(value):
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def worker_snapshot_transition_patch(worker, worker_id=None):
-    worker_id = _snapshot_worker_id(worker, worker_id)
-    snapshot = normalize_worker_snapshot_for_storage(worker, worker_id)
-    fields = {"id": worker_id}
-    for field_name in STORAGE_WORKER_SNAPSHOT_STATE_FIELDS:
-        if field_name in snapshot:
-            fields[field_name] = deepcopy(snapshot[field_name])
-    return WorkerSnapshotTransitionPatch(
-        worker_id,
-        fields,
-        target_lifecycle_state=fields.get("lifecycle_state"),
-        prompt_ids=_optional_tuple(snapshot.get("prompt_ids")),
-        set_if_missing_fields={
-            field_name: deepcopy(snapshot[field_name])
-            for field_name in STORAGE_WORKER_SNAPSHOT_SET_IF_MISSING_FIELDS
-            if snapshot.get(field_name)
-        },
-        remove_fields=tuple(
-            field_name
-            for field_name in STORAGE_WORKER_SNAPSHOT_REMOVE_WHEN_ABSENT_FIELDS
-            if field_name not in snapshot
-        ),
-        stale_recovery_allowed=True,
-        accepted_abort_fields={
-            field_name: deepcopy(snapshot[field_name])
-            for field_name in STORAGE_WORKER_ACCEPTED_ABORT_PASSTHROUGH_FIELDS
-            if field_name in snapshot
-        },
-        accepted_abort_prompt_ids=_optional_tuple(snapshot.get("prompt_ids")),
-    )
-
-
-def worker_snapshot_transition(worker, worker_id=None):
-    return WorkerTransition.snapshot_applied(worker_snapshot_transition_patch(worker, worker_id))
-
-
-def _snapshot_worker_id(worker, worker_id=None):
-    if worker_id:
-        return worker_id
-    if isinstance(worker, WorkerRecord):
-        if worker.worker_id:
-            return worker.worker_id
-        raise ValueError("snapshot worker requires id")
-    if isinstance(worker, Mapping):
-        worker_id = worker.get("id")
-        if worker_id:
-            return worker_id
-        raise ValueError("snapshot worker requires id")
-    raise TypeError("snapshot worker must be WorkerRecord or persisted worker mapping")
-
-
-def _optional_tuple(value):
-    if isinstance(value, list):
-        return tuple(value)
-    return None

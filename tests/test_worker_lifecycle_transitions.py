@@ -1,7 +1,7 @@
 from copy import deepcopy
 import unittest
 
-from opencode_session.worker_storage_adapter import worker_snapshot_transition
+from opencode_session.worker_snapshot_transition import worker_snapshot_transition
 from opencode_session.worker_state import WorkerRecord, WorkerTransition, WorkerTransitionError, reduce_worker_transition
 
 

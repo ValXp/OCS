@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from collections.abc import Mapping
 
-from opencode_session.worker_storage_adapter import worker_snapshot_transition
+from opencode_session.worker_snapshot_transition import worker_snapshot_transition
 from opencode_session.worker_state import (
     WorkerRecord,
     apply_worker_transition,
