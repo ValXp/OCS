@@ -1,7 +1,11 @@
+from contextlib import redirect_stdout
+import io
 import json
+from types import SimpleNamespace
 import unittest
 from typing import Dict, get_type_hints
 
+from opencode_session.commands.rendering import render_command_result
 from opencode_session.run_record import normalize_run, normalize_run_for_storage, run_record_for_output
 from opencode_session.schema_run import HydratedRunRecord, PersistedRunRecord, RunRecord
 from opencode_session.schema_worker import HydratedWorker, WorkerSnapshotRecord
@@ -143,6 +147,35 @@ class RunRecordHydrationBoundaryTest(unittest.TestCase):
         self.assertEqual(output_worker["lifecycle_state"], "active_wait")
         self.assertEqual(output_worker["status"], "active")
         self.assertEqual(output_worker["next_eligible_action"], "wait")
+
+    def test_worker_record_snapshot_and_output_projection_are_distinct(self):
+        worker = WorkerRecord.default_fields("review")
+        worker.update_canonical_fields(prompt="Review the change", lifecycle_state="active_wait")
+
+        snapshot = worker.to_snapshot()
+        output = worker.to_output_dict()
+
+        self.assertFalse(hasattr(worker, "to_public_dict"))
+        self.assertEqual(snapshot["lifecycle_state"], "active_wait")
+        self.assertNotIn("status", snapshot)
+        self.assertNotIn("next_eligible_action", snapshot)
+        self.assertEqual(output["lifecycle_state"], "active_wait")
+        self.assertEqual(output["status"], "active")
+        self.assertEqual(output["next_eligible_action"], "wait")
+
+    def test_command_json_rendering_uses_worker_output_projection(self):
+        worker = WorkerRecord.default_fields("review")
+        worker.update_canonical_fields(lifecycle_state="active_wait")
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            exit_code = render_command_result(SimpleNamespace(json=True, raw=False), worker)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["lifecycle_state"], "active_wait")
+        self.assertEqual(payload["status"], "active")
+        self.assertEqual(payload["next_eligible_action"], "wait")
 
 
 if __name__ == "__main__":

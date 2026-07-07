@@ -149,7 +149,7 @@ class WorkerDependencyAnalysisRegressionTest(unittest.TestCase):
         self.assertEqual([transition.worker_id for transition in step.dependency_blocked_transitions], ["review"])
         self.assertEqual(worker_output_field(workers["review"], "status"), "queued")
 
-        latest_workers = {"review": normalize_worker(workers["review"].to_public_dict(), "review")}
+        latest_workers = {"review": normalize_worker(workers["review"].to_snapshot(), "review")}
         apply_worker_transition(latest_workers, step.dependency_blocked_transitions[0])
 
         self.assertEqual(worker_output_field(latest_workers["review"], "status"), "blocked")

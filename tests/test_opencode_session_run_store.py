@@ -203,7 +203,7 @@ class RunStoreConcurrencyTest(unittest.TestCase):
             run_store.create_run("demo", directory=directory, server_url="http://opencode.example")
             run_store.upsert_worker("demo", "build", role="build", prompt="Build", lifecycle_state="active_wait")
             run = run_store.load_run("demo")
-            build_worker = normalize_worker(run["workers"]["build"].to_public_dict(), "build")
+            build_worker = normalize_worker(run["workers"]["build"].to_snapshot(), "build")
             result = {
                 "session_id": "ses_build",
                 "status": "done",

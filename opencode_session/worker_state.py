@@ -773,9 +773,7 @@ def public_worker_state_fields(lifecycle_state):
 
 def worker_output_dict(worker, worker_id=None):
     record = WorkerRecord.from_worker(worker, worker_id).to_worker()
-    fields = record.to_snapshot()
-    fields.update(public_worker_state_fields(fields["lifecycle_state"]))
-    return fields
+    return record.to_output_dict()
 
 
 def worker_output_field(worker, field_name, default=None):
@@ -1854,9 +1852,6 @@ class WorkerRecord:
             self.has_prompt,
         )
 
-    def to_public_dict(self):
-        return self.to_snapshot()
-
     def to_snapshot(self):
         normalized = self.default_snapshot_fields(self.worker_id)
         for field_name in WORKER_REQUIRED_FIELD_NAMES:
@@ -1871,6 +1866,11 @@ class WorkerRecord:
                 raise ValueError(f"worker extra field conflicts with canonical field: {field_name}")
         normalized.update(deepcopy(self._extras))
         return normalized
+
+    def to_output_dict(self):
+        fields = self.to_snapshot()
+        fields.update(public_worker_state_fields(fields["lifecycle_state"]))
+        return fields
 
     def to_worker(self):
         normalized = self.to_snapshot()
