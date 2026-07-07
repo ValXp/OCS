@@ -44,6 +44,17 @@ class CleanupWorkersOutcome:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class CreatedWorkerCleanupStep:
+    worker_id: str
+    session_ids: tuple
+
+
+@dataclass(frozen=True)
+class CreatedWorkerCleanupPlan:
+    steps: tuple = ()
+
+
 class RunStartClientProtocol(Protocol):
     def configure_route_plan(self, route_plan): ...
 
@@ -64,22 +75,82 @@ class RunStartClientProtocol(Protocol):
     def get_session(self, session_id): ...
 
 
+class RunStartCapabilityProbe:
+    def __init__(
+        self,
+        *,
+        client_factory=OpenCodeApiClient,
+        capability_detector=detect_capabilities,
+    ):
+        self.client_factory = client_factory
+        self.capability_detector = capability_detector
+
+    def probe(self, run):
+        client = self.client_factory(run["server_url"])
+        capabilities = self.capability_detector(client)
+        configure_client_route_plan(client, capabilities)
+        return CapabilityProbeOutcome(client, capabilities, blocking_execution_start_error(capabilities))
+
+
+class CreatedWorkerCleanupPlanner:
+    def plan(self, created_session_ids_by_worker, run):
+        session_ids_by_worker = recoverable_cleanup_sessions(created_session_ids_by_worker, run)
+        return CreatedWorkerCleanupPlan(
+            tuple(
+                CreatedWorkerCleanupStep(worker_id, tuple(session_ids))
+                for worker_id, session_ids in session_ids_by_worker.items()
+            )
+        )
+
+
+class CreatedWorkerCleanupExecutor:
+    def __init__(self, *, persist_worker_transition, refresh_run_summary):
+        self.persist_worker_transition = persist_worker_transition
+        self.refresh_run_summary = refresh_run_summary
+
+    def cleanup(self, client, run, cleanup_plan):
+        first_error = None
+        current_run = run
+        for step in cleanup_plan.steps:
+            workers = current_run.setdefault("workers", {})
+            worker = workers.get(step.worker_id)
+            if not is_worker_record(worker):
+                continue
+            worker = worker_record_for_mutation(worker, step.worker_id).to_worker()
+            workers[step.worker_id] = worker
+            cleanup_outcome = cleanup_created_worker_sessions(client, worker, step.session_ids)
+            persisted = self._persist_transition(current_run, WorkerTransition.cleanup_updated(worker))
+            current_run = persisted.run
+            if cleanup_outcome.error is not None:
+                if first_error is None:
+                    first_error = cleanup_outcome.error
+        if first_error is not None:
+            self.refresh_run_summary(current_run)
+            return CleanupWorkersOutcome(
+                current_run,
+                EX_UNAVAILABLE,
+                f"api failure: disposable session cleanup failed: {first_error}",
+            )
+        return CleanupWorkersOutcome(current_run, 0)
+
+    def _persist_transition(self, run, transition):
+        result = self.persist_worker_transition(run, transition)
+        worker = result.workers[0] if result.workers else result.run.get("workers", {}).get(transition.worker_id)
+        return PersistedTransitionOutcome(result.run, worker)
+
+
 class RunStartCore:
     def __init__(
         self,
         *,
         persist_worker_transition,
         refresh_run_summary,
-        client_factory=OpenCodeApiClient,
-        capability_detector=detect_capabilities,
         executor=execute_blocking_prompt,
         persist_run_mutation=None,
         now,
     ):
         self.persist_worker_transition = persist_worker_transition
         self.refresh_run_summary = refresh_run_summary
-        self.client_factory = client_factory
-        self.capability_detector = capability_detector
         self.executor = executor
         self.persist_run_mutation = persist_run_mutation
         self.now = now
@@ -89,12 +160,6 @@ class RunStartCore:
             now=self.now,
             session_journal=self._worker_session_journal(),
         )
-
-    def probe_capabilities(self, run):
-        client = self.client_factory(run["server_url"])
-        capabilities = self.capability_detector(client)
-        configure_client_route_plan(client, capabilities)
-        return CapabilityProbeOutcome(client, capabilities, blocking_execution_start_error(capabilities))
 
     def execute_worker(
         self,
@@ -121,31 +186,6 @@ class RunStartCore:
             create_session=True,
             cleanup_requested=cleanup_requested,
         )
-
-    def cleanup_created_workers(self, client, run, created_session_ids_by_worker):
-        first_error = None
-        current_run = run
-        for worker_id, session_ids in created_session_ids_by_worker.items():
-            workers = current_run.setdefault("workers", {})
-            worker = workers.get(worker_id)
-            if not is_worker_record(worker):
-                continue
-            worker = worker_record_for_mutation(worker, worker_id).to_worker()
-            workers[worker_id] = worker
-            cleanup_outcome = cleanup_created_worker_sessions(client, worker, session_ids)
-            persisted = self._persist_transition(current_run, WorkerTransition.cleanup_updated(worker))
-            current_run = persisted.run
-            if cleanup_outcome.error is not None:
-                if first_error is None:
-                    first_error = cleanup_outcome.error
-        if first_error is not None:
-            self.refresh_run_summary(current_run)
-            return CleanupWorkersOutcome(
-                current_run,
-                EX_UNAVAILABLE,
-                f"api failure: disposable session cleanup failed: {first_error}",
-            )
-        return CleanupWorkersOutcome(current_run, 0)
 
     def _persist_transition(self, run, transition):
         result = self.persist_worker_transition(run, transition)

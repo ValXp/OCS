@@ -12,6 +12,7 @@ from opencode_session.multi_worker_orchestration import (
     SelectedSerialWorkerExecutor,
 )
 from opencode_session.run_services import RunCommandService, RunStartRequest
+from opencode_session.run_start_core import RunStartCapabilityProbe
 from opencode_session.run_store import RunStore, RunStoreError
 from opencode_session.worker_execution import WorkerExecutionOutcome
 from opencode_session.worker_session_provisioning import WORKER_SESSION_JOURNAL_FIELD
@@ -42,6 +43,34 @@ except ModuleNotFoundError:
 
 
 class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
+    def test_run_start_capability_probe_configures_client_and_reports_start_error(self):
+        class ConfigurableClient(FakeClient):
+            def __init__(self):
+                super().__init__([])
+                self.route_plan = None
+
+            def configure_route_plan(self, route_plan):
+                self.route_plan = route_plan
+
+        client = ConfigurableClient()
+        detector_calls = []
+
+        def detect_capabilities(detected_client):
+            detector_calls.append(detected_client)
+            return UNSUPPORTED_CAPABILITIES
+
+        outcome = RunStartCapabilityProbe(
+            client_factory=lambda url: client,
+            capability_detector=detect_capabilities,
+        ).probe({"server_url": SERVER_URL})
+
+        self.assertIs(outcome.client, client)
+        self.assertEqual(detector_calls, [client])
+        self.assertEqual(outcome.capabilities, UNSUPPORTED_CAPABILITIES)
+        self.assertIn("unsupported route behavior", outcome.start_error)
+        self.assertIsNotNone(client.route_plan)
+        self.assertEqual(client.requests, [])
+
     def test_next_eligible_worker_executor_delegates_to_core_direct_execution(self):
         run = {
             "workers": {

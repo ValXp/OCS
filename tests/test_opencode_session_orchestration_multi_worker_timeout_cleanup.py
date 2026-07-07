@@ -6,7 +6,12 @@ from opencode_session.multi_worker_orchestration import (
     DependencyOrderedSerialRunOrchestrationService,
     DependencyOrderedSerialRunStartRequest,
 )
-from opencode_session.run_start_core import RunStartCore
+from opencode_session.run_start_core import (
+    CreatedWorkerCleanupExecutor,
+    CreatedWorkerCleanupPlan,
+    CreatedWorkerCleanupPlanner,
+    CreatedWorkerCleanupStep,
+)
 from opencode_session.run_persistence import PersistedWorkerTransitions
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
@@ -85,16 +90,20 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
             updated = apply_worker_transition(run.setdefault("workers", {}), transition)
             return PersistedWorkerTransitions(run, [updated])
 
-        core = RunStartCore(
+        cleanup_executor = CreatedWorkerCleanupExecutor(
             persist_worker_transition=persist_worker_transition,
             refresh_run_summary=lambda run: None,
-            now=lambda: "2026-07-03T00:00:00Z",
         )
 
-        outcome = core.cleanup_created_workers(
+        outcome = cleanup_executor.cleanup(
             client,
             run,
-            {"alpha": ["ses_alpha"], "beta": ["ses_beta"]},
+            CreatedWorkerCleanupPlan(
+                (
+                    CreatedWorkerCleanupStep("alpha", ("ses_alpha",)),
+                    CreatedWorkerCleanupStep("beta", ("ses_beta",)),
+                )
+            ),
         )
 
         self.assertEqual(outcome.exit_code, 69)
@@ -108,6 +117,45 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         self.assertIsNone(worker_field(run["workers"]["alpha"], "failure_reason"))
         self.assertEqual(worker_field(run["workers"]["beta"], "cleanup"), {"requested": True, "deleted": True})
         self.assertEqual(persisted_worker_ids, ["alpha", "beta"])
+
+    def test_cleanup_planner_merges_remembered_and_recoverable_sessions_without_deleting(self):
+        client = FakeClient([])
+        run = {
+            "workers": {
+                "worker": normalize_worker(
+                    {
+                        "id": "worker",
+                        "lifecycle_state": "done_collect",
+                        "cleanup": {
+                            "requested": True,
+                            "deleted": False,
+                            "sessions": ["ses_recovered"],
+                        },
+                    },
+                    "worker",
+                )
+            }
+        }
+
+        plan = CreatedWorkerCleanupPlanner().plan(
+            {"worker": ["ses_created", "ses_recovered"], "orphan": ["ses_orphan"]},
+            run,
+        )
+
+        self.assertEqual(
+            plan,
+            CreatedWorkerCleanupPlan(
+                (
+                    CreatedWorkerCleanupStep("worker", ("ses_created", "ses_recovered")),
+                    CreatedWorkerCleanupStep("orphan", ("ses_orphan",)),
+                )
+            ),
+        )
+        self.assertEqual(client.requests, [])
+        self.assertEqual(
+            worker_field(run["workers"]["worker"], "cleanup"),
+            {"requested": True, "deleted": False, "sessions": ["ses_recovered"]},
+        )
 
     def test_timeout_retry_is_manual_and_keeps_original_session(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
