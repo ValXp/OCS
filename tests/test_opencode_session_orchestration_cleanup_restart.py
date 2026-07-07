@@ -117,6 +117,7 @@ class CleanupRestartOrchestrationCliTest(unittest.TestCase):
                 "requested": True,
                 "deleted": False,
                 "error": expected_failure_reason,
+                "sessions": ["ses_new"],
             },
         }
         self.assertEqual(_worker_failure_state(prompt_worker), expected_worker_state)

@@ -263,6 +263,34 @@ class WorkerExecutionTest(unittest.TestCase):
         self.assertIsNone(outcome.error)
         self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": True})
 
+    def test_cleanup_created_worker_sessions_persists_only_pending_sessions_after_partial_failure(self):
+        worker = WorkerRecord.default_fields("worker")
+        failure = OpenCodeApiError("DELETE /api/session/ses_live failed: HTTP 500", status=500)
+        client = FakeClient([], delete_failures={"ses_live": failure})
+
+        outcome = cleanup_created_worker_sessions(client, worker, ["ses_deleted", "ses_live"])
+
+        self.assertEqual(
+            client.requests,
+            [("delete", "ses_deleted"), ("get", "ses_deleted"), ("delete", "ses_live")],
+        )
+        self.assertEqual(outcome.deleted_session_ids, ["ses_deleted"])
+        self.assertIs(outcome.error, failure)
+        self.assertEqual(
+            worker_field(worker, "cleanup"),
+            {
+                "requested": True,
+                "deleted": False,
+                "error": "DELETE /api/session/ses_live failed: HTTP 500",
+                "sessions": ["ses_live"],
+                "verified": ["ses_deleted"],
+            },
+        )
+        self.assertEqual(
+            recoverable_created_worker_sessions_by_worker({"workers": {"worker": worker}}),
+            {"worker": ["ses_live"]},
+        )
+
     def test_worker_session_journal_records_cleanup_failure_when_discard_fails(self):
         run = {
             "name": "demo",

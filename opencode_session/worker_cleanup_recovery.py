@@ -18,26 +18,30 @@ class WorkerCleanupOutcome:
 def cleanup_created_worker_sessions(client, worker, session_ids):
     record = worker_record_for_mutation(worker)
     cleanup = record.ensure_cleanup()
-    cleanup_outcome = cleanup_disposable_sessions(client, session_ids)
+    attempted_session_ids = list(session_ids)
+    cleanup_outcome = cleanup_disposable_sessions(client, attempted_session_ids)
     cleanup_record = cleanup_outcome.record
     deleted_session_ids = list(cleanup_record["deleted"])
+    verified_session_ids = list(cleanup_record["verified"])
+    pending_session_ids = [
+        session_id
+        for session_id in attempted_session_ids
+        if session_id not in verified_session_ids
+    ]
     errors = cleanup_record["errors"]
 
-    cleanup["deleted"] = bool(cleanup_record["verified"]) and not errors
+    cleanup["deleted"] = bool(verified_session_ids) and not errors
     if errors:
         cleanup["error"] = errors[0]["error"]
     else:
         cleanup.pop("error", None)
-    if deleted_session_ids:
-        if len(deleted_session_ids) > 1 or errors:
-            cleanup["sessions"] = deleted_session_ids
-        else:
-            cleanup.pop("sessions", None)
+    if pending_session_ids:
+        cleanup["sessions"] = pending_session_ids
     else:
         cleanup.pop("sessions", None)
-    if cleanup_record["verified"]:
-        if len(cleanup_record["verified"]) > 1 or errors:
-            cleanup["verified"] = list(cleanup_record["verified"])
+    if verified_session_ids:
+        if len(verified_session_ids) > 1 or errors:
+            cleanup["verified"] = verified_session_ids
         else:
             cleanup.pop("verified", None)
     else:

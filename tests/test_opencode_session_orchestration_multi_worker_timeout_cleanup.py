@@ -111,7 +111,12 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         self.assertEqual(client.requests, [("delete", "ses_alpha"), ("delete", "ses_beta"), ("get", "ses_beta")])
         self.assertEqual(
             worker_field(run["workers"]["alpha"], "cleanup"),
-            {"requested": True, "deleted": False, "error": first_error},
+            {
+                "requested": True,
+                "deleted": False,
+                "error": first_error,
+                "sessions": ["ses_alpha"],
+            },
         )
         self.assertEqual(worker_output_field(run["workers"]["alpha"], "status"), "done")
         self.assertIsNone(worker_field(run["workers"]["alpha"], "failure_reason"))
@@ -302,7 +307,10 @@ class DependencyOrderedSerialOrchestrationTimeoutCleanupTest(unittest.TestCase):
         worker = run["workers"]["worker"]
         self.assertEqual(worker_output_field(worker, "status"), "timeout")
         self.assertEqual(worker_field(worker, "failure_reason"), "worker timed out after 0.01s")
-        self.assertEqual(worker_field(worker, "cleanup"), {"requested": True, "deleted": False, "error": first_error})
+        self.assertEqual(
+            worker_field(worker, "cleanup"),
+            {"requested": True, "deleted": False, "error": first_error, "sessions": ["ses_initial"]},
+        )
 
 
 if __name__ == "__main__":
