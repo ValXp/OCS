@@ -8,7 +8,11 @@ from opencode_session.api_profile import (
 )
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.schema_helpers import tokens_total
-from opencode_session.schema_message_adapter import normalize_message_record
+from opencode_session.schema_message_adapter import (
+    FINAL_MESSAGE_MINIMUM_FIELD_SETS,
+    MESSAGE_ID_MINIMUM_FIELD_SETS,
+    normalize_message_record,
+)
 from opencode_session.status import short_status
 
 
@@ -58,6 +62,8 @@ def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=
         run_message,
         route=route,
         source="legacy run response",
+        minimum_field_sets=MESSAGE_ID_MINIMUM_FIELD_SETS,
+        minimum_label="user",
     )
     _require_message_id(
         run_record,
@@ -70,6 +76,8 @@ def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=
         route=route,
         source="legacy reply response",
         prompt_id=run_record.get("id"),
+        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
+        minimum_label="assistant",
     )
     _require_final_assistant_success_invariants(
         reply_record,
@@ -152,6 +160,8 @@ def _execute_session_message_prompt(client, session_id, prompt, capabilities, pr
         route=route,
         source="blocking message response",
         prompt_id=message_id,
+        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
+        minimum_label="assistant",
     )
     error = provider_failure(assistant_record, route=route)
     if error:
@@ -169,6 +179,8 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, p
         run_response.data,
         route=route,
         source="legacy run response",
+        minimum_field_sets=MESSAGE_ID_MINIMUM_FIELD_SETS,
+        minimum_label="user",
     )
     error = provider_failure(run_record, route=route)
     if error:
@@ -191,6 +203,8 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, p
         route=route,
         source="legacy reply response",
         prompt_id=run_record.get("id"),
+        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
+        minimum_label="assistant",
     )
     error = provider_failure(reply_record, route=route)
     if error:
@@ -222,6 +236,8 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
         route=profile.message_route("blocking_message"),
         source="blocking message response",
         prompt_id=prompt_message_id,
+        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
+        minimum_label="assistant",
     )
     _require_final_assistant_success_invariants(
         assistant_record,
@@ -256,7 +272,15 @@ def _message_raw_status(message, *, default=None):
     return message.get("raw_status") or message.get("status") or default
 
 
-def _normalize_known_message_record(message, *, route, source, prompt_id=None):
+def _normalize_known_message_record(
+    message,
+    *,
+    route,
+    source,
+    prompt_id=None,
+    minimum_field_sets=(),
+    minimum_label="message",
+):
     record = normalize_message_record(message, route=route)
     if record.get("schema_status") == "unknown":
         failure = f"unrecognized message schema from {source}: {_compact_value(record.get('raw'))}"
@@ -264,7 +288,26 @@ def _normalize_known_message_record(message, *, route, source, prompt_id=None):
             failure,
             prompt_id=prompt_id,
         )
+    if minimum_field_sets and not _has_minimum_message_shape(record, minimum_field_sets):
+        _raise_incomplete_message_schema(
+            source,
+            _minimum_message_failure_reason(record, label=minimum_label),
+            prompt_id=prompt_id,
+        )
     return record
+
+
+def _has_minimum_message_shape(record, minimum_field_sets):
+    return any(
+        all(record.get(name) is not None for name in field_set)
+        for field_set in minimum_field_sets
+    )
+
+
+def _minimum_message_failure_reason(record, *, label):
+    if not record.get("id"):
+        return f"missing {label} message id"
+    return "missing assistant text or explicit terminal status"
 
 
 def _require_message_id(record, *, source, prompt_id, label):

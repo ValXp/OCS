@@ -1,5 +1,6 @@
 import unittest
 
+from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiResponse
 from opencode_session.blocker_formatting import format_permission_compact
 from opencode_session.blocker_inventory import blocker_session_id, collection_blockers
 from opencode_session.events import normalize_event
@@ -7,7 +8,9 @@ from opencode_session.schema_admission_adapter import admission_response_fields,
 from opencode_session.schema_event import NormalizedEventRecord
 from opencode_session.schema_event_adapter import normalize_event_record
 from opencode_session.schema_message_adapter import (
+    LEGACY_MESSAGE_ADAPTER,
     LEGACY_MESSAGE_ROUTE,
+    SESSION_MESSAGE_ADAPTER,
     SESSION_MESSAGE_ROUTE,
     iter_normalized_message_records,
     message_value,
@@ -15,8 +18,14 @@ from opencode_session.schema_message_adapter import (
 )
 from opencode_session.schema_route_contract import RouteAdapterContract, child_field, route_field
 from opencode_session.schema_run import PersistedRunRecord
-from opencode_session.schema_session_adapter import normalize_session_payload, session_value
+from opencode_session.schema_session_adapter import (
+    API_SESSION_ADAPTER,
+    LEGACY_SESSION_ADAPTER,
+    normalize_session_payload,
+    session_value,
+)
 from opencode_session.schema_worker import WorkerSnapshotRecord
+from opencode_session.session_ids import require_session_id
 
 
 KNOWN_EVENT_ROUTE_FIXTURES = (
@@ -114,6 +123,48 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertIsNone(fields["event_session_id"])
         self.assertTrue(contract.has_known_shape(fields))
 
+    def test_route_adapter_contract_distinguishes_known_from_minimum_shape(self):
+        contract = RouteAdapterContract(
+            route="test_route",
+            version="unit",
+            fields=(
+                route_field("id", "id"),
+                route_field("status", "status"),
+            ),
+            known_fields=("id", "status"),
+            minimum_field_sets=(("id", "status"),),
+        )
+
+        id_only_fields = contract.read_fields({"id": "msg_1"})
+        complete_fields = contract.read_fields({"id": "msg_1", "status": "completed"})
+
+        self.assertTrue(contract.has_known_shape(id_only_fields))
+        self.assertFalse(contract.has_minimum_shape(id_only_fields))
+        self.assertTrue(contract.has_minimum_shape(complete_fields))
+
+    def test_message_route_adapters_expose_route_specific_minimums(self):
+        session_id_only = SESSION_MESSAGE_ADAPTER.read_fields({"id": "msg_1"})
+        session_final = SESSION_MESSAGE_ADAPTER.read_fields({"id": "msg_1", "content": "done"})
+        session_failure = SESSION_MESSAGE_ADAPTER.read_fields({"status": "failed"})
+        legacy_text_only = LEGACY_MESSAGE_ADAPTER.read_fields({"content": "legacy"})
+        legacy_identity = LEGACY_MESSAGE_ADAPTER.read_fields({"messageID": "msg_legacy"})
+
+        self.assertTrue(SESSION_MESSAGE_ADAPTER.has_known_shape(session_id_only))
+        self.assertFalse(SESSION_MESSAGE_ADAPTER.has_minimum_shape(session_id_only))
+        self.assertTrue(SESSION_MESSAGE_ADAPTER.has_minimum_shape(session_final))
+        self.assertTrue(SESSION_MESSAGE_ADAPTER.has_minimum_shape(session_failure))
+        self.assertFalse(LEGACY_MESSAGE_ADAPTER.has_minimum_shape(legacy_text_only))
+        self.assertTrue(LEGACY_MESSAGE_ADAPTER.has_minimum_shape(legacy_identity))
+
+    def test_session_route_adapters_expose_identity_minimums(self):
+        api_missing_identity = API_SESSION_ADAPTER.read_fields({"title": "Missing id"})
+        api_identity = API_SESSION_ADAPTER.read_fields({"id": "ses_api"})
+        legacy_identity = LEGACY_SESSION_ADAPTER.read_fields({"sessionID": "ses_legacy"})
+
+        self.assertFalse(API_SESSION_ADAPTER.has_minimum_shape(api_missing_identity))
+        self.assertTrue(API_SESSION_ADAPTER.has_minimum_shape(api_identity))
+        self.assertTrue(LEGACY_SESSION_ADAPTER.has_minimum_shape(legacy_identity))
+
     def test_normalizes_session_aliases_in_wrapped_collections(self):
         payload = {
             "sessions": [
@@ -202,6 +253,15 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(api_session["raw"], {"title": "Missing id"})
         self.assertEqual(legacy_session["schema_status"], "unknown")
         self.assertEqual(legacy_session["raw"], {"name": "Missing id"})
+
+    def test_session_creation_identity_minimum_is_required_by_execution_callers(self):
+        response = OpenCodeApiResponse({"data": {"title": "Missing id"}}, "{}")
+
+        with self.assertRaisesRegex(
+            OpenCodeApiError,
+            "session creation returned malformed response: missing session id",
+        ):
+            require_session_id(response, "session creation")
 
     def test_session_value_preserves_wrapped_record_compatibility(self):
         session = {"data": {"sessionID": "ses_wrapped", "name": "Wrapped"}}

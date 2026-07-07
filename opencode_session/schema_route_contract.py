@@ -36,12 +36,21 @@ class RouteAdapterContract:
     version: str
     fields: Tuple[RouteField, ...] = ()
     known_fields: Tuple[str, ...] = ()
+    minimum_field_sets: Tuple[Tuple[str, ...], ...] = ()
 
     def read_fields(self, record):
         return {field.name: field.read(record) for field in self.fields}
 
     def has_known_shape(self, fields):
         return any(fields[name] is not None for name in self.known_fields)
+
+    def has_minimum_shape(self, fields):
+        if not self.minimum_field_sets:
+            return self.has_known_shape(fields)
+        return any(
+            all(fields.get(name) is not None for name in field_set)
+            for field_set in self.minimum_field_sets
+        )
 
 
 def route_field(name, *aliases, children=(), include_info=True):

@@ -32,6 +32,7 @@ API_SESSION_CONTRACT = RouteAdapterContract(
         route_field("updatedAt", "updatedAt", "updated", children=(child_field("time", "updated"),)),
     ),
     known_fields=SESSION_KNOWN_FIELDS,
+    minimum_field_sets=(("id",),),
 )
 LEGACY_SESSION_CONTRACT = RouteAdapterContract(
     route="session_collection",
@@ -47,6 +48,7 @@ LEGACY_SESSION_CONTRACT = RouteAdapterContract(
         route_field("updatedAt", "updatedAt", "updated_at", "updated", children=(child_field("time", "updated"),)),
     ),
     known_fields=SESSION_KNOWN_FIELDS,
+    minimum_field_sets=(("id",),),
 )
 UNKNOWN_SESSION_CONTRACT = RouteAdapterContract(
     route="session_collection",
@@ -74,6 +76,9 @@ class SessionRouteAdapter:
 
     def has_known_shape(self, fields):
         return self.contract.has_known_shape(fields)
+
+    def has_minimum_shape(self, fields):
+        return self.contract.has_minimum_shape(fields)
 
     def normalize_payload(self, payload):
         if self.unknown:

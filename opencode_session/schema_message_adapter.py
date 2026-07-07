@@ -17,6 +17,8 @@ MESSAGE_FIELD_NAMES = ("id", "role", "status", "cost", "tokens", "text", "error"
 MESSAGE_KNOWN_FIELDS = ("id", "role", "status", "text", "error")
 MESSAGE_TEXT_FIELDS = ("text", "content")
 MESSAGE_ERROR_FIELDS = ("error", "reason", "message")
+MESSAGE_ID_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id",))
+FINAL_MESSAGE_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id", "text"))
 SESSION_MESSAGE_ROUTE = "session_message"
 LEGACY_MESSAGE_ROUTE = "legacy_run_reply"
 
@@ -34,6 +36,7 @@ SESSION_MESSAGE_CONTRACT = RouteAdapterContract(
         route_field("error", *MESSAGE_ERROR_FIELDS),
     ),
     known_fields=MESSAGE_KNOWN_FIELDS,
+    minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
 )
 LEGACY_MESSAGE_CONTRACT = RouteAdapterContract(
     route=LEGACY_MESSAGE_ROUTE,
@@ -48,6 +51,7 @@ LEGACY_MESSAGE_CONTRACT = RouteAdapterContract(
         route_field("error", *MESSAGE_ERROR_FIELDS),
     ),
     known_fields=MESSAGE_KNOWN_FIELDS,
+    minimum_field_sets=MESSAGE_ID_MINIMUM_FIELD_SETS,
 )
 UNKNOWN_MESSAGE_CONTRACT = RouteAdapterContract(
     route="unknown",
@@ -75,6 +79,9 @@ class MessageRouteAdapter:
 
     def has_known_shape(self, fields):
         return self.contract.has_known_shape(fields)
+
+    def has_minimum_shape(self, fields):
+        return self.contract.has_minimum_shape(fields)
 
 
 def normalize_message_record(message, *, route=None) -> NormalizedMessageRecord:

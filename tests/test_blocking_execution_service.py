@@ -256,6 +256,24 @@ class BlockingExecutionServiceTest(unittest.TestCase):
                 self.assertIn(expected_reason, str(raised.exception))
                 self.assertTrue(raised.exception.prompt_id.startswith("msg_"))
 
+    def test_status_only_session_message_failure_stays_provider_failure(self):
+        from opencode_session.blocking_execution import (
+            BlockingProviderFailure,
+            execute_blocking_prompt,
+        )
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc(
+            {"paths": {"/session/{sessionID}/message": {"post": {}}}}
+        )
+        client = _PayloadSessionMessageClient({"status": "failed"})
+
+        with self.assertRaises(BlockingProviderFailure) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertEqual(str(raised.exception), "failed")
+        self.assertTrue(raised.exception.prompt_id.startswith("msg_"))
+
     def test_rejects_unknown_session_message_schema_instead_of_completed_result(self):
         from opencode_session.blocking_execution import (
             BlockingProviderFailure,
