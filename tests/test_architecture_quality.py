@@ -13,11 +13,8 @@ LONG_SOURCE_FILE_DECOMPOSITION_PLAN = PROJECT_ROOT / "docs" / "ocs" / "architect
 # gate prevents further growth, and fails when a file shrinks without lowering
 # its ceiling, without forcing skipped decomposition work.
 GRANDFATHERED_LONG_SOURCE_FILES = {
-    "opencode_session/api_profile.py": 337,
     "opencode_session/remote_journal.py": 732,
     "opencode_session/run_services.py": 418,
-    "opencode_session/schema_event_adapter.py": 378,
-    "opencode_session/schema_message_adapter.py": 326,
     "opencode_session/validation_live.py": 303,
     "opencode_session/worker_field_spec.py": 386,
     "opencode_session/worker_session_provisioning.py": 438,
@@ -29,11 +26,8 @@ GRANDFATHERED_LONG_SOURCE_FILES = {
 # target is not failed while it stays at the recorded current ceiling so skipped
 # worker_state decomposition stays non-blocking.
 LONG_SOURCE_FILE_RATCHET_TARGETS = {
-    "opencode_session/api_profile.py": MAX_SOURCE_LINES,
     "opencode_session/remote_journal.py": MAX_SOURCE_LINES,
     "opencode_session/run_services.py": MAX_SOURCE_LINES,
-    "opencode_session/schema_event_adapter.py": MAX_SOURCE_LINES,
-    "opencode_session/schema_message_adapter.py": MAX_SOURCE_LINES,
     "opencode_session/validation_live.py": MAX_SOURCE_LINES,
     "opencode_session/worker_field_spec.py": MAX_SOURCE_LINES,
     "opencode_session/worker_session_provisioning.py": MAX_SOURCE_LINES,

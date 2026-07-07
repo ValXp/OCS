@@ -4,77 +4,40 @@ from dataclasses import dataclass
 from typing import Optional
 
 from opencode_session.schema_helpers import (
-    CAMEL_MESSAGE_ID_ALIASES,
-    MESSAGE_ID_ALIASES,
     normalized_tokens,
     set_missing,
 )
 from opencode_session.schema_message import NormalizedMessageRecord
-from opencode_session.schema_route_contract import (
-    RouteAdapterContract,
-    adapters_by_endpoint,
-    adapters_by_route_path,
-    route_field,
-    route_path_key,
+from opencode_session.schema_message_codecs import (
+    DEFAULT_MESSAGE_CODEC,
+    FINAL_MESSAGE_MINIMUM_FIELD_SETS,
+    LEGACY_MESSAGE_CODEC,
+    LEGACY_MESSAGE_CONTRACT,
+    LEGACY_MESSAGE_ROUTE,
+    LEGACY_REPLY_PATH,
+    LEGACY_RUN_PATH,
+    MESSAGE_CANONICAL_FIELDS,
+    MESSAGE_ENDPOINT_CODECS,
+    MESSAGE_ERROR_FIELDS,
+    MESSAGE_ID_MINIMUM_FIELD_SETS,
+    MESSAGE_KNOWN_FIELDS,
+    MESSAGE_ROUTE_PATH_CODECS,
+    MESSAGE_TEXT_FIELDS,
+    MESSAGE_VALUE_ALIASES,
+    SESSION_MESSAGE_CODEC,
+    SESSION_MESSAGE_CONTRACT,
+    SESSION_MESSAGE_PATH,
+    SESSION_MESSAGE_ROUTE,
+    UNKNOWN_MESSAGE_CODEC,
+    UNKNOWN_MESSAGE_CONTRACT,
+    message_codec_for_endpoint,
+    message_codec_for_route,
 )
 from opencode_session.status import short_status
 
-
-MESSAGE_CANONICAL_FIELDS = ("id", "role", "status", "raw_status", "cost", "tokens", "text")
-MESSAGE_KNOWN_FIELDS = ("id", "role", "status", "text", "error")
-MESSAGE_TEXT_FIELDS = ("text", "content")
-MESSAGE_ERROR_FIELDS = ("error", "reason", "message")
-MESSAGE_ID_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id",))
-FINAL_MESSAGE_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id", "text"))
-SESSION_MESSAGE_ROUTE = "session_message"
-LEGACY_MESSAGE_ROUTE = "legacy_run_reply"
-SESSION_MESSAGE_PATH = "/session/{sessionID}/message"
-LEGACY_RUN_PATH = "/session/{sessionID}/run"
-LEGACY_REPLY_PATH = "/session/{sessionID}/reply"
 MESSAGE_REQUIRE_ID = "message_id"
 MESSAGE_REQUIRE_FINAL_ASSISTANT = "final_assistant"
 TERMINAL_MESSAGE_STATUSES = {"done", "failed", "aborted", "timeout"}
-
-
-SESSION_MESSAGE_CONTRACT = RouteAdapterContract(
-    route=SESSION_MESSAGE_ROUTE,
-    version="session-message",
-    fields=(
-        route_field("id", "id", *CAMEL_MESSAGE_ID_ALIASES),
-        route_field("role", "role"),
-        route_field("status", "status", "state"),
-        route_field("cost", "cost"),
-        route_field("tokens", "tokens", "tokenUsage", "usage"),
-        route_field("text", *MESSAGE_TEXT_FIELDS),
-        route_field("error", *MESSAGE_ERROR_FIELDS),
-    ),
-    known_fields=MESSAGE_KNOWN_FIELDS,
-    minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
-    route_paths=(SESSION_MESSAGE_PATH,),
-    endpoint_names=("blocking_message",),
-)
-LEGACY_MESSAGE_CONTRACT = RouteAdapterContract(
-    route=LEGACY_MESSAGE_ROUTE,
-    version="legacy-run-reply",
-    fields=(
-        route_field("id", "id", *MESSAGE_ID_ALIASES),
-        route_field("role", "role", "author", "speaker", "type", "kind"),
-        route_field("status", "status", "state", "phase"),
-        route_field("cost", "cost"),
-        route_field("tokens", "tokens", "token", "tokenUsage", "token_usage", "usage"),
-        route_field("text", *MESSAGE_TEXT_FIELDS),
-        route_field("error", *MESSAGE_ERROR_FIELDS),
-    ),
-    known_fields=MESSAGE_KNOWN_FIELDS,
-    minimum_field_sets=MESSAGE_ID_MINIMUM_FIELD_SETS,
-    route_paths=(LEGACY_RUN_PATH, LEGACY_REPLY_PATH),
-    endpoint_names=("legacy_run", "legacy_reply"),
-)
-UNKNOWN_MESSAGE_CONTRACT = RouteAdapterContract(
-    route="unknown",
-    version="unknown",
-)
-MESSAGE_VALUE_ALIASES = tuple((field.name, field.aliases) for field in LEGACY_MESSAGE_CONTRACT.fields)
 
 
 @dataclass(frozen=True)
@@ -92,24 +55,28 @@ class MessageAdapterResult:
 
 @dataclass(frozen=True)
 class MessageRouteAdapter:
-    contract: RouteAdapterContract
+    codec: object
+
+    @property
+    def contract(self):
+        return self.codec.contract
 
     @property
     def route(self):
-        return self.contract.route
+        return self.codec.route
 
     @property
     def version(self):
-        return self.contract.version
+        return self.codec.version
 
     def read_fields(self, message):
-        return self.contract.read_fields(message)
+        return self.codec.read_fields(message)
 
     def has_known_shape(self, fields):
-        return self.contract.has_known_shape(fields)
+        return self.codec.has_known_shape(fields)
 
     def has_minimum_shape(self, fields):
-        return self.contract.has_minimum_shape(fields)
+        return self.codec.has_minimum_shape(fields)
 
     def normalize_record(self, message) -> NormalizedMessageRecord:
         return self.normalize_result(message).record
@@ -274,20 +241,11 @@ def _message_text_from_fields(message, fields):
 
 
 def message_adapter_for_route(route=None):
-    if route is None:
-        return DEFAULT_MESSAGE_ADAPTER
-    return (
-        MESSAGE_ROUTE_ADAPTERS.get(route)
-        or MESSAGE_ROUTE_PATH_ADAPTERS.get(route_path_key(route))
-        or UNKNOWN_MESSAGE_ADAPTER
-    )
+    return _adapter_for_codec(message_codec_for_route(route))
 
 
 def message_adapter_for_endpoint(endpoint, route_path=None):
-    path_adapter = MESSAGE_ROUTE_PATH_ADAPTERS.get(route_path_key(route_path))
-    if path_adapter is not None:
-        return path_adapter
-    return MESSAGE_ENDPOINT_ADAPTERS.get(endpoint, UNKNOWN_MESSAGE_ADAPTER)
+    return _adapter_for_codec(message_codec_for_endpoint(endpoint, route_path))
 
 
 def unknown_message_record(raw) -> NormalizedMessageRecord:
@@ -308,19 +266,33 @@ def _requested(requested_names, *aliases):
     return any(name in aliases for name in requested_names)
 
 
+def _adapter_for_codec(codec):
+    if codec is SESSION_MESSAGE_CODEC:
+        return SESSION_MESSAGE_ADAPTER
+    if codec is LEGACY_MESSAGE_CODEC:
+        return LEGACY_MESSAGE_ADAPTER
+    return UNKNOWN_MESSAGE_ADAPTER
+
+
 SESSION_MESSAGE_ADAPTER = MessageRouteAdapter(
-    contract=SESSION_MESSAGE_CONTRACT,
+    codec=SESSION_MESSAGE_CODEC,
 )
 LEGACY_MESSAGE_ADAPTER = MessageRouteAdapter(
-    contract=LEGACY_MESSAGE_CONTRACT,
+    codec=LEGACY_MESSAGE_CODEC,
 )
 UNKNOWN_MESSAGE_ADAPTER = MessageRouteAdapter(
-    contract=UNKNOWN_MESSAGE_CONTRACT,
+    codec=UNKNOWN_MESSAGE_CODEC,
 )
 MESSAGE_ROUTE_ADAPTERS = {
     SESSION_MESSAGE_ROUTE: SESSION_MESSAGE_ADAPTER,
     LEGACY_MESSAGE_ROUTE: LEGACY_MESSAGE_ADAPTER,
 }
-MESSAGE_ROUTE_PATH_ADAPTERS = adapters_by_route_path((SESSION_MESSAGE_ADAPTER, LEGACY_MESSAGE_ADAPTER))
-MESSAGE_ENDPOINT_ADAPTERS = adapters_by_endpoint((SESSION_MESSAGE_ADAPTER, LEGACY_MESSAGE_ADAPTER))
+MESSAGE_ROUTE_PATH_ADAPTERS = {
+    path: _adapter_for_codec(codec)
+    for path, codec in MESSAGE_ROUTE_PATH_CODECS.items()
+}
+MESSAGE_ENDPOINT_ADAPTERS = {
+    endpoint: _adapter_for_codec(codec)
+    for endpoint, codec in MESSAGE_ENDPOINT_CODECS.items()
+}
 DEFAULT_MESSAGE_ADAPTER = LEGACY_MESSAGE_ADAPTER

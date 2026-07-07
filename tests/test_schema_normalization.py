@@ -7,6 +7,7 @@ from opencode_session.events import normalize_event
 from opencode_session.schema_admission_adapter import admission_response_fields, normalize_admission_record
 from opencode_session.schema_event import NormalizedEventRecord
 from opencode_session.schema_event_adapter import normalize_event_record
+from opencode_session.schema_event_codecs import event_codec_for_route
 from opencode_session.schema_message_adapter import (
     LEGACY_MESSAGE_ADAPTER,
     LEGACY_MESSAGE_ROUTE,
@@ -20,6 +21,7 @@ from opencode_session.schema_message_adapter import (
     normalize_message_record,
     normalize_message_result,
 )
+from opencode_session.schema_message_codecs import message_codec_for_route
 from opencode_session.schema_route_contract import RouteAdapterContract, child_field, route_field
 from opencode_session.schema_run import PersistedRunRecord
 from opencode_session.schema_session_adapter import (
@@ -166,6 +168,14 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertEqual(message_adapter_for_route("/session/:sessionID/run?wait=true").version, "legacy-run-reply")
         self.assertEqual(message_adapter_for_route("/session/{id}/reply/").version, "legacy-run-reply")
         self.assertEqual(message_adapter_for_route("/custom/{sessionID}/message").version, "unknown")
+
+    def test_route_codecs_expose_versioned_message_and_event_boundaries(self):
+        self.assertEqual(message_codec_for_route(SESSION_MESSAGE_ROUTE).version, "session-message")
+        self.assertEqual(message_codec_for_route("/session/{id}/reply/").version, "legacy-run-reply")
+        self.assertEqual(message_codec_for_route("/custom/{sessionID}/message").version, "unknown")
+        self.assertEqual(event_codec_for_route("/api/event?reconnect=true").version, "api-v1")
+        self.assertEqual(event_codec_for_route("/global/event").version, "legacy")
+        self.assertEqual(event_codec_for_route("/custom/event").version, "unknown")
 
     def test_message_adapter_result_reports_execution_invariants(self):
         final_missing_text = normalize_message_result(

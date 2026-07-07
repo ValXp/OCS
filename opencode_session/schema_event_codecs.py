@@ -1,0 +1,299 @@
+import json
+from dataclasses import dataclass
+from typing import FrozenSet, Optional, Tuple
+
+from opencode_session.schema_helpers import (
+    DELIVERY_ALIASES,
+    first_present,
+    MESSAGE_ID_ALIASES,
+    PROMPT_ID_ALIASES,
+    SESSION_ID_ALIASES,
+    string_value,
+)
+from opencode_session.schema_route_contract import (
+    RouteAdapterContract,
+    adapters_by_route_path,
+    route_field,
+    route_path_key,
+)
+
+
+API_EVENT_ROUTE = "/api/event"
+LEGACY_EVENT_ROUTES = frozenset({"/event", "/global/event"})
+SUCCESS_STATUSES = {"complete", "completed", "done", "idle", "success", "succeeded"}
+ABORT_STATUSES = {"abort", "aborted", "cancelled", "canceled"}
+
+EVENT_MESSAGE_ID_FIELDS = (*MESSAGE_ID_ALIASES, *PROMPT_ID_ALIASES)
+EVENT_STATUS_FIELDS = ("status", "state")
+EVENT_CALL_ID_FIELDS = ("callID", "callId", "toolCallID", "toolCallId", "tool_call_id")
+EVENT_STEP_FIELDS = ("stepID", "stepId", "step_id")
+EVENT_TOOL_NAME_FIELDS = ("toolName", "tool_name")
+EVENT_PERMISSION_ID_FIELDS = ("permissionID", "permissionId", "permission_id")
+EVENT_QUESTION_ID_FIELDS = ("questionID", "questionId", "question_id")
+EVENT_BLOCKER_ID_FIELDS = ("blockerID", "blockerId", "blocker_id")
+
+BLOCKER_EVENT_TYPES = frozenset({"permission.requested", "question.requested", "blocker.requested"})
+ADMISSION_EVENT_TYPES = frozenset({"session.prompt.admitted", "session.prompt.promoted", "session.prompt.queued"})
+PROMPT_EVENT_TYPES = frozenset({"session.prompt.started", "session.prompt.updated", "session.prompt.completed"})
+STEP_EVENT_TYPES = frozenset({"session.step.started", "session.step.updated", "session.step.completed"})
+STATUS_EVENT_TYPES = frozenset({"session.status", "session.idle"})
+TEXT_EVENT_TYPES = frozenset({"message.part.updated", "message.part.delta", "message.text.delta"})
+TOOL_EVENT_TYPES = frozenset({"tool.execute.started", "tool.execute.updated", "tool.execute.completed"})
+ERROR_EVENT_TYPES = frozenset({"message.error", "session.error", "tool.execute.error"})
+
+EVENT_ROUTE_FIELDS = (
+    route_field("session_id", *SESSION_ID_ALIASES, include_info=False),
+    route_field("message_id", *EVENT_MESSAGE_ID_FIELDS, include_info=False),
+    route_field("status", *EVENT_STATUS_FIELDS, include_info=False),
+    route_field("delivery", *DELIVERY_ALIASES, include_info=False),
+    route_field("text", "delta", "text", "content", include_info=False),
+    route_field("call_id", *EVENT_CALL_ID_FIELDS, include_info=False),
+    route_field("step", "step", *EVENT_STEP_FIELDS, include_info=False),
+    route_field("title", "title", "description", include_info=False),
+    route_field(
+        "blocker_id",
+        *EVENT_PERMISSION_ID_FIELDS,
+        *EVENT_QUESTION_ID_FIELDS,
+        *EVENT_BLOCKER_ID_FIELDS,
+        include_info=False,
+    ),
+    route_field("question", "question", "prompt", "title", include_info=False),
+)
+API_EVENT_CONTRACT = RouteAdapterContract(
+    route="event",
+    version="api-v1",
+    fields=EVENT_ROUTE_FIELDS,
+    route_paths=(API_EVENT_ROUTE,),
+)
+LEGACY_EVENT_CONTRACT = RouteAdapterContract(
+    route="event",
+    version="legacy",
+    fields=EVENT_ROUTE_FIELDS,
+    route_paths=tuple(LEGACY_EVENT_ROUTES),
+)
+KNOWN_EVENT_CONTRACT = RouteAdapterContract(route="event", version="known-shapes", fields=EVENT_ROUTE_FIELDS)
+UNKNOWN_EVENT_CONTRACT = RouteAdapterContract(route="event", version="unknown")
+
+
+@dataclass(frozen=True)
+class DecodedEvent:
+    event_type: Optional[str]
+    session_id: Optional[str]
+    message_id: Optional[str] = None
+    status: Optional[str] = None
+    delivery: Optional[str] = None
+    text: Optional[str] = None
+    tool: Optional[str] = None
+    call_id: Optional[str] = None
+    step: Optional[str] = None
+    title: Optional[str] = None
+    blocker: Optional[str] = None
+    blocker_id: Optional[str] = None
+    question: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class EventKindContract:
+    kind: str
+    event_types: FrozenSet[str]
+    detail_fields: Tuple[str, ...]
+    requires_blocker: bool = False
+
+
+class ApiEventRouteCodec:
+    contract = API_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
+
+    def decode(self, event):
+        if not isinstance(event, dict) or not isinstance(event.get("properties"), dict):
+            return None
+        event_type = string_value(event.get("type"))
+        if event_type is None:
+            return None
+        return _decoded_from_event_fields(event_type, event["properties"], self.contract)
+
+
+class LegacyEventRouteCodec:
+    contract = LEGACY_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
+
+    def decode(self, event):
+        if not isinstance(event, dict):
+            return None
+        event_type = string_value(event.get("event"))
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = event.get("data")
+        if event_type is None or not isinstance(payload, dict):
+            return None
+        return _decoded_from_event_fields(event_type, payload, self.contract)
+
+
+class KnownEventRouteCodec:
+    contract = KNOWN_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
+
+    def __init__(self, decoders=None):
+        self.decoders = tuple(decoders or (API_EVENT_CODEC, LEGACY_EVENT_CODEC))
+
+    def decode(self, event):
+        for decoder in self.decoders:
+            decoded = decoder.decode(event)
+            if decoded is not None:
+                return decoded
+        return None
+
+
+class UnknownEventRouteCodec:
+    contract = UNKNOWN_EVENT_CONTRACT
+    route = contract.route
+    version = contract.version
+
+    def decode(self, event):
+        return None
+
+
+def _decoded_from_event_fields(event_type, fields, contract):
+    route_fields = contract.read_fields(fields)
+    tool = _tool_name(fields)
+    error = _error_text(fields.get("error")) or string_value(first_present(fields, "reason"))
+    blocker = _blocker_type(event_type, fields)
+    return DecodedEvent(
+        event_type=event_type,
+        session_id=string_value(route_fields["session_id"]),
+        message_id=string_value(route_fields["message_id"]),
+        status=_status_value(fields, route_fields),
+        delivery=string_value(route_fields["delivery"]),
+        text=_text_value(fields, route_fields),
+        tool=tool,
+        call_id=string_value(route_fields["call_id"]),
+        step=string_value(route_fields["step"]),
+        title=string_value(route_fields["title"]),
+        blocker=blocker,
+        blocker_id=string_value(route_fields["blocker_id"]) if blocker is not None else None,
+        question=string_value(route_fields["question"]) if blocker is not None else None,
+        error=error,
+    )
+
+
+def decoded_event_kind(decoded):
+    normalized_type = str(decoded.event_type or "").lower()
+    contract = EVENT_KIND_CONTRACTS.get(normalized_type)
+    if contract is None:
+        return "unknown"
+    if contract.requires_blocker and decoded.blocker is None:
+        return "unknown"
+    if _has_event_detail(decoded, *contract.detail_fields):
+        return contract.kind
+    return "unknown"
+
+
+def _has_event_detail(decoded, *names):
+    return any(getattr(decoded, name) is not None for name in names)
+
+
+def _text_value(fields, route_fields):
+    value = route_fields["text"]
+    if isinstance(value, str):
+        return value
+    part = fields.get("part")
+    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+        return part["text"]
+    message = fields.get("message")
+    if isinstance(message, dict):
+        value = first_present(message, "text", "content")
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _status_value(fields, route_fields):
+    value = string_value(route_fields["status"])
+    if value is not None:
+        return value
+    message = fields.get("message")
+    if isinstance(message, dict):
+        return string_value(first_present(message, *EVENT_STATUS_FIELDS))
+    return None
+
+
+def _tool_name(fields):
+    tool = fields.get("tool")
+    if isinstance(tool, dict):
+        value = first_present(tool, "name", "tool", *EVENT_TOOL_NAME_FIELDS)
+        if value is not None:
+            return str(value)
+        return json.dumps(tool, sort_keys=True)
+    value = first_present(fields, "tool", *EVENT_TOOL_NAME_FIELDS)
+    return string_value(value)
+
+
+def _blocker_type(event_type, fields):
+    normalized_type = str(event_type or "").lower()
+    if normalized_type == "permission.requested":
+        return "permission"
+    if normalized_type == "question.requested":
+        return "question"
+    if normalized_type in BLOCKER_EVENT_TYPES:
+        return "blocker"
+    if first_present(fields, "permission", *EVENT_PERMISSION_ID_FIELDS) is not None:
+        return "permission"
+    if first_present(fields, *EVENT_QUESTION_ID_FIELDS) is not None:
+        return "question"
+    if first_present(fields, "blocker", *EVENT_BLOCKER_ID_FIELDS) is not None:
+        return "blocker"
+    return None
+
+
+def _error_text(error):
+    if isinstance(error, dict):
+        value = first_present(error, "message", "detail", "error")
+        if value is not None:
+            return str(value)
+        return json.dumps(error, sort_keys=True)
+    if error is not None:
+        return str(error)
+    return None
+
+
+def event_codec_for_route(route_path=None):
+    if route_path is None:
+        return KNOWN_EVENT_CODEC
+    normalized_path = route_path_key(route_path)
+    return EVENT_ROUTE_CODECS.get(normalized_path, UNKNOWN_EVENT_CODEC)
+
+
+def _event_kind_contracts():
+    return {
+        event_type: contract
+        for contract in EVENT_KIND_CONTRACTS_BY_KIND
+        for event_type in contract.event_types
+    }
+
+
+EVENT_KIND_CONTRACTS_BY_KIND = (
+    EventKindContract(
+        "blocker",
+        BLOCKER_EVENT_TYPES,
+        ("session_id", "message_id", "blocker_id", "question", "status"),
+        requires_blocker=True,
+    ),
+    EventKindContract("error", ERROR_EVENT_TYPES, ("session_id", "message_id", "error")),
+    EventKindContract("text", TEXT_EVENT_TYPES, ("text",)),
+    EventKindContract("tool", TOOL_EVENT_TYPES, ("tool", "call_id")),
+    EventKindContract("admission", ADMISSION_EVENT_TYPES, ("session_id", "message_id", "status", "delivery")),
+    EventKindContract("prompt", PROMPT_EVENT_TYPES, ("session_id", "message_id", "status", "delivery")),
+    EventKindContract("step", STEP_EVENT_TYPES, ("session_id", "message_id", "step", "status", "title")),
+    EventKindContract("status", STATUS_EVENT_TYPES, ("session_id", "status")),
+)
+EVENT_KIND_CONTRACTS = _event_kind_contracts()
+
+API_EVENT_CODEC = ApiEventRouteCodec()
+LEGACY_EVENT_CODEC = LegacyEventRouteCodec()
+KNOWN_EVENT_CODEC = KnownEventRouteCodec((API_EVENT_CODEC, LEGACY_EVENT_CODEC))
+UNKNOWN_EVENT_CODEC = UnknownEventRouteCodec()
+EVENT_ROUTE_CODECS = adapters_by_route_path((API_EVENT_CODEC, LEGACY_EVENT_CODEC))

@@ -1,6 +1,7 @@
 import argparse
 import unittest
 
+from opencode_session.api_profile_detection import detect_openapi_profile
 from opencode_session.api_profile import OpenCodeServerProfile
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.api_transport import OpenCodeApiError
@@ -140,6 +141,38 @@ class CapabilityProbeCliTest(unittest.TestCase):
                 "legacy_reply": "/session/{sessionID}/reply",
             },
         )
+
+    def test_openapi_profile_detection_is_explicit_about_route_aliases(self):
+        detection = detect_openapi_profile(
+            {
+                "openapi": "3.1.0",
+                "paths": {
+                    "/session": {"post": {}},
+                    "/session/{id}/prompt_async": {
+                        "post": {"parameters": [{"name": "wait"}]},
+                    },
+                    "/global/event": {"get": {}},
+                    "/session/:sessionID/run": {"post": {}},
+                    "/session/{id}/reply": {"post": {}},
+                },
+            },
+            health={"ok": True, "serverVersion": "2.1.0"},
+        )
+
+        self.assertEqual(detection.health, "ok")
+        self.assertEqual(detection.version, "2.1.0")
+        self.assertEqual(detection.route_availability["session"], {"path": "/session", "method": "POST", "available": True})
+        self.assertEqual(
+            detection.route_availability["v2_prompt"],
+            {"path": "/session/{sessionID}/prompt_async", "method": "POST", "available": True},
+        )
+        self.assertEqual(
+            detection.route_availability["v2_wait"],
+            {"path": "/session/{sessionID}/prompt_async?wait=true", "method": "POST", "available": True},
+        )
+        self.assertEqual(detection.route_availability["events"], {"path": "/global/event", "method": "GET", "available": True})
+        self.assertTrue(detection.route_availability["legacy_run"]["available"])
+        self.assertTrue(detection.route_availability["legacy_reply"]["available"])
 
     def test_server_profile_selects_api_routes_and_adapters(self):
         profile = OpenCodeServerProfile.from_openapi_doc(

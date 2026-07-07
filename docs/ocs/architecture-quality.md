@@ -6,12 +6,9 @@ The ratchet target for every long-file exception is the normal source-file limit
 
 | File | Current ceiling | Target | Decomposition direction |
 | --- | ---: | ---: | --- |
-| `opencode_session/api_profile.py` | 337 | 300 | Separate route capability/profile parsing from presentation helpers. |
 | `opencode_session/multi_worker_orchestration.py` | 500 | 300 | Extract worker selection, dependency planning, and multi-worker status rendering seams. |
 | `opencode_session/remote_journal.py` | 732 | 300 | Split journal record codecs, persistence, and runner/reporting responsibilities. |
 | `opencode_session/run_services.py` | 418 | 300 | Move run command mutations into narrower service modules around init, worker updates, and collection. |
-| `opencode_session/schema_event_adapter.py` | 378 | 300 | Separate event envelope parsing from normalized event mapping. |
-| `opencode_session/schema_message_adapter.py` | 326 | 300 | Separate message content extraction from execution metadata normalization. |
 | `opencode_session/validation_live.py` | 303 | 300 | Split live validation stages from response assertion helpers. |
 | `opencode_session/worker_field_spec.py` | 386 | 300 | Decouple worker field specification/parsing from worker state hydration details. |
 | `opencode_session/worker_session_provisioning.py` | 438 | 300 | Split session creation, reuse, and cleanup policy paths. |
