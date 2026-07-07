@@ -2,7 +2,9 @@ import argparse
 
 from opencode_session.api_client import OpenCodeApiClient
 from opencode_session.api_transport import OpenCodeApiError
-from opencode_session.validation_cleanup import cleanup_disposable_command
+from opencode_session.commands.rendering import CommandResult, render_command_result
+from opencode_session.formatting import compact_value
+from opencode_session.validation_cleanup import cleanup_stale_disposable_sessions
 from opencode_session.validation_live import (
     LIVE_SESSION_PREFIX,
     LIVE_VALIDATE_ENV,
@@ -96,6 +98,33 @@ def handle_validation_command(
             unsupported_exit=unsupported_exit,
         )
     return cleanup_disposable_command(args, client, print_error=print_error, unavailable_exit=unavailable_exit)
+
+
+def cleanup_disposable_command(args, client, *, print_error, unavailable_exit):
+    try:
+        result = cleanup_stale_disposable_sessions(client, prefix=args.prefix, directory=args.directory)
+    except OpenCodeApiError as error:
+        return _error_result(args, str(error), unavailable_exit, print_error)
+
+    if result["status"] != "done":
+        message = f"cleanup failed: {format_cleanup_command_compact(result)}"
+        return _error_result(args, message, unavailable_exit, print_error)
+    return render_command_result(args, CommandResult(result, compact=format_cleanup_command_compact))
+
+
+def _error_result(args, message, exit_code, print_error):
+    return render_command_result(args, CommandResult(error=message, exit_code=exit_code), print_error=print_error)
+
+
+def format_cleanup_command_compact(result):
+    fields = [
+        ("stale", result["stale"]),
+        ("deleted", len(result["deleted"])),
+        ("verified", len(result["verified"])),
+        ("prefix", result["prefix"]),
+        ("dir", result["directory"]),
+    ]
+    return "cleanup " + " ".join(f"{key}={compact_value(value)}" for key, value in fields)
 
 
 def _positive_float(value):

@@ -50,13 +50,6 @@ GRANDFATHERED_IMPORT_CYCLES = {
     ),
 }
 
-# validation_cleanup currently owns one cleanup command that still shares the
-# command rendering helper. Do not allow more core-to-command dependencies.
-GRANDFATHERED_COMMAND_IMPORTS = {
-    ("opencode_session.validation_cleanup", "opencode_session.commands.rendering"),
-}
-
-
 def _python_source_paths():
     return sorted(PACKAGE_ROOT.rglob("*.py"))
 
@@ -249,8 +242,6 @@ class ArchitectureQualityGateTest(unittest.TestCase):
                 ):
                     continue
                 if importer == "opencode_session.cli" or importer.startswith("opencode_session.commands."):
-                    continue
-                if (importer, target) in GRANDFATHERED_COMMAND_IMPORTS:
                     continue
                 offenders.append(f"{importer} imports {target}")
 
