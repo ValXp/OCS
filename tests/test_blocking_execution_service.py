@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 
 class _Response:
@@ -228,6 +229,41 @@ class BlockingExecutionServiceTest(unittest.TestCase):
             provider_failure({"data": {"reason": "quota exceeded"}}, route=SESSION_MESSAGE_ROUTE),
             "quota exceeded",
         )
+
+    def test_session_message_execution_normalizes_provider_response_once(self):
+        from opencode_session import blocking_execution
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+        from opencode_session.schema_message_adapter import normalize_message_result
+
+        capabilities = capabilities_from_openapi_doc(
+            {"paths": {"/session/{sessionID}/message": {"post": {}}}}
+        )
+        client = _BlockingExecutionClient()
+
+        with patch.object(
+            blocking_execution,
+            "normalize_message_result",
+            wraps=normalize_message_result,
+        ) as normalized:
+            blocking_execution.execute_blocking_prompt(client, "ses_service", "Reply exactly PONG.", capabilities)
+
+        self.assertEqual(normalized.call_count, 1)
+
+    def test_legacy_execution_normalizes_each_provider_response_once(self):
+        from opencode_session import blocking_execution
+        from opencode_session.schema_message_adapter import normalize_message_result
+
+        capabilities = {"route_availability": {}, "legacy_fallback_available": True}
+        client = _BlockingExecutionClient()
+
+        with patch.object(
+            blocking_execution,
+            "normalize_message_result",
+            wraps=normalize_message_result,
+        ) as normalized:
+            blocking_execution.execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertEqual(normalized.call_count, 2)
 
     def test_rejects_incomplete_success_shaped_session_message_payloads(self):
         from opencode_session.blocking_execution import (

@@ -1,5 +1,7 @@
+import json
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Optional
 
 from opencode_session.schema_helpers import (
     CAMEL_MESSAGE_ID_ALIASES,
@@ -21,6 +23,9 @@ MESSAGE_ID_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id",))
 FINAL_MESSAGE_MINIMUM_FIELD_SETS = (("error",), ("status",), ("id", "text"))
 SESSION_MESSAGE_ROUTE = "session_message"
 LEGACY_MESSAGE_ROUTE = "legacy_run_reply"
+MESSAGE_REQUIRE_ID = "message_id"
+MESSAGE_REQUIRE_FINAL_ASSISTANT = "final_assistant"
+TERMINAL_MESSAGE_STATUSES = {"done", "failed", "aborted", "timeout"}
 
 
 SESSION_MESSAGE_CONTRACT = RouteAdapterContract(
@@ -63,6 +68,19 @@ MESSAGE_VALUE_ALIASES = tuple((field.name, field.aliases) for field in LEGACY_ME
 
 
 @dataclass(frozen=True)
+class MessageAdapterResult:
+    record: NormalizedMessageRecord
+    fields: dict
+    known: bool
+    provider_failure: Optional[str] = None
+    incomplete_reason: Optional[str] = None
+
+    @property
+    def schema_status(self):
+        return "known" if self.known else "unknown"
+
+
+@dataclass(frozen=True)
 class MessageRouteAdapter:
     contract: RouteAdapterContract
 
@@ -83,19 +101,33 @@ class MessageRouteAdapter:
     def has_minimum_shape(self, fields):
         return self.contract.has_minimum_shape(fields)
 
+    def normalize_record(self, message) -> NormalizedMessageRecord:
+        return self.normalize_result(message).record
+
+    def normalize_result(self, message, *, requirement=None, label="message") -> MessageAdapterResult:
+        return _normalize_message_result(message, self, requirement=requirement, label=label)
+
 
 def normalize_message_record(message, *, route=None) -> NormalizedMessageRecord:
-    return _normalize_message_record(message, message_adapter_for_route(route))
+    return normalize_message_result(message, route=route).record
+
+
+def normalize_message_result(message, *, route=None, requirement=None, label="message") -> MessageAdapterResult:
+    return message_adapter_for_route(route).normalize_result(message, requirement=requirement, label=label)
 
 
 def _normalize_message_record(message, adapter) -> NormalizedMessageRecord:
+    return _normalize_message_result(message, adapter).record
+
+
+def _normalize_message_result(message, adapter, *, requirement=None, label="message") -> MessageAdapterResult:
     if not isinstance(message, dict):
-        return unknown_message_record(message)
+        return MessageAdapterResult(unknown_message_record(message), {}, False)
     message = message_record(message)
 
     fields = adapter.read_fields(message)
     if not adapter.has_known_shape(fields):
-        return unknown_message_record(message)
+        return MessageAdapterResult(unknown_message_record(message), fields, False)
 
     normalized = dict(message)
     set_missing(normalized, "id", fields["id"])
@@ -110,7 +142,13 @@ def _normalize_message_record(message, adapter) -> NormalizedMessageRecord:
     set_missing(normalized, "text", _message_text_from_fields(message, fields))
     set_missing(normalized, "error", fields["error"])
     require_message_canonical_fields(normalized)
-    return normalized
+    return MessageAdapterResult(
+        normalized,
+        fields,
+        True,
+        provider_failure=message_provider_failure(normalized),
+        incomplete_reason=_incomplete_message_reason(normalized, requirement, label=label),
+    )
 
 
 def iter_normalized_message_records(data, *, route=None):
@@ -167,6 +205,49 @@ def message_text(message, *, route=None):
     if route is not None and not adapter.has_known_shape(fields):
         return ""
     return _message_text_from_fields(message, fields)
+
+
+def message_provider_failure(record):
+    status = str(message_raw_status(record, default="") or "").lower()
+    error = record.get("error")
+    if status not in {"failed", "error", "errored"}:
+        if not status and error:
+            if isinstance(error, dict):
+                return error.get("message") or json.dumps(error, sort_keys=True)
+            return str(error)
+        return None
+    if isinstance(error, dict):
+        return error.get("message") or json.dumps(error, sort_keys=True)
+    return error or status
+
+
+def message_raw_status(message, *, default=None):
+    return message.get("raw_status") or message.get("status") or default
+
+
+def _incomplete_message_reason(record, requirement, *, label):
+    if requirement is None:
+        return None
+    if requirement == MESSAGE_REQUIRE_ID:
+        if record.get("id"):
+            return None
+        return f"missing {label} message id"
+    if requirement == MESSAGE_REQUIRE_FINAL_ASSISTANT:
+        if not record.get("id"):
+            return f"missing {label} message id"
+        if _has_message_text(record) or _has_explicit_terminal_status(record):
+            return None
+        return "missing assistant text or explicit terminal status"
+    raise ValueError(f"unknown message requirement: {requirement}")
+
+
+def _has_message_text(record):
+    return record.get("text") not in (None, "")
+
+
+def _has_explicit_terminal_status(record):
+    raw_status = message_raw_status(record)
+    return raw_status is not None and short_status(raw_status) in TERMINAL_MESSAGE_STATUSES
 
 
 def _message_text_from_fields(message, fields):

@@ -10,11 +10,14 @@ from opencode_session.schema_event_adapter import normalize_event_record
 from opencode_session.schema_message_adapter import (
     LEGACY_MESSAGE_ADAPTER,
     LEGACY_MESSAGE_ROUTE,
+    MESSAGE_REQUIRE_FINAL_ASSISTANT,
+    MESSAGE_REQUIRE_ID,
     SESSION_MESSAGE_ADAPTER,
     SESSION_MESSAGE_ROUTE,
     iter_normalized_message_records,
     message_value,
     normalize_message_record,
+    normalize_message_result,
 )
 from opencode_session.schema_route_contract import RouteAdapterContract, child_field, route_field
 from opencode_session.schema_run import PersistedRunRecord
@@ -155,6 +158,45 @@ class SchemaNormalizationTest(unittest.TestCase):
         self.assertTrue(SESSION_MESSAGE_ADAPTER.has_minimum_shape(session_failure))
         self.assertFalse(LEGACY_MESSAGE_ADAPTER.has_minimum_shape(legacy_text_only))
         self.assertTrue(LEGACY_MESSAGE_ADAPTER.has_minimum_shape(legacy_identity))
+
+    def test_message_adapter_result_reports_execution_invariants(self):
+        final_missing_text = normalize_message_result(
+            {"id": "msg_assistant_empty"},
+            route=SESSION_MESSAGE_ROUTE,
+            requirement=MESSAGE_REQUIRE_FINAL_ASSISTANT,
+            label="assistant",
+        )
+        final_failed_without_id = normalize_message_result(
+            {"status": "failed"},
+            route=SESSION_MESSAGE_ROUTE,
+            requirement=MESSAGE_REQUIRE_FINAL_ASSISTANT,
+            label="assistant",
+        )
+        run_missing_id = normalize_message_result(
+            {"status": "submitted"},
+            route=LEGACY_MESSAGE_ROUTE,
+            requirement=MESSAGE_REQUIRE_ID,
+            label="user",
+        )
+        unknown_run = normalize_message_result(
+            {"tokenUsage": {"input": 1}},
+            route=LEGACY_MESSAGE_ROUTE,
+            requirement=MESSAGE_REQUIRE_ID,
+            label="user",
+        )
+
+        self.assertTrue(final_missing_text.known)
+        self.assertIsNone(final_missing_text.provider_failure)
+        self.assertEqual(
+            final_missing_text.incomplete_reason,
+            "missing assistant text or explicit terminal status",
+        )
+        self.assertEqual(final_failed_without_id.provider_failure, "failed")
+        self.assertEqual(final_failed_without_id.incomplete_reason, "missing assistant message id")
+        self.assertEqual(run_missing_id.incomplete_reason, "missing user message id")
+        self.assertFalse(unknown_run.known)
+        self.assertEqual(unknown_run.schema_status, "unknown")
+        self.assertEqual(unknown_run.record["raw"], {"tokenUsage": {"input": 1}})
 
     def test_session_route_adapters_expose_identity_minimums(self):
         api_missing_identity = API_SESSION_ADAPTER.read_fields({"title": "Missing id"})

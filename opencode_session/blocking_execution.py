@@ -1,4 +1,3 @@
-import json
 import uuid
 
 from opencode_session.api_transport import OpenCodeApiError
@@ -9,15 +8,15 @@ from opencode_session.api_profile import (
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.schema_helpers import tokens_total
 from opencode_session.schema_message_adapter import (
-    FINAL_MESSAGE_MINIMUM_FIELD_SETS,
-    MESSAGE_ID_MINIMUM_FIELD_SETS,
-    normalize_message_record,
+    MESSAGE_REQUIRE_FINAL_ASSISTANT,
+    MESSAGE_REQUIRE_ID,
+    message_raw_status,
+    normalize_message_result,
 )
 from opencode_session.status import short_status
 
 
 DEFAULT_BLOCKING_EXECUTION_TIMEOUT_SECONDS = 120
-TERMINAL_BLOCKING_STATUSES = {"done", "failed", "aborted", "timeout"}
 
 
 class BlockingProviderFailure(Exception):
@@ -58,33 +57,39 @@ def execute_blocking_prompt(
 def legacy_run_reply_result(session_id, run_message, reply_message, *, api_path=None, profile=None):
     profile = profile or OpenCodeServerProfile.default()
     route = profile.message_route("legacy_run")
-    run_record = _normalize_known_message_record(
+    run_result = _known_message_result(
         run_message,
         route=route,
         source="legacy run response",
-        minimum_field_sets=MESSAGE_ID_MINIMUM_FIELD_SETS,
-        minimum_label="user",
-    )
-    _require_message_id(
-        run_record,
-        source="legacy run response",
-        prompt_id=None,
         label="user",
+        requirement=MESSAGE_REQUIRE_ID,
     )
-    reply_record = _normalize_known_message_record(
+    _raise_incomplete_message_schema(run_result, source="legacy run response", prompt_id=None)
+    reply_result = _known_message_result(
         reply_message,
         route=route,
         source="legacy reply response",
-        prompt_id=run_record.get("id"),
-        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
-        minimum_label="assistant",
+        prompt_id=run_result.record.get("id"),
+        label="assistant",
+        requirement=MESSAGE_REQUIRE_FINAL_ASSISTANT,
     )
-    _require_final_assistant_success_invariants(
-        reply_record,
+    _raise_incomplete_message_schema(
+        reply_result,
         source="legacy reply response",
-        prompt_id=run_record.get("id"),
+        prompt_id=run_result.record.get("id"),
     )
-    raw_status = _message_raw_status(reply_record, default="completed")
+    return _legacy_run_reply_result_from_records(
+        session_id,
+        run_result.record,
+        reply_result.record,
+        api_path=api_path,
+        profile=profile,
+    )
+
+
+def _legacy_run_reply_result_from_records(session_id, run_record, reply_record, *, api_path=None, profile=None):
+    profile = profile or OpenCodeServerProfile.default()
+    raw_status = message_raw_status(reply_record, default="completed")
     status = short_status(raw_status)
     return {
         "session_id": session_id,
@@ -134,18 +139,7 @@ def format_blocking_execution_compact(result):
 
 
 def provider_failure(message, *, route=None):
-    record = normalize_message_record(message, route=route)
-    status = str(_message_raw_status(record, default="") or "").lower()
-    error = record.get("error")
-    if status not in {"failed", "error", "errored"}:
-        if not status and error:
-            if isinstance(error, dict):
-                return error.get("message") or json.dumps(error, sort_keys=True)
-            return str(error)
-        return None
-    if isinstance(error, dict):
-        return error.get("message") or json.dumps(error, sort_keys=True)
-    return error or status
+    return normalize_message_result(message, route=route).provider_failure
 
 
 def _execute_session_message_prompt(client, session_id, prompt, capabilities, profile, timeout, deadline):
@@ -155,18 +149,17 @@ def _execute_session_message_prompt(client, session_id, prompt, capabilities, pr
         kwargs["deadline"] = deadline
     response = client.message_session_response(session_id, prompt, **kwargs)
     route = profile.message_route("blocking_message")
-    assistant_record = _normalize_known_message_record(
+    assistant_result = _known_message_result(
         response.data,
         route=route,
         source="blocking message response",
         prompt_id=message_id,
-        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
-        minimum_label="assistant",
+        label="assistant",
+        requirement=MESSAGE_REQUIRE_FINAL_ASSISTANT,
     )
-    error = provider_failure(assistant_record, route=route)
-    if error:
-        raise BlockingProviderFailure(error, prompt_id=message_id)
-    return _session_message_result(session_id, message_id, assistant_record, capabilities, profile)
+    _raise_provider_failure(assistant_result, prompt_id=message_id)
+    _raise_incomplete_message_schema(assistant_result, source="blocking message response", prompt_id=message_id)
+    return _session_message_result(session_id, message_id, assistant_result.record, capabilities, profile)
 
 
 def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, profile, timeout, deadline):
@@ -175,47 +168,37 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, p
         run_kwargs["deadline"] = deadline
     run_response = client.run_session_response(session_id, prompt, **run_kwargs)
     route = profile.message_route("legacy_run")
-    run_record = _normalize_known_message_record(
+    run_result = _known_message_result(
         run_response.data,
         route=route,
         source="legacy run response",
-        minimum_field_sets=MESSAGE_ID_MINIMUM_FIELD_SETS,
-        minimum_label="user",
-    )
-    error = provider_failure(run_record, route=route)
-    if error:
-        raise BlockingProviderFailure(
-            error,
-            prompt_id=run_record.get("id"),
-        )
-    _require_message_id(
-        run_record,
-        source="legacy run response",
-        prompt_id=None,
         label="user",
+        requirement=MESSAGE_REQUIRE_ID,
     )
+    _raise_provider_failure(run_result, prompt_id=run_result.record.get("id"))
+    _raise_incomplete_message_schema(run_result, source="legacy run response", prompt_id=None)
     reply_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         reply_kwargs["deadline"] = deadline
     reply_response = client.reply_session_response(session_id, **reply_kwargs)
-    reply_record = _normalize_known_message_record(
+    reply_result = _known_message_result(
         reply_response.data,
         route=route,
         source="legacy reply response",
-        prompt_id=run_record.get("id"),
-        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
-        minimum_label="assistant",
+        prompt_id=run_result.record.get("id"),
+        label="assistant",
+        requirement=MESSAGE_REQUIRE_FINAL_ASSISTANT,
     )
-    error = provider_failure(reply_record, route=route)
-    if error:
-        raise BlockingProviderFailure(
-            error,
-            prompt_id=run_record.get("id"),
-        )
-    return legacy_run_reply_result(
+    _raise_provider_failure(reply_result, prompt_id=run_result.record.get("id"))
+    _raise_incomplete_message_schema(
+        reply_result,
+        source="legacy reply response",
+        prompt_id=run_result.record.get("id"),
+    )
+    return _legacy_run_reply_result_from_records(
         session_id,
-        run_record,
-        reply_record,
+        run_result.record,
+        reply_result.record,
         api_path=_legacy_api_path(capabilities),
         profile=profile,
     )
@@ -231,20 +214,8 @@ def _request_timeout(client, timeout, deadline=None):
 
 
 def _session_message_result(session_id, prompt_message_id, assistant_message, capabilities, profile):
-    assistant_record = _normalize_known_message_record(
-        assistant_message,
-        route=profile.message_route("blocking_message"),
-        source="blocking message response",
-        prompt_id=prompt_message_id,
-        minimum_field_sets=FINAL_MESSAGE_MINIMUM_FIELD_SETS,
-        minimum_label="assistant",
-    )
-    _require_final_assistant_success_invariants(
-        assistant_record,
-        source="blocking message response",
-        prompt_id=prompt_message_id,
-    )
-    raw_status = _message_raw_status(assistant_record, default="completed")
+    assistant_record = assistant_message
+    raw_status = message_raw_status(assistant_record, default="completed")
     status = short_status(raw_status)
     return {
         "session_id": session_id,
@@ -268,81 +239,35 @@ def _session_message_result(session_id, prompt_message_id, assistant_message, ca
     }
 
 
-def _message_raw_status(message, *, default=None):
-    return message.get("raw_status") or message.get("status") or default
-
-
-def _normalize_known_message_record(
+def _known_message_result(
     message,
     *,
     route,
     source,
     prompt_id=None,
-    minimum_field_sets=(),
-    minimum_label="message",
+    requirement=None,
+    label="message",
 ):
-    record = normalize_message_record(message, route=route)
-    if record.get("schema_status") == "unknown":
-        failure = f"unrecognized message schema from {source}: {_compact_value(record.get('raw'))}"
+    result = normalize_message_result(message, route=route, requirement=requirement, label=label)
+    if not result.known:
+        failure = f"unrecognized message schema from {source}: {_compact_value(result.record.get('raw'))}"
         raise BlockingProviderFailure(
             failure,
             prompt_id=prompt_id,
         )
-    if minimum_field_sets and not _has_minimum_message_shape(record, minimum_field_sets):
-        _raise_incomplete_message_schema(
-            source,
-            _minimum_message_failure_reason(record, label=minimum_label),
-            prompt_id=prompt_id,
-        )
-    return record
+    return result
 
 
-def _has_minimum_message_shape(record, minimum_field_sets):
-    return any(
-        all(record.get(name) is not None for name in field_set)
-        for field_set in minimum_field_sets
-    )
+def _raise_provider_failure(result, *, prompt_id):
+    if result.provider_failure:
+        raise BlockingProviderFailure(result.provider_failure, prompt_id=prompt_id)
 
 
-def _minimum_message_failure_reason(record, *, label):
-    if not record.get("id"):
-        return f"missing {label} message id"
-    return "missing assistant text or explicit terminal status"
-
-
-def _require_message_id(record, *, source, prompt_id, label):
-    if record.get("id"):
+def _raise_incomplete_message_schema(result, *, source, prompt_id):
+    if not result.incomplete_reason:
         return
-    _raise_incomplete_message_schema(
-        source,
-        f"missing {label} message id",
-        prompt_id=prompt_id,
-    )
-
-
-def _require_final_assistant_success_invariants(record, *, source, prompt_id):
-    _require_message_id(record, source=source, prompt_id=prompt_id, label="assistant")
-    if _has_message_text(record) or _has_explicit_terminal_status(record):
-        return
-    _raise_incomplete_message_schema(
-        source,
-        "missing assistant text or explicit terminal status",
-        prompt_id=prompt_id,
-    )
-
-
-def _has_message_text(record):
-    return record.get("text") not in (None, "")
-
-
-def _has_explicit_terminal_status(record):
-    raw_status = _message_raw_status(record)
-    return raw_status is not None and short_status(raw_status) in TERMINAL_BLOCKING_STATUSES
-
-
-def _raise_incomplete_message_schema(source, reason, *, prompt_id):
     raise BlockingProviderFailure(
-        f"incomplete message schema from {source}: {reason}",
+        f"incomplete message schema from {source}: {result.incomplete_reason}",
         prompt_id=prompt_id,
     )
 
