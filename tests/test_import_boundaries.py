@@ -199,19 +199,15 @@ class ImportBoundaryTest(unittest.TestCase):
 
     def test_worker_lifecycle_reducer_applies_public_transition(self):
         from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
-        from opencode_session.worker_state import (
-            WorkerRecord,
-            mark_worker_active,
-            normalize_worker,
-            worker_output_field,
-        )
+        from opencode_session.worker_state import WorkerRecord, WorkerTransition
 
-        worker = normalize_worker({"id": "review", "prompt": "Review"}, "review")
-        result = apply_worker_transition_to_record(WorkerRecord.from_worker(worker, "review"), mark_worker_active(worker))
+        worker = WorkerRecord.default_fields("review")
+        result = apply_worker_transition_to_record(worker, WorkerTransition.active("review"))
 
         self.assertTrue(result.applied)
-        self.assertEqual(worker_output_field(result.worker, "status"), "active")
-        self.assertEqual(worker_output_field(result.worker, "next_eligible_action"), "wait")
+        output = result.worker.to_output_dict()
+        self.assertEqual(output["status"], "active")
+        self.assertEqual(output["next_eligible_action"], "wait")
 
     def test_worker_state_does_not_own_cli_exit_policy(self):
         blocked = BlockedModuleFinder({"opencode_session.cli_policy"})

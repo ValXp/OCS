@@ -67,9 +67,12 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(retry_worker["retry_count"], 1)
         self.assertEqual(retry_worker["retry_limit"], 1)
         self.assertEqual(retry_worker["retryable_failures"], ["provider"])
+        self.assertEqual(retry_worker["prompt_ids"], ["msg_user_retry"])
         self.assertEqual(retry_worker["last_failure_category"], "provider")
         self.assertEqual(retry_worker["last_failure_reason"], "transient provider outage")
         self.assertIsNone(retry_worker["failure_reason"])
+        self.assertNotIn("error", retry_worker)
+        self.assertNotIn("failure_retryable", retry_worker)
         self.assertEqual(retry_worker["next_eligible_action"], "collect")
         self.assertEqual(retry_worker["result"]["message_ids"], {"user": "msg_user_retry", "assistant": "msg_assistant_1"})
 

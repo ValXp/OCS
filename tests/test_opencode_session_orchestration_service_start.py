@@ -245,6 +245,7 @@ class DependencyOrderedSerialOrchestrationServiceStartTest(unittest.TestCase):
         self.assertEqual(planner.snapshots[-1], ("done", "collect", 1))
         worker = run["workers"]["worker"]
         self.assertEqual(worker_output_field(worker, "status"), "done")
+        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_user_retry"])
         self.assertEqual(worker_field(worker, "retry_count"), 1)
 
     def test_start_persists_active_attempt_before_provider_call(self):

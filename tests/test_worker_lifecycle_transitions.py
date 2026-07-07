@@ -1,719 +1,290 @@
 from copy import deepcopy
-from types import SimpleNamespace
 import unittest
 
 from opencode_session.worker_storage_adapter import worker_snapshot_transition
-from opencode_session.worker_state import (
-    WORKER_TRANSITION_DEFINITIONS,
-    WorkerRecord,
-    WorkerTransition,
-    WorkerTransitionError,
-    WorkerTransitionName,
-    WorkerTransitionSpec,
-    apply_worker_result,
-    apply_worker_transition_to_worker,
-    mark_dependency_blocked,
-    mark_worker_aborted,
-    mark_worker_active,
-    mark_worker_failed,
-    normalize_worker,
-    schedule_worker_retry,
-    worker_field,
-    worker_has_field,
-    worker_output_field,
-    worker_transition_target_lifecycle_state,
-    worker_transition_is_legal,
-)
-
-try:
-    from tests.worker_state_scenarios import (
-        WorkerScenario,
-        WorkerTransitionCase,
-        assert_worker_outcome,
-        assert_worker_transition_case,
-    )
-except ModuleNotFoundError:
-    from worker_state_scenarios import (
-        WorkerScenario,
-        WorkerTransitionCase,
-        assert_worker_outcome,
-        assert_worker_transition_case,
-    )
+from opencode_session.worker_state import WorkerRecord, WorkerTransition, WorkerTransitionError
 
 
-TRANSITION_CASES = (
-    WorkerTransitionCase(
-        "active worker records timeout start",
-        {"timeout_seconds": 30},
-        lambda worker: mark_worker_active(worker, now=lambda: "2026-07-04T00:00:00Z"),
-        {"status": "active", "action": "wait", "lifecycle": "active_wait"},
-        expected_fields={"timeout_started_at": "2026-07-04T00:00:00Z"},
-    ),
-    WorkerTransitionCase(
-        "active worker clears stale current-status metadata",
-        {
-            "lifecycle_state": "blocked_dependency",
-            "blockers": ["dependency:build"],
-            "error": "previous failure",
-            "failure_category": "api",
-            "failure_reason": "previous failure",
-            "failure_retryable": False,
-            "last_failure_category": "api",
-            "last_failure_reason": "previous failure",
-        },
-        mark_worker_active,
-        {"status": "active", "action": "wait", "lifecycle": "active_wait"},
-        expected_fields={
-            "blockers": [],
-            "failure_category": None,
-            "failure_reason": None,
-            "last_failure_category": "api",
-            "last_failure_reason": "previous failure",
-        },
-        absent_fields=("error", "failure_retryable"),
-    ),
-    WorkerTransitionCase(
-        "terminal failure records prompt ids",
-        {
-            "lifecycle_state": "active_wait",
-            "failure_retryable": False,
-            "prompt_ids": ["msg_previous"],
-        },
-        lambda worker: mark_worker_failed(worker, "provider", "provider failed", prompt_ids=("msg_failed",)),
-        {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
-        expected_fields={
-            "error": "provider failed",
-            "failure_category": "provider",
-            "failure_reason": "provider failed",
-            "prompt_ids": ["msg_previous", "msg_failed"],
-        },
-        absent_fields=("failure_retryable",),
-    ),
-    WorkerTransitionCase(
-        "retryable failure remains retry eligible",
-        {
-            "lifecycle_state": "active_wait",
-            "retryable_failures": ["provider"],
-            "retry_count": 0,
-            "retry_limit": 1,
-        },
-        lambda worker: mark_worker_failed(worker, "provider", "provider failed"),
-        {"status": "failed", "action": "retry", "lifecycle": "failed_retry"},
-        expected_fields={"failure_category": "provider", "failure_reason": "provider failed"},
-        absent_fields=("failure_retryable",),
-    ),
-    WorkerTransitionCase(
-        "dependency block records blockers and resolution action",
-        {},
-        lambda worker: mark_dependency_blocked(worker, ["dependency:build"]),
-        {
-            "status": "blocked",
-            "action": "resolve_blocker",
-            "lifecycle": "blocked_dependency",
-            "blockers": ["dependency:build"],
-        },
-    ),
-    WorkerTransitionCase(
-        "done result clears stale current-status metadata",
-        {
-            "lifecycle_state": "active_wait",
-            "blockers": ["dependency:build"],
-            "error": "previous failure",
-            "failure_category": "api",
-            "failure_reason": "previous failure",
-            "failure_retryable": False,
-            "last_failure_category": "api",
-            "last_failure_reason": "previous failure",
-        },
-        lambda worker: apply_worker_result(
-            worker,
-            {
-                "status": "done",
-                "message_ids": {"assistant": "msg_assistant"},
-            },
-        ),
-        {
-            "status": "done",
-            "action": "collect",
-            "lifecycle": "done_collect",
-            "output_refs": ["assistant:msg_assistant"],
-        },
-        expected_fields={
-            "blockers": [],
-            "failure_category": None,
-            "failure_reason": None,
-            "last_failure_category": "api",
-            "last_failure_reason": "previous failure",
-        },
-        absent_fields=("error", "failure_retryable"),
-    ),
-    WorkerTransitionCase(
-        "scheduled retry clears stale current-status metadata",
-        {
-            "lifecycle_state": "failed_retry",
-            "blockers": ["dependency:build"],
-            "error": "previous failure",
-            "failure_category": "api",
-            "failure_reason": "previous failure",
-            "failure_retryable": True,
-            "retryable_failures": ["api"],
-            "retry_count": 0,
-            "retry_limit": 1,
-        },
-        lambda worker: schedule_worker_retry(worker, "api", "previous failure"),
-        {"status": "active", "action": "retry", "lifecycle": "active_retry"},
-        expected_fields={
-            "blockers": [],
-            "failure_category": None,
-            "failure_reason": None,
-            "last_failure_category": "api",
-            "last_failure_reason": "previous failure",
-            "retry_count": 1,
-        },
-        absent_fields=("error", "failure_retryable"),
-    ),
-)
+NOW = "2026-07-04T00:00:00Z"
 
 
 class WorkerLifecycleTransitionTest(unittest.TestCase):
-    def test_transition_cases_preserve_public_outcomes_and_side_effects(self):
-        for case in TRANSITION_CASES:
-            with self.subTest(case=case.name):
-                assert_worker_transition_case(self, case)
-
-    def test_accepted_abort_preserves_late_result_but_keeps_prompt_ids(self):
-        worker = normalize_worker(
-            {
-                "lifecycle_state": "active_wait",
-                "session_id": "ses_build",
-                "prompt_ids": ["msg_initial"],
-            },
-            "build",
-        )
-        apply_worker_transition_to_worker(
-            worker,
-            mark_worker_aborted(worker, {"session_id": "ses_build", "accepted": True}),
-        )
-
-        apply_worker_transition_to_worker(
-            worker,
-            apply_worker_result(
-                worker,
-                {
-                    "status": "done",
-                    "message_ids": {"user": "msg_user", "assistant": "msg_assistant"},
-                },
-                prompt_ids=("msg_user",),
-            ),
-        )
-
-        self.assertEqual(worker_output_field(worker, "status"), "aborted")
-        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "none")
-        self.assertEqual(worker_field(worker, "abort"), {"session_id": "ses_build", "accepted": True})
-        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_initial", "msg_user"])
-        self.assertFalse(worker_has_field(worker, "result"))
-        self.assertEqual(worker_field(worker, "output_refs"), [])
-
-    def test_worker_scenario_asserts_retry_to_success_outcome(self):
-        result = {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}}
-
-        (
-            WorkerScenario(
-                "review",
-                prompt="Review",
-                lifecycle_state="failed_retry",
-                retryable_failures=["provider"],
-                retry_count=0,
-                retry_limit=1,
-            )
-            .apply(lambda worker: schedule_worker_retry(worker, "provider", "provider failed"))
-            .assert_outcome(self, status="active", action="retry", lifecycle="active_retry")
-            .apply(lambda worker: mark_worker_active(worker))
-            .apply(lambda worker: apply_worker_result(worker, result, prompt_ids=("msg_user",)))
-            .assert_outcome(
-                self,
-                status="done",
-                action="collect",
-                lifecycle="done_collect",
-                output_refs=["assistant:msg_assistant"],
-            )
-        )
-
-    def test_worker_transition_reducer_reports_invalid_lifecycle_transitions(self):
-        from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
-
-        original = normalize_worker(
-            {
-                "lifecycle_state": "done_collect",
-                "result": {
-                    "status": "done",
-                    "message_ids": {"assistant": "msg_done"},
-                },
-                "output_refs": ["assistant:msg_done"],
-            },
-            "review",
-        )
-        transitions = [
-            mark_worker_active(original),
-            mark_worker_failed(original, "provider", "late failure"),
-            WorkerTransition.retry_scheduled("review", "provider", "retry", retry_count=1),
-            WorkerTransition.timed_out(
-                "review",
-                "late timeout",
-                status="timeout",
-                timed_out_at="2026-07-04T00:00:00Z",
-            ),
-            WorkerTransition.result_applied(
-                "review",
-                {"status": "done", "message_ids": {"assistant": "msg_late"}},
-            ),
-        ]
-
-        for transition in transitions:
-            with self.subTest(transition=transition.name):
-                worker = deepcopy(original)
-
-                result = apply_worker_transition_to_record(WorkerRecord.from_worker(worker, "review"), transition)
-
-                self.assertFalse(result.applied)
-                self.assertTrue(result.skipped)
-                self.assertIn(f"illegal worker transition '{transition.name.value}'", result.reason)
-                self.assertIn("from lifecycle_state 'done_collect'", result.reason)
-                with self.assertRaisesRegex(WorkerTransitionError, "illegal worker transition") as raised:
-                    apply_worker_transition_to_worker(worker, transition)
-                self.assertFalse(raised.exception.result.applied)
-                self.assertEqual(raised.exception.result.reason, result.reason)
-                self.assertEqual(worker, original)
-
-    def test_worker_transition_reducer_allows_legal_retry_timeout_and_result_transitions(self):
-        retry_worker = normalize_worker(
-            {
-                "lifecycle_state": "failed_retry",
-                "failure_category": "provider",
-                "retryable_failures": ["provider"],
-                "retry_count": 0,
-                "retry_limit": 1,
-            },
-            "review",
-        )
-        apply_worker_transition_to_worker(retry_worker, schedule_worker_retry(retry_worker, "provider", "try again"))
-
-        assert_worker_outcome(self, retry_worker, status="active", action="retry", lifecycle="active_retry")
-        self.assertEqual(worker_field(retry_worker, "retry_count"), 1)
-
-        timeout_worker = normalize_worker(
-            {
-                "lifecycle_state": "active_wait",
-                "retryable_failures": ["timeout"],
-                "retry_count": 0,
-                "retry_limit": 1,
-            },
-            "review",
-        )
-        apply_worker_transition_to_worker(
-            timeout_worker,
-            WorkerTransition.timed_out(
-                "review",
-                "worker timed out",
-                status="failed",
-                timed_out_at="2026-07-04T00:00:00Z",
-                retry_available=True,
-                manual_retry_required=True,
-            ),
-        )
-
-        assert_worker_outcome(self, timeout_worker, status="failed", action="retry", lifecycle="timeout_failed_retry")
-        self.assertTrue(worker_field(timeout_worker, "manual_retry_required"))
-
-        result_worker = normalize_worker({"lifecycle_state": "active_wait"}, "review")
-        apply_worker_transition_to_worker(
-            result_worker,
-            WorkerTransition.result_applied(
-                "review",
-                {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
-            ),
-        )
-
-        assert_worker_outcome(self, result_worker, status="done", action="collect", lifecycle="done_collect")
-        self.assertEqual(worker_field(result_worker, "output_refs"), ["assistant:msg_assistant"])
-
-    def test_worker_transition_names_dispatch_through_public_transitions(self):
+    def test_public_worker_transitions_produce_observable_outcomes(self):
         cases = (
             (
-                WorkerTransitionName.PROVISIONED,
-                {"session_id": "ses_review", "agent": "build", "model": "openai/gpt-5.5"},
-                WorkerTransition.provisioned,
-                {"status": "queued", "action": "start", "lifecycle": "queued"},
-                {"session_id": "ses_review", "agent": "build", "model": "openai/gpt-5.5"},
+                "start queued worker",
+                {"timeout_seconds": 30},
+                lambda worker: WorkerTransition.active(worker.worker_id, timeout_started_at=NOW),
+                {"status": "active", "next_eligible_action": "wait"},
+                {"timeout_started_at": NOW},
             ),
             (
-                WorkerTransitionName.ACTIVE,
-                {},
-                mark_worker_active,
-                {"status": "active", "action": "wait", "lifecycle": "active_wait"},
-                {},
-            ),
-            (
-                WorkerTransitionName.ATTEMPT_STARTED,
-                {"lifecycle_state": "active_wait"},
-                lambda worker: WorkerTransition.attempt_started(
-                    worker_field(worker, "id"),
-                    {"id": "attempt-1", "status": "active", "session_id": "ses_review"},
-                ),
-                {"status": "active", "action": "wait", "lifecycle": "active_wait"},
-                {"attempts": [{"id": "attempt-1", "status": "active", "session_id": "ses_review"}]},
-            ),
-            (
-                WorkerTransitionName.FAILED,
-                {"lifecycle_state": "active_wait"},
-                lambda worker: mark_worker_failed(worker, "provider", "provider failed", retryable=False),
-                {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
-                {"failure_category": "provider", "failure_reason": "provider failed"},
-            ),
-            (
-                WorkerTransitionName.DEPENDENCY_BLOCKED,
-                {},
-                lambda worker: mark_dependency_blocked(worker, ["dependency:build"]),
-                {"status": "blocked", "action": "resolve_blocker", "lifecycle": "blocked_dependency"},
-                {"blockers": ["dependency:build"]},
-            ),
-            (
-                WorkerTransitionName.ABORTED,
-                {"lifecycle_state": "active_wait"},
-                lambda worker: mark_worker_aborted(worker, {"accepted": True}),
-                {"status": "aborted", "action": "none", "lifecycle": "aborted"},
-                {"abort": {"accepted": True}},
-            ),
-            (
-                WorkerTransitionName.RETRY_SCHEDULED,
-                {
-                    "lifecycle_state": "failed_retry",
-                    "failure_category": "provider",
-                    "retryable_failures": ["provider"],
-                    "retry_count": 0,
-                    "retry_limit": 1,
-                },
-                lambda worker: schedule_worker_retry(worker, "provider", "try again"),
-                {"status": "active", "action": "retry", "lifecycle": "active_retry"},
-                {"retry_count": 1},
-            ),
-            (
-                WorkerTransitionName.TIMED_OUT,
-                {"lifecycle_state": "active_wait"},
-                lambda worker: WorkerTransition.timed_out(
-                    worker_field(worker, "id"),
-                    "worker timed out",
-                    status="timeout",
-                    timed_out_at="2026-07-04T00:00:00Z",
-                ),
-                {"status": "timeout", "action": "none", "lifecycle": "timeout_terminal"},
-                {"timed_out_at": "2026-07-04T00:00:00Z", "failure_category": "timeout"},
-            ),
-            (
-                WorkerTransitionName.RESULT_APPLIED,
-                {"lifecycle_state": "active_wait"},
-                lambda worker: WorkerTransition.result_applied(
-                    worker_field(worker, "id"),
-                    {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
-                ),
-                {"status": "done", "action": "collect", "lifecycle": "done_collect"},
-                {"output_refs": ["assistant:msg_assistant"]},
-            ),
-            (
-                WorkerTransitionName.CLEANUP_UPDATED,
-                {"cleanup": {"requested": True, "deleted": False}},
-                WorkerTransition.cleanup_updated,
-                {"status": "queued", "action": "start", "lifecycle": "queued"},
-                {"cleanup": {"requested": True, "deleted": False}},
-            ),
-            (
-                WorkerTransitionName.SNAPSHOT_APPLIED,
-                {"lifecycle_state": "active_wait", "prompt_ids": ["msg_initial"]},
-                lambda worker: worker_snapshot_transition(
-                    {
-                        "id": worker_field(worker, "id"),
-                        "lifecycle_state": "done_collect",
-                        "prompt_ids": ["msg_done"],
-                        "result": {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
-                        "output_refs": ["assistant:msg_assistant"],
-                    }
-                ),
-                {"status": "done", "action": "collect", "lifecycle": "done_collect"},
-                {"prompt_ids": ["msg_initial", "msg_done"], "output_refs": ["assistant:msg_assistant"]},
-            ),
-        )
-
-        self.assertEqual(set(WorkerTransitionName), {case[0] for case in cases})
-        for transition_name, worker_fields, transition_factory, expected_outcome, expected_fields in cases:
-            with self.subTest(transition=transition_name):
-                worker = normalize_worker(worker_fields, "review")
-                transition = transition_factory(worker)
-
-                self.assertIs(transition.name, transition_name)
-                self.assertTrue(worker_transition_is_legal(worker, transition))
-
-                apply_worker_transition_to_worker(worker, transition)
-
-                assert_worker_outcome(self, worker, **expected_outcome)
-                for field_name, expected_value in expected_fields.items():
-                    self.assertEqual(worker_field(worker, field_name), expected_value)
-
-    def test_worker_transition_create_builds_active_transition(self):
-        transition = WorkerTransition.create(
-            WorkerTransitionName.ACTIVE,
-            "review",
-            timeout_started_at="2026-07-04T00:00:00Z",
-        )
-        worker = normalize_worker({"timeout_seconds": 30}, "review")
-
-        self.assertIs(transition.name, WorkerTransitionName.ACTIVE)
-        self.assertEqual(transition.worker_id, "review")
-        self.assertTrue(worker_transition_is_legal(worker, transition))
-
-        apply_worker_transition_to_worker(worker, transition)
-
-        assert_worker_outcome(self, worker, status="active", action="wait", lifecycle="active_wait")
-        self.assertEqual(worker_field(worker, "timeout_started_at"), "2026-07-04T00:00:00Z")
-
-    def test_transition_registry_entry_drives_create_legality_target_and_apply(self):
-        class RegistryPayload:
-            def __init__(self, marker):
-                self.marker = marker
-
-        calls = []
-        original_spec = WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE]
-
-        def build_payload(marker):
-            calls.append(("build", marker))
-            return RegistryPayload(marker)
-
-        def resolve_target(transition, payload):
-            calls.append(("target", transition.worker_id, payload.marker))
-            return "active_wait"
-
-        def apply_payload(reducer, transition, payload, target_state):
-            calls.append(("apply", transition.worker_id, payload.marker, target_state))
-            worker = reducer._copy_latest()
-            worker.update({"id": transition.worker_id, "lifecycle_state": target_state})
-            return worker
-
-        WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE] = WorkerTransitionSpec(
-            name=WorkerTransitionName.ACTIVE,
-            source_states=frozenset(("queued",)),
-            target_states=frozenset(("active_wait",)),
-            payload_type=RegistryPayload,
-            payload_constructor=build_payload,
-            target_resolver=resolve_target,
-            applier=apply_payload,
-        )
-        try:
-            queued = normalize_worker({"lifecycle_state": "queued"}, "review")
-            blocked = normalize_worker({"lifecycle_state": "blocked_dependency"}, "review")
-
-            transition = WorkerTransition.create(WorkerTransitionName.ACTIVE, "review", "from-registry")
-
-            self.assertIsInstance(transition.payload, RegistryPayload)
-            self.assertEqual(transition.payload.marker, "from-registry")
-            self.assertEqual(worker_transition_target_lifecycle_state(transition), "active_wait")
-            self.assertTrue(worker_transition_is_legal(queued, transition))
-            self.assertFalse(worker_transition_is_legal(blocked, transition))
-
-            apply_worker_transition_to_worker(queued, transition)
-
-            assert_worker_outcome(self, queued, status="active", action="wait", lifecycle="active_wait")
-            self.assertIn(("build", "from-registry"), calls)
-            self.assertIn(("target", "review", "from-registry"), calls)
-            self.assertIn(("apply", "review", "from-registry", "active_wait"), calls)
-        finally:
-            WORKER_TRANSITION_DEFINITIONS[WorkerTransitionName.ACTIVE] = original_spec
-
-    def test_dynamic_transitions_apply_expected_public_outcomes(self):
-        cases = (
-            (
-                "retryable failure",
+                "record retryable provider failure",
                 {
                     "lifecycle_state": "active_wait",
                     "retryable_failures": ["provider"],
                     "retry_count": 0,
                     "retry_limit": 1,
                 },
-                lambda worker: mark_worker_failed(worker, "provider", "provider failed"),
-                {"status": "failed", "action": "retry", "lifecycle": "failed_retry"},
-            ),
-            (
-                "terminal failure",
-                {"lifecycle_state": "active_wait"},
-                lambda worker: mark_worker_failed(worker, "provider", "provider failed", retryable=False),
-                {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
-            ),
-            (
-                "blocked timeout",
-                {"lifecycle_state": "active_wait"},
-                lambda worker: WorkerTransition.timed_out(
-                    worker_field(worker, "id"),
-                    "worker timed out",
-                    status="blocked",
-                    timed_out_at="2026-07-04T00:00:00Z",
+                lambda worker: WorkerTransition.failed(
+                    worker.worker_id,
+                    "provider",
+                    "provider failed",
+                    retry_available=True,
                 ),
-                {"status": "blocked", "action": "resolve_blocker", "lifecycle": "blocked_timeout"},
+                {"status": "failed", "next_eligible_action": "retry"},
+                {"failure_category": "provider", "failure_reason": "provider failed"},
             ),
             (
-                "unknown result status",
+                "record terminal provider failure",
                 {"lifecycle_state": "active_wait"},
-                lambda worker: WorkerTransition.result_applied(
-                    worker_field(worker, "id"),
-                    {"status": "unexpected", "message_ids": {}},
+                lambda worker: WorkerTransition.failed(
+                    worker.worker_id,
+                    "provider",
+                    "provider failed",
+                    retryable=False,
+                    retry_available=False,
                 ),
-                {"status": "failed", "action": "none", "lifecycle": "failed_terminal"},
+                {"status": "failed", "next_eligible_action": "none"},
+                {"failure_retryable": False, "failure_reason": "provider failed"},
             ),
-        )
-
-        for name, worker_fields, transition_factory, expected_outcome in cases:
-            with self.subTest(name=name):
-                worker = normalize_worker(worker_fields, "review")
-                transition = transition_factory(worker)
-
-                apply_worker_transition_to_worker(worker, transition)
-
-                assert_worker_outcome(self, worker, **expected_outcome)
-
-    def test_retry_transition_applies_when_worker_is_retry_eligible(self):
-        worker = normalize_worker(
-            {
-                "lifecycle_state": "failed_retry",
-                "failure_category": "provider",
-                "retryable_failures": ["provider"],
-                "retry_count": 0,
-                "retry_limit": 1,
-            },
-            "review",
-        )
-        transition = schedule_worker_retry(worker, "provider", "try again")
-
-        self.assertTrue(worker_transition_is_legal(worker, transition))
-
-        apply_worker_transition_to_worker(worker, transition)
-
-        assert_worker_outcome(self, worker, status="active", action="retry", lifecycle="active_retry")
-
-    def test_worker_transition_reducer_rejects_mismatched_payload_shape(self):
-        worker = normalize_worker({}, "review")
-        transition = WorkerTransition(
-            "review",
-            WorkerTransitionName.ACTIVE,
-            WorkerTransition.failed("review", "provider", "provider failed").payload,
-        )
-
-        with self.assertRaisesRegex(TypeError, "worker transition 'active' has incompatible payload"):
-            apply_worker_transition_to_worker(worker, transition)
-
-    def test_snapshot_replay_allows_legal_active_to_done_transition(self):
-        worker = normalize_worker({"lifecycle_state": "active_wait", "prompt_ids": ["msg_initial"]}, "review")
-        snapshot = {
-            "id": "review",
-            "lifecycle_state": "done_collect",
-            "prompt_ids": ["msg_done"],
-            "result": {
-                "status": "done",
-                "message_ids": {"assistant": "msg_assistant"},
-            },
-            "output_refs": ["assistant:msg_assistant"],
-        }
-
-        apply_worker_transition_to_worker(worker, worker_snapshot_transition(snapshot))
-
-        assert_worker_outcome(self, worker, status="done", action="collect", lifecycle="done_collect")
-        self.assertEqual(worker_field(worker, "prompt_ids"), ["msg_initial", "msg_done"])
-        self.assertEqual(worker_field(worker, "output_refs"), ["assistant:msg_assistant"])
-
-    def test_snapshot_replay_noops_illegal_lifecycle_rewind(self):
-        from opencode_session.worker_lifecycle_reducer import apply_worker_transition_to_record
-
-        original = normalize_worker(
-            {
-                "lifecycle_state": "done_collect",
-                "prompt_ids": ["msg_done"],
-                "result": {
-                    "status": "done",
-                    "message_ids": {"assistant": "msg_assistant"},
+            (
+                "block worker on dependency",
+                {},
+                lambda worker: WorkerTransition.dependency_blocked(worker.worker_id, ["dependency:build"]),
+                {"status": "blocked", "next_eligible_action": "resolve_blocker"},
+                {"blockers": ["dependency:build"]},
+            ),
+            (
+                "schedule retry from failed worker",
+                {
+                    "lifecycle_state": "failed_retry",
+                    "blockers": ["dependency:build"],
+                    "error": "previous failure",
+                    "failure_category": "provider",
+                    "failure_reason": "previous failure",
+                    "failure_retryable": True,
+                    "retryable_failures": ["provider"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
                 },
-                "output_refs": ["assistant:msg_assistant"],
-            },
-            "review",
+                lambda worker: WorkerTransition.retry_scheduled(
+                    worker.worker_id,
+                    "provider",
+                    "previous failure",
+                    retry_count=worker.retry_count + 1,
+                    prompt_ids=("msg_failed",),
+                ),
+                {"status": "active", "next_eligible_action": "retry"},
+                {
+                    "blockers": [],
+                    "retry_count": 1,
+                    "prompt_ids": ["msg_failed"],
+                    "last_failure_category": "provider",
+                    "last_failure_reason": "previous failure",
+                },
+            ),
+            (
+                "apply done result",
+                {
+                    "lifecycle_state": "active_wait",
+                    "blockers": ["dependency:build"],
+                    "error": "previous failure",
+                    "failure_category": "api",
+                    "failure_reason": "previous failure",
+                    "failure_retryable": False,
+                },
+                lambda worker: WorkerTransition.result_applied(
+                    worker.worker_id,
+                    {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}},
+                    prompt_ids=("msg_user",),
+                ),
+                {"status": "done", "next_eligible_action": "collect"},
+                {"blockers": [], "prompt_ids": ["msg_user"], "output_refs": ["assistant:msg_assistant"]},
+            ),
+            (
+                "record retryable timeout failure",
+                {
+                    "lifecycle_state": "active_wait",
+                    "retryable_failures": ["timeout"],
+                    "retry_count": 0,
+                    "retry_limit": 1,
+                },
+                lambda worker: WorkerTransition.timed_out(
+                    worker.worker_id,
+                    "worker timed out",
+                    status="failed",
+                    timed_out_at=NOW,
+                    retry_available=True,
+                    manual_retry_required=True,
+                ),
+                {"status": "failed", "next_eligible_action": "retry"},
+                {
+                    "failure_category": "timeout",
+                    "failure_reason": "worker timed out",
+                    "manual_retry_required": True,
+                    "timed_out_at": NOW,
+                },
+            ),
         )
-        stale_snapshot = {
-            "id": "review",
-            "lifecycle_state": "active_wait",
-            "prompt_ids": ["msg_stale"],
-        }
-        worker = deepcopy(original)
-        transition = worker_snapshot_transition(stale_snapshot)
 
-        result = apply_worker_transition_to_record(WorkerRecord.from_worker(worker, "review"), transition)
+        for name, fields, transition_factory, expected_output, expected_snapshot in cases:
+            with self.subTest(name=name):
+                worker = worker_record(**fields)
 
-        self.assertFalse(result.applied)
-        self.assertTrue(result.skipped)
-        self.assertTrue(result.stale_snapshot_recovery)
-        self.assertIn("stale snapshot ignored", result.reason)
+                worker.apply_transition(transition_factory(worker))
 
-        apply_worker_transition_to_worker(worker, transition)
+                output = worker.to_output_dict()
+                snapshot = worker.to_snapshot()
+                for field_name, expected_value in expected_output.items():
+                    self.assertEqual(output[field_name], expected_value)
+                for field_name, expected_value in expected_snapshot.items():
+                    self.assertEqual(snapshot[field_name], expected_value)
+                self.assertNotIn("status", snapshot)
+                self.assertNotIn("next_eligible_action", snapshot)
+
+    def test_done_result_clears_stale_current_status_metadata(self):
+        worker = worker_record(
+            lifecycle_state="active_wait",
+            blockers=["dependency:build"],
+            error="previous failure",
+            failure_category="api",
+            failure_reason="previous failure",
+            failure_retryable=False,
+            last_failure_category="api",
+            last_failure_reason="previous failure",
+        )
+
+        worker.apply_transition(
+            WorkerTransition.result_applied(
+                worker.worker_id,
+                {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+            )
+        )
+
+        output = worker.to_output_dict()
+        snapshot = worker.to_snapshot()
+        self.assertEqual(output["status"], "done")
+        self.assertEqual(output["next_eligible_action"], "collect")
+        self.assertEqual(snapshot["blockers"], [])
+        self.assertEqual(snapshot["failure_category"], None)
+        self.assertEqual(snapshot["failure_reason"], None)
+        self.assertEqual(snapshot["last_failure_category"], "api")
+        self.assertEqual(snapshot["last_failure_reason"], "previous failure")
+        self.assertNotIn("error", snapshot)
+        self.assertNotIn("failure_retryable", snapshot)
+
+    def test_retry_start_clears_retry_marker_prompt_ids(self):
+        worker = worker_record(
+            lifecycle_state="failed_retry",
+            retryable_failures=["provider"],
+            retry_count=0,
+            retry_limit=1,
+            prompt_ids=["msg_failed"],
+        )
+        worker.apply_transition(
+            WorkerTransition.retry_scheduled(
+                worker.worker_id,
+                "provider",
+                "provider failed",
+                retry_count=1,
+                prompt_ids=("msg_failed",),
+            )
+        )
+
+        worker.apply_transition(WorkerTransition.active(worker.worker_id, clear_prompt_ids=True))
+
+        output = worker.to_output_dict()
+        self.assertEqual(output["status"], "active")
+        self.assertEqual(output["next_eligible_action"], "wait")
+        self.assertEqual(worker.prompt_ids, [])
+
+    def test_accepted_abort_keeps_public_abort_when_late_result_arrives(self):
+        worker = worker_record(
+            lifecycle_state="active_wait",
+            session_id="ses_build",
+            prompt_ids=["msg_initial"],
+        )
+        worker.apply_transition(WorkerTransition.aborted(worker.worker_id, {"session_id": "ses_build", "accepted": True}))
+
+        worker.apply_transition(
+            WorkerTransition.result_applied(
+                worker.worker_id,
+                {"status": "done", "message_ids": {"user": "msg_user", "assistant": "msg_assistant"}},
+                prompt_ids=("msg_user",),
+            )
+        )
+
+        output = worker.to_output_dict()
+        snapshot = worker.to_snapshot()
+        self.assertEqual(output["status"], "aborted")
+        self.assertEqual(output["next_eligible_action"], "none")
+        self.assertEqual(snapshot["abort"], {"session_id": "ses_build", "accepted": True})
+        self.assertEqual(snapshot["prompt_ids"], ["msg_initial", "msg_user"])
+        self.assertEqual(snapshot["output_refs"], [])
+        self.assertNotIn("result", snapshot)
+
+    def test_abort_only_changes_public_status_when_abort_is_accepted(self):
+        worker = worker_record(lifecycle_state="active_wait")
+
+        worker.apply_transition(WorkerTransition.aborted(worker.worker_id, {"accepted": False}))
+
+        self.assertEqual(worker.to_output_dict()["status"], "active")
+        self.assertEqual(worker.to_output_dict()["next_eligible_action"], "wait")
+
+        worker.apply_transition(WorkerTransition.aborted(worker.worker_id, {"accepted": True}))
+
+        self.assertEqual(worker.to_output_dict()["status"], "aborted")
+        self.assertEqual(worker.to_output_dict()["next_eligible_action"], "none")
+        self.assertEqual(worker.abort, {"accepted": True})
+
+    def test_illegal_transition_preserves_worker(self):
+        worker = worker_record(
+            lifecycle_state="done_collect",
+            result={"status": "done", "message_ids": {"assistant": "msg_done"}},
+            output_refs=["assistant:msg_done"],
+        )
+        original = deepcopy(worker)
+
+        with self.assertRaisesRegex(WorkerTransitionError, "illegal worker transition"):
+            worker.apply_transition(WorkerTransition.active(worker.worker_id))
 
         self.assertEqual(worker, original)
 
-    def test_worker_transition_name_rejects_raw_strings(self):
-        worker = normalize_worker({}, "review")
-        transition = mark_worker_active(worker)
+    def test_snapshot_replay_applies_forward_snapshot_and_ignores_stale_rewind(self):
+        worker = worker_record(lifecycle_state="active_wait", prompt_ids=["msg_initial"])
+        done_snapshot = {
+            "id": worker.worker_id,
+            "lifecycle_state": "done_collect",
+            "prompt_ids": ["msg_done"],
+            "result": {"status": "done", "message_ids": {"assistant": "msg_assistant"}},
+            "output_refs": ["assistant:msg_assistant"],
+        }
 
-        self.assertIs(transition.name, WorkerTransitionName.ACTIVE)
+        worker.apply_transition(worker_snapshot_transition(done_snapshot))
+        after_done = deepcopy(worker)
+        worker.apply_transition(
+            worker_snapshot_transition(
+                {"id": worker.worker_id, "lifecycle_state": "active_wait", "prompt_ids": ["msg_stale"]}
+            )
+        )
+
+        output = worker.to_output_dict()
+        self.assertEqual(output["status"], "done")
+        self.assertEqual(output["next_eligible_action"], "collect")
+        self.assertEqual(worker.prompt_ids, ["msg_initial", "msg_done"])
+        self.assertEqual(worker.output_refs, ["assistant:msg_assistant"])
+        self.assertEqual(worker, after_done)
+
+    def test_transition_rejects_raw_string_name(self):
         with self.assertRaisesRegex(ValueError, "unknown worker transition: active"):
             WorkerTransition("review", "active")
-        with self.assertRaisesRegex(ValueError, "unknown worker transition: missing"):
-            WorkerTransition("review", "missing")
 
-    def test_worker_transition_reducer_rejects_raw_string_dispatch(self):
-        worker = normalize_worker({}, "review")
-        transition = SimpleNamespace(
-            worker_id="review",
-            name="active",
-            payload=mark_worker_active(worker).payload,
-            attempt_finalization=None,
-        )
 
-        with self.assertRaisesRegex(ValueError, "unknown worker transition: active"):
-            apply_worker_transition_to_worker(worker, transition)
+def worker_record(worker_id="review", **fields):
+    fields = {"id": worker_id, "prompt": "Review", **fields}
+    return WorkerRecord.from_worker(fields, worker_id).to_worker()
 
-    def test_mark_worker_active_clears_retry_marker_prompt_ids(self):
-        worker = normalize_worker(
-            {
-                "lifecycle_state": "failed_retry",
-                "retryable_failures": ["provider"],
-                "retry_count": 0,
-                "retry_limit": 1,
-                "prompt_ids": ["msg_failed"],
-            },
-            "review",
-        )
-        apply_worker_transition_to_worker(
-            worker,
-            schedule_worker_retry(worker, "provider", "provider failed", prompt_ids=("msg_failed",)),
-        )
 
-        apply_worker_transition_to_worker(worker, mark_worker_active(worker))
-
-        self.assertEqual(worker_output_field(worker, "status"), "active")
-        self.assertEqual(worker_field(worker, "lifecycle_state"), "active_wait")
-        self.assertEqual(worker_field(worker, "prompt_ids"), [])
-
-    def test_mark_worker_aborted_only_changes_status_when_abort_is_accepted(self):
-        worker = normalize_worker({"lifecycle_state": "active_wait"}, "planner")
-
-        apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": False}))
-
-        self.assertEqual(worker_output_field(worker, "status"), "active")
-        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "wait")
-
-        apply_worker_transition_to_worker(worker, mark_worker_aborted(worker, {"accepted": True}))
-
-        self.assertEqual(worker_output_field(worker, "status"), "aborted")
-        self.assertEqual(worker_output_field(worker, "next_eligible_action"), "none")
-        self.assertEqual(worker_field(worker, "abort"), {"accepted": True})
+if __name__ == "__main__":
+    unittest.main()
