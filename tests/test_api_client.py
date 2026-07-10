@@ -33,6 +33,33 @@ class ApiClientTransportErrorTest(unittest.TestCase):
             with self.assertRaises(TimeoutExpired):
                 list(client.stream_events("/api/event", deadline=TimeoutDeadline(5)))
 
+    def test_request_maps_pre_python_310_socket_timeout_to_api_timeout(self):
+        class LegacySocketTimeout(OSError):
+            pass
+
+        client = OpenCodeApiClient("http://127.0.0.1:4096")
+        timeout_errors = (TimeoutError, LegacySocketTimeout)
+
+        with patch("opencode_session.api_transport._TIMEOUT_EXCEPTIONS", timeout_errors):
+            with patch("opencode_session.api_transport.urlopen", side_effect=LegacySocketTimeout("timed out")):
+                with self.assertRaises(OpenCodeApiTimeoutError):
+                    client.get_response("/health")
+
+    def test_stream_maps_pre_python_310_url_socket_timeout_to_deadline_timeout(self):
+        class LegacySocketTimeout(OSError):
+            pass
+
+        client = OpenCodeApiClient("http://127.0.0.1:4096")
+        timeout_errors = (TimeoutError, LegacySocketTimeout)
+
+        with patch("opencode_session.api_transport._TIMEOUT_EXCEPTIONS", timeout_errors):
+            with patch(
+                "opencode_session.api_transport.urlopen",
+                side_effect=URLError(LegacySocketTimeout("timed out")),
+            ):
+                with self.assertRaises(TimeoutExpired):
+                    list(client.stream_events("/api/event", deadline=TimeoutDeadline(5)))
+
 
 class ApiClientSplitTest(unittest.TestCase):
     def test_domain_client_plans_routes_and_delegates_transport_calls(self):
