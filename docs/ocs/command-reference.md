@@ -34,6 +34,7 @@ bin/ocs diagnostics get /project --raw
 ```
 
 `diagnostics routes` prints stable, sorted OpenAPI paths and methods. `diagnostics get` accepts only same-server absolute paths advertised as GET-capable by the server's OpenAPI document. It rejects URLs, fragments, unadvertised paths, and mutating methods.
+Diagnostics route discovery and GET requests do not follow HTTP redirects, so an advertised same-server read cannot be redirected to another origin.
 
 ## Session Commands
 
@@ -67,10 +68,19 @@ All run commands accept `run --store PATH ...`. If omitted, the store is `OCS_RU
 - `run collect NAME [--worker ID] [--json]`: print collected worker results.
 - `run steer NAME WORKER_ID TEXT [--delivery steer|queue] [--message-id ID] [--json]`: admit input to a worker session and record the prompt ID.
 - `run abort NAME WORKER_ID [--json]`: abort a worker session and mark the worker aborted when accepted.
+- `run cleanup NAME [--sessions] [--worktrees] [--branches] [--project-metadata] [--logs] [--run-store] [--all] [--dry-run|--apply] [--force] [--server URL] [--json]`: inspect or remove resources explicitly registered to the run.
 
-Worker metadata options include `--session`, `--agent`, `--model`, `--prompt`, `--depends-on`, `--prompt-id`, `--status active|blocked`, `--retry-count`, `--retry-limit`, `--retryable`, `--timeout-seconds`, `--timeout-policy`, `--blocker`, and `--output-ref`. `--status blocked` requires at least one `--blocker`; terminal states are owned by `run start`, `run abort`, and result/failure/timeout reducers.
+Worker metadata options include `--session`, `--agent`, `--model`, `--prompt`, `--depends-on`, `--prompt-id`, `--status active|blocked`, `--retry-count`, `--retry-limit`, `--retryable`, `--timeout-seconds`, `--timeout-policy`, `--blocker`, `--output-ref`, `--owned-worktree PATH`, `--owned-log PATH`, and `--owned-project-copy PROJECT_ID DIRECTORY_PREFIX`. Ownership paths must be absolute. Worktrees must be attached to a branch, and logs must already exist as a regular file or symlink so OCS can record their filesystem identity. `--status blocked` requires at least one `--blocker`; terminal states are owned by `run start`, `run abort`, and result/failure/timeout reducers.
 
 Stored prompted workers are intentionally serial: `run start` plans one ready worker, executes it, persists state, and then plans the next step. `--execution-policy continue` changes failure handling only; it does not run independent workers in parallel.
+
+`run cleanup` is a dry run unless `--apply` is present, and it requires at least one category or `--all`. Dry-run and apply share the same safety preflight: active workers, dirty worktrees, unmerged branches, changed resource identities, unsupported project cleanup, and the exact target server are reported in JSON. Active workers block all apply side effects unless `--force` is explicit. `--force` permits active-worker, dirty-worktree, and unmerged-branch cleanup only; it never bypasses recorded ownership identity or run-store concurrency checks.
+
+Apply processes sessions, worktrees, project/workspace metadata, branches, and logs, then deletes the run record last when requested and every selected operation verified. The run record carries an in-progress/final cleanup audit and is retained on partial failure or if it changes concurrently. OpenCode versions without an API for legacy `project.sandboxes` return a partial result rather than editing the database.
+
+Project/workspace cleanup is remotely inventoried before apply freezes the exact paths and workspace IDs. An unsupported or partial project preview blocks apply before any selected local resource is changed. An interrupted apply leaves an `in_progress` audit that fences worker mutations; inspect it and use `--force` only to deliberately resume that cleanup.
+
+Branch cleanup must be selected together with its still-present owned worktree in the same invocation. OCS freezes the branch tip during preflight, removes the verified worktree, and deletes the ref only if that exact tip is still current. It refuses branch-only cleanup after a worktree has already disappeared.
 
 ## Blocker Commands
 
@@ -95,7 +105,9 @@ experimental workspace route, OCS exits with `70` and names the unsupported meth
 and workspaces owned by one project. It is a dry run unless `--apply` is present. Apply mode refreshes project-copy
 metadata, removes only matching workspace IDs, and then verifies the project, project-directory, and workspace
 inventories. OCS never edits the OpenCode database. Some server versions expose no supported operation for stale
-legacy `project.sandboxes`; OCS reports those residual paths as a partial cleanup and exits with `70`.
+legacy `project.sandboxes`; OCS reports those residual paths as a partial cleanup and exits with `70`. Because the
+server refresh route is project-wide, OCS also refuses to invoke it when unrelated stale project directories would
+be affected by a prefix-scoped cleanup.
 
 ## Validation Commands
 

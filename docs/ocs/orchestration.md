@@ -29,6 +29,18 @@ Worker metadata can include session ID, agent, model, prompt, dependencies, prom
 
 If a worker has no existing session, `run start` creates one in the run directory. If a worker already has a session ID, OCS reuses it. `--cleanup` deletes sessions created by that start, but does not delete preexisting worker sessions.
 
+Register resources that the run owns when adding or updating a worker:
+
+```bash
+touch /tmp/opencode/demo-builder.log
+bin/ocs run worker demo builder --role build \
+  --owned-worktree /tmp/opencode/demo-builder \
+  --owned-log /tmp/opencode/demo-builder.log \
+  --owned-project-copy PROJECT_ID /tmp/opencode/demo-
+```
+
+Ownership records bind worktrees and logs to their Git/filesystem identities. Cleanup refuses a replacement path even with `--force`.
+
 ## Starting Work
 
 ```bash
@@ -77,3 +89,16 @@ bin/ocs run collect demo --worker builder
 ```
 
 `run steer` targets a worker session and records the admitted prompt ID. `run abort` targets the worker session and marks the worker aborted when accepted. `run collect` prints the stored result for one worker or completed workers in dependency order.
+
+## Run-Owned Cleanup
+
+```bash
+bin/ocs run --store .ocs/runs cleanup demo --all --dry-run --json
+bin/ocs run --store .ocs/runs cleanup demo --all --apply --json
+```
+
+`run cleanup` is distinct from `run start --cleanup`: it can remove pre-created worker sessions and explicitly registered worktrees, branches, logs, project copies/workspaces, and the run record itself. Dry-run is the default and performs the same identity, Git-state, active-worker, route-support, and server-target checks as apply.
+
+Apply refuses active workers unless `--force` is present. Force never broadens the recorded resource set and never bypasses identity mismatches or concurrent run-record changes. Project metadata is refreshed only after its registered worktree is gone, then the project/directory/workspace inventories are re-read. A partial or unsupported cleanup keeps the audited run record for recovery.
+
+Before apply, OCS freezes the exact project paths and workspace IDs from a read-only preview. A partial or unsupported preview blocks all selected mutations. While apply runs, a cleanup lease serializes other cleanup processes and the in-progress audit fences worker/run updates; `--force` can explicitly resume an interrupted cleanup after inspection.

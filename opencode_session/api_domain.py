@@ -48,6 +48,9 @@ class OpenCodeDomainClient:
     def get_response(self, path, *, timeout=None, deadline=None):
         return self._transport.get_response(path, timeout=timeout, deadline=deadline)
 
+    def get_response_no_redirects(self, path, *, timeout=None, deadline=None):
+        return self._transport.get_response_no_redirects(path, timeout=timeout, deadline=deadline)
+
     def post_json(self, path, payload, *, timeout=None, deadline=None):
         return self._transport.post_json(path, payload, timeout=timeout, deadline=deadline)
 

@@ -1,6 +1,7 @@
 import uuid
 
 from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiTimeoutError
+from opencode_session.schema_helpers import bool_value
 from opencode_session.session_lifecycle import abort_record
 from opencode_session.timeout_boundary import TimeoutExpired
 
@@ -35,6 +36,8 @@ def _abort_timed_out_session(client, session_id):
     try:
         response = client.abort_session_response(session_id)
         response_data = {"accepted": response.data} if isinstance(response.data, bool) else response.data
+        if not _abort_acceptance_is_explicit(response_data):
+            return "abort response did not confirm acceptance"
         abort = abort_record(session_id, response_data)
     except Exception as error:
         return str(error) or error.__class__.__name__
@@ -42,3 +45,26 @@ def _abort_timed_out_session(client, session_id):
         status = abort.get("raw_status") or abort.get("status") or "not accepted"
         return f"abort was not accepted ({status})"
     return None
+
+
+def _abort_acceptance_is_explicit(data):
+    if not isinstance(data, dict):
+        return False
+    for key in ("accepted", "aborted", "ok", "success"):
+        if key in data and bool_value(data.get(key)) is not None:
+            return True
+    status = str(data.get("status") or data.get("state") or "").lower()
+    return status in {
+        "abort",
+        "aborted",
+        "aborting",
+        "accepted",
+        "canceled",
+        "cancelled",
+        "denied",
+        "error",
+        "failed",
+        "not_accepted",
+        "rejected",
+        "unsupported",
+    }

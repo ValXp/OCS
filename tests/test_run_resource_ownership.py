@@ -8,13 +8,51 @@ from pathlib import Path
 from opencode_session.run_resources import (
     RunResourceError,
     register_run_resources,
+    run_owned_session_ids,
     verify_owned_log,
     verify_owned_worktree,
 )
+from opencode_session.run_project_ownership import verify_owned_project_copy
 from opencode_session.run_store import RunStore, RunStoreError
 
 
 class RunResourceManifestTest(unittest.TestCase):
+    def test_owned_session_inventory_deduplicates_every_run_reference(self):
+        run = {
+            "workers": {
+                "worker": {
+                    "session_id": "ses-worker",
+                    "attempts": [
+                        {
+                            "session_id": "ses-attempt",
+                            "created_session_ids": ["ses-created", "ses-worker"],
+                        }
+                    ],
+                    "cleanup": {"sessions": ["ses-cleanup", "ses-created"]},
+                }
+            },
+            "worker_session_journal": [
+                {
+                    "kind": "worker_session_create",
+                    "worker_id": "worker",
+                    "session_id": "ses-journal",
+                    "created_session_ids": ["ses-journal-created", "ses-attempt"],
+                }
+            ],
+        }
+
+        self.assertEqual(
+            run_owned_session_ids(run),
+            [
+                "ses-worker",
+                "ses-attempt",
+                "ses-created",
+                "ses-cleanup",
+                "ses-journal-created",
+                "ses-journal",
+            ],
+        )
+
     def test_load_rejects_malformed_resource_record_with_run_store_error(self):
         with tempfile.TemporaryDirectory() as root:
             store = _new_store(root)
@@ -80,6 +118,15 @@ class OwnedLogIdentityTest(unittest.TestCase):
             ):
                 with self.subTest(value=value), self.assertRaisesRegex(RunResourceError, expected):
                     register_run_resources(store, "demo", "worker", log_paths=[value])
+
+    def test_registration_rejects_directories_as_log_resources(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = _new_store(root)
+            directory = Path(root) / "not-a-log-file"
+            directory.mkdir()
+
+            with self.assertRaisesRegex(RunResourceError, "regular file or symlink"):
+                register_run_resources(store, "demo", "worker", log_paths=[directory])
 
     def test_registration_records_identity_and_verifier_detects_replacement(self):
         with tempfile.TemporaryDirectory() as root:
@@ -166,6 +213,31 @@ class OwnedWorktreeIdentityTest(unittest.TestCase):
 
             with self.assertRaisesRegex(RunResourceError, "must have an attached branch"):
                 register_run_resources(store, "demo", "worker", worktree_paths=[worktree])
+
+
+class OwnedProjectCopyIdentityTest(unittest.TestCase):
+    def test_verifier_detects_retargeted_prefix_parent_symlink(self):
+        with tempfile.TemporaryDirectory() as root:
+            target_a = Path(root) / "target-a"
+            target_b = Path(root) / "target-b"
+            target_a.mkdir()
+            target_b.mkdir()
+            link = Path(root) / "project-link"
+            link.symlink_to(target_a, target_is_directory=True)
+            prefix = link / "ocs-run-"
+            store = _new_store(root)
+            record = register_run_resources(
+                store,
+                "demo",
+                "worker",
+                project_copies=[("project-a", prefix)],
+            )["resources"]["project_copies"][0]
+
+            self.assertIsNone(verify_owned_project_copy(record))
+            link.unlink()
+            link.symlink_to(target_b, target_is_directory=True)
+
+            self.assertIn("identity has changed", verify_owned_project_copy(record))
 
 
 def _new_store(root):

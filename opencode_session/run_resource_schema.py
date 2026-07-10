@@ -11,6 +11,10 @@ _WORKTREE_FIELDS = {
     "linked_git_dir_device",
     "linked_git_dir_inode",
     "branch",
+    "branch_reflog",
+    "branch_reflog_device",
+    "branch_reflog_inode",
+    "registered_branch_tip",
     "worker_id",
 }
 _LOG_FIELDS = {
@@ -23,8 +27,16 @@ _LOG_FIELDS = {
     "parent_inode",
     "worker_id",
 }
-_PROJECT_COPY_FIELDS = {"project_id", "directory_prefix", "worker_id"}
-_LOG_RESOURCE_TYPES = {"file", "directory", "symlink"}
+_PROJECT_COPY_FIELDS = {
+    "project_id",
+    "directory_prefix",
+    "resolved_directory_prefix",
+    "directory_prefix_parent_realpath",
+    "directory_prefix_parent_device",
+    "directory_prefix_parent_inode",
+    "worker_id",
+}
+_LOG_RESOURCE_TYPES = {"file", "symlink"}
 
 
 class RunResourceSchemaError(Exception):
@@ -95,6 +107,10 @@ def _validate_worktree(record, label):
     _require_identity(record, "linked_git_dir_device", label)
     _require_identity(record, "linked_git_dir_inode", label)
     _require_text(record, "branch", label)
+    _require_path(record, "branch_reflog", label)
+    _require_identity(record, "branch_reflog_device", label)
+    _require_identity(record, "branch_reflog_inode", label)
+    _require_text(record, "registered_branch_tip", label)
     _require_text(record, "worker_id", label)
 
 
@@ -117,6 +133,10 @@ def _validate_project_copy(record, label):
     _require_exact_fields(record, _PROJECT_COPY_FIELDS, label)
     _require_text(record, "project_id", label)
     _require_path(record, "directory_prefix", label)
+    _require_path(record, "resolved_directory_prefix", label)
+    _require_path(record, "directory_prefix_parent_realpath", label, allow_root=True)
+    _require_identity(record, "directory_prefix_parent_device", label)
+    _require_identity(record, "directory_prefix_parent_inode", label)
     _require_text(record, "worker_id", label)
 
 

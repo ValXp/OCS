@@ -35,6 +35,7 @@ health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/pro
 - OpenCode project, project-directory, and workspace metadata inventory.
 - Permission and question blocker listing and resolution.
 - Local `run` orchestration with dependency-ordered serial worker execution, persisted workers, dependencies, retries, timeouts, blockers, outputs, steering, and aborts.
+- Dry-run-first cleanup for sessions, identity-bound worktrees/branches/logs, project metadata, and run-store records explicitly owned by a run.
 - Deterministic smoke validation, opt-in live-provider validation, and disposable session cleanup.
 
 ## Command Map
@@ -45,7 +46,7 @@ health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/pro
 - `steer`: admit durable steer or queue input without waiting for an assistant reply.
 - `run_blocking`: execute a prompt and wait for a terminal assistant result.
 - `watch`: stream normalized events for one session until terminal state, abort, timeout, or stream end.
-- `run init|worker|start|status|collect|steer|abort`: manage local orchestration runs and workers.
+- `run init|worker|start|status|collect|steer|abort|cleanup`: manage local orchestration runs, workers, and owned resources.
 - `permission list|reply`: inspect and resolve permission blockers.
 - `question list|answer|reject`: inspect and resolve question blockers.
 - `project list|inspect|directories`, `workspace list`: inspect OpenCode project/workspace metadata.
@@ -105,4 +106,4 @@ E2E environment variables include `OCS_E2E_SERVER_URL`, `OCS_E2E_AGENT`, `OCS_E2
 - `75`: run is blocked.
 - `124`: run timed out.
 - `130`: run was aborted.
-- `1`: partial run failure after at least one worker completed.
+- `1`: partial run failure or a failed, blocked, or partial cleanup.

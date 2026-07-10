@@ -10,12 +10,12 @@ from opencode_session.run_resource_schema import (
     ensure_run_resources,
     validate_run_resource_manifest,
 )
+from opencode_session.run_project_ownership import ProjectCopyOwnershipError, project_copy_identity
 from opencode_session.worker_session_provisioning import WorkerSessionCreationJournalEntry
 
 
 class RunResourceError(Exception):
     pass
-
 
 def register_run_resources(
     store,
@@ -41,7 +41,6 @@ def register_run_resources(
                 _append_unique_record(resources[field_name], record, identity_fields)
 
     return store.update_run(name, register)
-
 
 def run_owned_session_ids(run):
     session_ids = []
@@ -71,13 +70,11 @@ def run_owned_session_ids(run):
                 append_unique_string(session_ids, session_id)
     return session_ids
 
-
 def _worker_snapshot(worker):
     to_snapshot = getattr(worker, "to_snapshot", None)
     if callable(to_snapshot):
         return to_snapshot()
     return worker if isinstance(worker, dict) else {}
-
 
 def _worktree_record(value, worker_id):
     path = _safe_owned_path(value, label="worktree")
@@ -92,6 +89,9 @@ def _worktree_record(value, worker_id):
     branch = _git_output(path, "symbolic-ref", "--quiet", "--short", "HEAD", allow_failure=True)
     if not branch:
         raise RunResourceError(f"owned worktree must have an attached branch: {path}")
+    branch_reflog = git_dir / "logs" / "refs" / "heads" / Path(branch)
+    branch_reflog_identity = _file_identity(branch_reflog, label="branch reflog")
+    registered_branch_tip = _git_output(path, "rev-parse", "--verify", f"refs/heads/{branch}")
     return {
         "path": str(path),
         "git_dir": str(git_dir),
@@ -99,9 +99,12 @@ def _worktree_record(value, worker_id):
         "linked_git_dir_device": linked_identity[0],
         "linked_git_dir_inode": linked_identity[1],
         "branch": branch,
+        "branch_reflog": str(branch_reflog),
+        "branch_reflog_device": branch_reflog_identity[0],
+        "branch_reflog_inode": branch_reflog_identity[1],
+        "registered_branch_tip": registered_branch_tip,
         "worker_id": _required_text(worker_id, label="worker ID"),
     }
-
 
 def _log_record(value, worker_id):
     path = _safe_owned_path(value, label="log")
@@ -119,18 +122,21 @@ def _log_record(value, worker_id):
         "worker_id": _required_text(worker_id, label="worker ID"),
     }
 
-
 def _project_copy_record(value, worker_id):
     if not isinstance(value, (list, tuple)) or len(value) != 2:
         raise RunResourceError("owned project copy requires PROJECT_ID and DIRECTORY_PREFIX")
     project_id = _required_text(value[0], label="project ID")
     directory_prefix = _safe_owned_path(value[1], label="project-copy directory prefix")
+    try:
+        identity = project_copy_identity(directory_prefix)
+    except ProjectCopyOwnershipError as error:
+        raise RunResourceError(str(error)) from error
     return {
         "project_id": project_id,
         "directory_prefix": str(directory_prefix),
         "worker_id": _required_text(worker_id, label="worker ID"),
+        **identity,
     }
-
 
 def _safe_owned_path(value, *, label):
     try:
@@ -148,7 +154,6 @@ def _safe_owned_path(value, *, label):
         raise RunResourceError(f"owned {label} path cannot be a filesystem root: {path}")
     return path
 
-
 def verify_owned_worktree(record):
     """Return None only while the exact registered worktree identity still matches."""
     error = _record_schema_error("worktrees", record)
@@ -160,14 +165,10 @@ def verify_owned_worktree(record):
     current_top = _git_output(path, "rev-parse", "--show-toplevel", allow_failure=True)
     if not current_top or Path(current_top).resolve() != path:
         return "owned worktree path is no longer the recorded Git top-level directory"
-    current_common = _git_output(
-        path, "rev-parse", "--path-format=absolute", "--git-common-dir", allow_failure=True
-    )
+    current_common = _git_output(path, "rev-parse", "--path-format=absolute", "--git-common-dir", allow_failure=True)
     if not current_common or Path(current_common).resolve() != Path(record["git_dir"]):
         return "owned worktree no longer belongs to the recorded repository"
-    current_linked = _git_output(
-        path, "rev-parse", "--path-format=absolute", "--absolute-git-dir", allow_failure=True
-    )
+    current_linked = _git_output(path, "rev-parse", "--path-format=absolute", "--absolute-git-dir", allow_failure=True)
     if not current_linked or Path(current_linked).resolve() != Path(record["linked_git_dir"]):
         return "owned worktree linked Git directory has changed"
     try:
@@ -182,7 +183,6 @@ def verify_owned_worktree(record):
     if branch != record["branch"]:
         return f"owned worktree branch changed from {record['branch']} to {branch}"
     return None
-
 
 def verify_owned_log(record):
     """Return None only while the exact registered log and its parent still match."""
@@ -207,6 +207,27 @@ def verify_owned_log(record):
         return "owned log identity or type has changed"
     return None
 
+def verify_owned_branch(record):
+    """Return None only while the registered branch retains its durable reflog identity."""
+    error = _record_schema_error("worktrees", record)
+    if error is not None:
+        return error
+    expected_reflog = Path(record["git_dir"]) / "logs" / "refs" / "heads" / Path(record["branch"])
+    if Path(record["branch_reflog"]) != expected_reflog:
+        return "owned branch reflog path does not match the recorded repository and branch"
+    try:
+        current_identity = _file_identity(expected_reflog, label="branch reflog")
+    except RunResourceError as error:
+        return str(error)
+    if current_identity != (record["branch_reflog_device"], record["branch_reflog_inode"]):
+        return "owned branch reflog identity has changed"
+    try:
+        reflog_text = expected_reflog.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return f"cannot read owned branch reflog: {error}"
+    if record["registered_branch_tip"] not in reflog_text.split():
+        return "owned branch reflog no longer contains the registered tip"
+    return None
 
 def _record_schema_error(field_name, record):
     manifest = {name: [] for name in ("worktrees", "logs", "project_copies")}
@@ -217,7 +238,6 @@ def _record_schema_error(field_name, record):
         return f"invalid owned resource record: {error}"
     return None
 
-
 def _log_identity(path):
     try:
         details = os.lstat(path)
@@ -225,19 +245,15 @@ def _log_identity(path):
         raise RunResourceError(f"cannot inspect owned log {path}: {error}") from error
     resource_type = _resource_type(details.st_mode)
     if resource_type is None:
-        raise RunResourceError(f"owned log must be a regular file, directory, or symlink: {path}")
+        raise RunResourceError(f"owned log must be a regular file or symlink: {path}")
     return details.st_dev, details.st_ino, resource_type
-
 
 def _resource_type(mode):
     if stat.S_ISREG(mode):
         return "file"
-    if stat.S_ISDIR(mode):
-        return "directory"
     if stat.S_ISLNK(mode):
         return "symlink"
     return None
-
 
 def _directory_identity(path, *, label):
     try:
@@ -248,6 +264,14 @@ def _directory_identity(path, *, label):
         raise RunResourceError(f"{label} is not a directory: {path}")
     return details.st_dev, details.st_ino
 
+def _file_identity(path, *, label):
+    try:
+        details = os.stat(path)
+    except OSError as error:
+        raise RunResourceError(f"cannot inspect {label} {path}: {error}") from error
+    if not stat.S_ISREG(details.st_mode):
+        raise RunResourceError(f"{label} is not a regular file: {path}")
+    return details.st_dev, details.st_ino
 
 def _required_text(value, *, label):
     if not isinstance(value, str) or not value.strip():
@@ -257,11 +281,7 @@ def _required_text(value, *, label):
 
 def _git_output(path, *args, allow_failure=False):
     result = subprocess.run(
-        ["git", "-C", str(path), *args],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
+        ["git", "-C", str(path), *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
     )
     if result.returncode != 0:
         if allow_failure:

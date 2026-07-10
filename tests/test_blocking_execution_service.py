@@ -304,6 +304,42 @@ class BlockingExecutionServiceTest(unittest.TestCase):
         self.assertIn("session abort failed: abort was not accepted", str(raised.exception))
         self.assertIn("not accepted", raised.exception.abort_error)
 
+    def test_modern_timeout_treats_failed_abort_status_as_not_accepted(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_payload={"status": "failed"})
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("session abort failed: abort was not accepted (failed)", str(raised.exception))
+
+    def test_modern_timeout_treats_ambiguous_abort_payload_as_unconfirmed(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_payload={})
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("session abort failed: abort response did not confirm acceptance", str(raised.exception))
+
+    def test_modern_timeout_treats_null_abort_acceptance_as_unconfirmed(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_payload={"accepted": None})
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("session abort failed: abort response did not confirm acceptance", str(raised.exception))
+
     def test_passes_deadline_to_legacy_run_and_reply_requests(self):
         from opencode_session.blocking_execution import execute_blocking_prompt
         from opencode_session.timeout_boundary import TimeoutDeadline

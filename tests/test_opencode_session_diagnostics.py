@@ -119,6 +119,48 @@ class ApiDiagnosticsCliTest(unittest.TestCase):
             expected_requests = [("GET", "/doc", None)] if path == "/missing" else []
             self.assertEqual(server.requests, expected_requests)
 
+    def test_get_does_not_follow_redirects_to_another_origin(self):
+        with FakeOpenCodeServer() as target, FakeOpenCodeServer() as origin:
+            target.json("GET", "/secret", {"secret": True})
+            origin.json("GET", "/doc", {"paths": {"/project": {"get": {}}}})
+
+            def redirect(handler, _request):
+                handler.send_response(302)
+                handler.send_header("Location", f"{target.url}/secret")
+                handler.end_headers()
+
+            origin.route("GET", "/project", redirect)
+            result = run_ocs("diagnostics", "get", "/project", "--server", origin.url)
+
+        self.assertEqual(result.returncode, 69, format_completed_process(result))
+        self.assertIn("HTTP 302", result.stderr)
+        self.assertEqual(target.requests, [])
+
+    def test_route_discovery_does_not_follow_cross_origin_doc_redirects(self):
+        with FakeOpenCodeServer() as target, FakeOpenCodeServer() as origin:
+            target.json("GET", "/doc", {"paths": {"/secret": {"get": {}}}})
+
+            def redirect(handler, _request):
+                handler.send_response(302)
+                handler.send_header("Location", f"{target.url}/doc")
+                handler.end_headers()
+
+            origin.route("GET", "/doc", redirect)
+            result = run_ocs("diagnostics", "routes", "--server", origin.url)
+
+        self.assertEqual(result.returncode, 69, format_completed_process(result))
+        self.assertIn("HTTP 302", result.stderr)
+        self.assertEqual(target.requests, [])
+
+    def test_get_rejects_a_route_advertised_only_for_mutation(self):
+        with FakeOpenCodeServer() as server:
+            server.json("GET", "/doc", {"paths": {"/workspace/{workspaceID}": {"delete": {}}}})
+            server.json("DELETE", "/workspace/ws-1", {"deleted": True})
+            result = run_ocs("diagnostics", "get", "/workspace/ws-1", "--server", server.url)
+
+        self.assertEqual(result.returncode, 65, format_completed_process(result))
+        self.assertEqual(server.requests, [("GET", "/doc", None)])
+
     def test_get_normalizes_remote_and_invalid_json_errors(self):
         cases = ((404, {"error": "missing"}, "HTTP 404"), (200, "not-json", "invalid JSON"))
         for status, payload, expected in cases:

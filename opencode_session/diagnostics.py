@@ -15,7 +15,7 @@ class ApiDiagnosticsService:
         self.client = client
 
     def list_routes(self, *, filter_text=None):
-        paths = _openapi_paths(self.client.require_openapi_doc())
+        paths = _openapi_paths(self.client.get_response_no_redirects("doc").data)
         needle = str(filter_text or "").lower()
         records = []
         for path in sorted(paths):
@@ -35,7 +35,7 @@ class ApiDiagnosticsService:
         routes = self.list_routes()
         if not any("GET" in route["methods"] and _matches_template(route["path"], route_path) for route in routes):
             raise ApiDiagnosticsError(f"OpenAPI document does not advertise GET {route_path}")
-        return self.client.get_response(request_target)
+        return self.client.get_response_no_redirects(request_target)
 
 
 def format_routes_compact(routes):

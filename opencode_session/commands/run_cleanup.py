@@ -1,4 +1,6 @@
 from opencode_session.commands.rendering import CommandResult, render_command_result
+from opencode_session.project_metadata import ProjectMetadataService
+from opencode_session.project_metadata_cleanup import ProjectCopyCleanupService
 from opencode_session.run_cleanup import RunCleanupRequest, RunCleanupService, format_run_cleanup_compact
 from opencode_session.run_resources import RunResourceError, register_run_resources
 from opencode_session.run_store import RunStoreError
@@ -18,14 +20,18 @@ def add_run_cleanup_parser(run_subparsers):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print the plan without changing anything (default)")
     mode.add_argument("--apply", action="store_true", help="execute the cleanup plan")
-    parser.add_argument("--force", action="store_true", help="allow dirty worktree and unmerged recorded branch removal")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow active-worker, dirty-worktree, and unmerged recorded branch cleanup",
+    )
     parser.add_argument("--server", help="override the run's OpenCode server URL")
     parser.add_argument("--json", action="store_true", help="print cleanup plan/result JSON")
 
 
 def add_run_resource_registration_arguments(parser):
     parser.add_argument("--owned-worktree", action="append", default=[], help="register an exact worktree path owned by this worker")
-    parser.add_argument("--owned-log", action="append", default=[], help="register an exact log file/directory owned by this worker")
+    parser.add_argument("--owned-log", action="append", default=[], help="register an exact existing log file or symlink owned by this worker")
     parser.add_argument(
         "--owned-project-copy",
         action="append",
@@ -76,6 +82,7 @@ def cleanup_run_command(args, service, *, print_error, **_context):
         service.store,
         client_factory=service.client_factory,
         capability_detector=service.capability_detector,
+        project_cleanup=_project_cleanup(service.client_factory),
     ).cleanup(request)
     warnings = tuple(error["error"] for error in result.record["errors"])
     return render_command_result(
@@ -88,3 +95,47 @@ def cleanup_run_command(args, service, *, print_error, **_context):
         ),
         print_error=print_error,
     )
+
+
+def _project_cleanup(client_factory):
+    def cleanup(
+        entry,
+        *,
+        server_url,
+        apply,
+        assumed_missing_paths=(),
+        planned_outcome=None,
+    ):
+        metadata = ProjectMetadataService(client_factory(server_url))
+        cleanup_service = ProjectCopyCleanupService(metadata)
+        if apply and planned_outcome is not None:
+            outcome = cleanup_service.apply_plan(planned_outcome)
+        else:
+            outcome = cleanup_service.cleanup(
+                entry["project_id"],
+                entry["resolved_directory_prefix"],
+                apply=apply,
+                assumed_missing_paths=assumed_missing_paths,
+            )
+        return {
+            "verified": outcome.get("status") == "done",
+            "safe": outcome.get("status") in {"planned", "done"},
+            "error": _project_cleanup_error(outcome),
+            "outcome": outcome,
+        }
+
+    return cleanup
+
+
+def _project_cleanup_error(outcome):
+    if outcome.get("status") == "done":
+        return None
+    details = [f"project-copy cleanup status={outcome.get('status') or 'unknown'}"]
+    if outcome.get("unsupported"):
+        details.append(f"unsupported={','.join(outcome['unsupported'])}")
+    remaining = [name for name, values in (outcome.get("remaining") or {}).items() if values]
+    if remaining:
+        details.append(f"remaining={','.join(remaining)}")
+    if outcome.get("errors"):
+        details.append(f"errors={len(outcome['errors'])}")
+    return "; ".join(details)
