@@ -2,8 +2,9 @@ from copy import deepcopy
 import tempfile
 import unittest
 
-from opencode_session.api_transport import OpenCodeApiError
+from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiTimeoutError
 from opencode_session.blocking_execution import BlockingProviderFailure
+from opencode_session.capabilities import capabilities_from_openapi_doc
 from opencode_session.run_record import ensure_run_worker, run_record_for_output
 from opencode_session.worker_attempt_execution import WorkerPromptExecution
 from opencode_session.worker_execution import WorkerExecutionExecutor, execute_worker_attempts
@@ -17,9 +18,9 @@ from opencode_session.worker_state import (
 )
 
 try:
-    from tests.worker_execution_helpers import CAPABILITIES, FakeClient, WorkerExecutionAssertionsMixin
+    from tests.worker_execution_helpers import CAPABILITIES, FakeClient, FakeResponse, WorkerExecutionAssertionsMixin
 except ModuleNotFoundError:
-    from worker_execution_helpers import CAPABILITIES, FakeClient, WorkerExecutionAssertionsMixin
+    from worker_execution_helpers import CAPABILITIES, FakeClient, FakeResponse, WorkerExecutionAssertionsMixin
 
 
 class WorkerAttemptExecutionTest(WorkerExecutionAssertionsMixin, unittest.TestCase):
@@ -300,6 +301,74 @@ class WorkerAttemptExecutionTest(WorkerExecutionAssertionsMixin, unittest.TestCa
         self.assertEqual(attempt.get("result_status"), "done")
         self.assertEqual(attempt.get("user_message_id"), "msg_user")
         self.assertEqual(attempt.get("assistant_message_id"), "msg_assistant")
+
+    def test_modern_message_id_is_persisted_before_send_and_survives_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = {"directory": directory, "workers": {}}
+            worker = ensure_run_worker(run, "worker", role="worker")
+            persisted_workers = []
+            test_case = self
+
+            def persist_worker_transition(run, worker, transition):
+                persisted_run = deepcopy(run)
+                updated = apply_worker_transition(persisted_run.setdefault("workers", {}), transition)
+                persisted_workers.append(deepcopy(updated))
+                return persisted_run, updated
+
+            class InspectingTimeoutClient(FakeClient):
+                def message_session_response(
+                    self,
+                    session_id,
+                    prompt,
+                    *,
+                    message_id=None,
+                    timeout=None,
+                    deadline=None,
+                ):
+                    persisted_worker = persisted_workers[-1]
+                    attempt = test_case.assert_single_worker_attempt(
+                        persisted_worker,
+                        status="active",
+                        session_id=session_id,
+                    )
+                    test_case.assertEqual(worker_field(persisted_worker, "prompt_ids"), [message_id])
+                    test_case.assertEqual(attempt.get("user_message_id"), message_id)
+                    self.requests.append(("message", session_id, message_id))
+                    raise OpenCodeApiTimeoutError("OpenCode server timed out at http://127.0.0.1")
+
+                def abort_session_response(self, session_id):
+                    self.requests.append(("abort", session_id))
+                    return FakeResponse({"sessionID": session_id, "accepted": True})
+
+            client = InspectingTimeoutClient(["ses_initial"])
+            capabilities = capabilities_from_openapi_doc(
+                {"paths": {"/session/{sessionID}/message": {"post": {}}}}
+            )
+            worker_executor = WorkerExecutionExecutor(
+                apply_transition=persist_worker_transition,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = worker_executor.execute(
+                client,
+                run,
+                worker,
+                "Finish the worker task",
+                capabilities,
+            )
+
+        self.assertEqual(outcome.kind, "terminal_failure")
+        self.assertEqual(outcome.failure_category, "timeout")
+        self.assertIn("OpenCode server timed out", outcome.error)
+        self.assertEqual([request[0] for request in client.requests], ["create", "message", "abort"])
+        persisted_worker = persisted_workers[-1]
+        prompt_ids = worker_field(persisted_worker, "prompt_ids")
+        self.assertEqual(len(prompt_ids), 1)
+        self.assertTrue(prompt_ids[0].startswith("msg_"))
+        self.assertEqual(worker_output_field(persisted_worker, "status"), "timeout")
+        attempt = self.assert_single_worker_attempt(persisted_worker, status="failed", session_id="ses_initial")
+        self.assertEqual(attempt.get("user_message_id"), prompt_ids[0])
+        self.assertEqual(attempt.get("failure_category"), "timeout")
 
 
 if __name__ == "__main__":

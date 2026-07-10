@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from opencode_session.api_transport import OpenCodeApiError
-from opencode_session.blocking_execution import BlockingProviderFailure
+from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiTimeoutError
+from opencode_session.blocking_execution import BlockingExecutionTimeout, BlockingProviderFailure
 from opencode_session.schema_execution import ExecutionResultRecord
 from opencode_session.timeout_boundary import TimeoutExpired
 from opencode_session.worker_state import (
@@ -25,7 +25,9 @@ ATTEMPT_FAILED = "failed"
 
 
 class WorkerExecutionTimeout(TimeoutExpired):
-    pass
+    def __init__(self, *, prompt_id=None):
+        super().__init__()
+        self.prompt_id = prompt_id
 
 
 @dataclass
@@ -51,8 +53,25 @@ def classify_worker_attempt_result(result):
 
 
 def classify_worker_attempt_exception(worker, error):
+    if isinstance(error, BlockingExecutionTimeout):
+        reason = worker_timeout_reason(worker) if worker.timeout_seconds is not None else str(error)
+        if worker.timeout_seconds is not None and error.abort_error:
+            reason = f"{reason}; session abort failed: {error.abort_error}"
+        return WorkerAttemptOutcome(
+            ATTEMPT_FAILED,
+            failure_category="timeout",
+            reason=reason,
+            prompt_id=error.prompt_id,
+        )
     if isinstance(error, WorkerExecutionTimeout):
-        return WorkerAttemptOutcome(ATTEMPT_FAILED, failure_category="timeout", reason=worker_timeout_reason(worker))
+        return WorkerAttemptOutcome(
+            ATTEMPT_FAILED,
+            failure_category="timeout",
+            reason=worker_timeout_reason(worker),
+            prompt_id=error.prompt_id,
+        )
+    if isinstance(error, OpenCodeApiTimeoutError):
+        return WorkerAttemptOutcome(ATTEMPT_FAILED, failure_category="timeout", reason=str(error))
     if isinstance(error, OpenCodeApiError):
         return WorkerAttemptOutcome(ATTEMPT_FAILED, failure_category="api", reason=str(error))
     if isinstance(error, BlockingProviderFailure):
@@ -97,7 +116,12 @@ def _apply_completed_attempt(worker, result):
 
 def _apply_timeout_attempt_failure(worker, reason, now):
     manual_retry_available = worker_retry_available(worker, "timeout")
-    transition = mark_worker_timeout(worker, reason, now, manual_retry_required=manual_retry_available)
+    transition = mark_worker_timeout(
+        worker,
+        reason,
+        now,
+        manual_retry_required=manual_retry_available,
+    )
     if manual_retry_available:
         return WorkerAttemptTransition(
             TERMINAL_FAILURE,

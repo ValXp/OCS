@@ -1,7 +1,7 @@
 import unittest
 
-from opencode_session.api_transport import OpenCodeApiError
-from opencode_session.blocking_execution import BlockingProviderFailure
+from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiTimeoutError
+from opencode_session.blocking_execution import BlockingExecutionTimeout, BlockingProviderFailure
 from opencode_session.worker_attempt_policy import (
     COMPLETED,
     RETRY_SCHEDULED,
@@ -36,6 +36,14 @@ class WorkerAttemptPolicyTest(unittest.TestCase):
             worker,
             BlockingProviderFailure("provider overloaded", prompt_id="msg_user_failed"),
         )
+        api_timeout = classify_worker_attempt_exception(
+            worker,
+            OpenCodeApiTimeoutError("OpenCode server timed out at http://127.0.0.1"),
+        )
+        blocking_timeout = classify_worker_attempt_exception(
+            worker,
+            BlockingExecutionTimeout("blocking execution timed out", prompt_id="msg_timeout"),
+        )
 
         self.assertEqual(timeout.kind, "failed")
         self.assertEqual(timeout.failure_category, "timeout")
@@ -45,6 +53,10 @@ class WorkerAttemptPolicyTest(unittest.TestCase):
         self.assertEqual(provider.failure_category, "provider")
         self.assertEqual(provider.reason, "provider overloaded")
         self.assertEqual(provider.prompt_id, "msg_user_failed")
+        self.assertEqual(api_timeout.failure_category, "timeout")
+        self.assertEqual(api_timeout.reason, "OpenCode server timed out at http://127.0.0.1")
+        self.assertEqual(blocking_timeout.failure_category, "timeout")
+        self.assertEqual(blocking_timeout.prompt_id, "msg_timeout")
         self.assertIsNone(classify_worker_attempt_exception(worker, RuntimeError("boom")))
 
     def test_completed_result_policy_applies_result_transition_with_prompt_id(self):
@@ -89,7 +101,7 @@ class WorkerAttemptPolicyTest(unittest.TestCase):
 
     def test_timeout_retry_policy_preserves_manual_retry_semantics(self):
         worker = worker_record(timeout_seconds=0.05, retry_limit=1, retryable_failures=["timeout"])
-        attempt = classify_worker_attempt_exception(worker, WorkerExecutionTimeout())
+        attempt = classify_worker_attempt_exception(worker, WorkerExecutionTimeout(prompt_id="msg_timeout"))
 
         transition = apply_worker_attempt_transition(worker, attempt, now=lambda: "2026-07-03T00:00:00Z")
 

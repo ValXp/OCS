@@ -16,6 +16,8 @@ from opencode_session.cli_policy import (
 )
 from opencode_session.commands.blockers import add_blocker_parsers, handle_blocker_command
 from opencode_session.commands.capabilities import add_capabilities_parser, handle_capabilities
+from opencode_session.commands.diagnostics import add_diagnostics_parser, handle_diagnostics_command
+from opencode_session.commands.projects import add_project_parsers, handle_project_metadata_command
 from opencode_session.commands.run_blocking import add_run_blocking_parser, handle_run_blocking_command
 from opencode_session.commands.runs import add_run_parser, handle_run_command
 from opencode_session.commands.sessions import add_session_parsers, handle_session_command
@@ -73,6 +75,23 @@ def _command_specs():
             handle_session_command,
             {"add_server_argument": _add_server_argument, "add_output_arguments": _add_output_arguments},
             {"unavailable_exit": EX_UNAVAILABLE},
+        ),
+        CommandSpec(
+            add_diagnostics_parser,
+            handle_diagnostics_command,
+            {"add_server_argument": _add_server_argument, "add_output_arguments": _add_output_arguments},
+            {"unavailable_exit": EX_UNAVAILABLE, "dataerr_exit": EX_DATAERR},
+        ),
+        CommandSpec(
+            add_project_parsers,
+            handle_project_metadata_command,
+            {"add_server_argument": _add_server_argument, "add_output_arguments": _add_output_arguments},
+            {
+                "unavailable_exit": EX_UNAVAILABLE,
+                "unsupported_exit": EX_UNSUPPORTED,
+                "noinput_exit": EX_NOINPUT,
+                "dataerr_exit": EX_DATAERR,
+            },
         ),
         CommandSpec(
             add_watch_parser,

@@ -317,6 +317,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         )
         self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/reply"), [])
         self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry_isolated/reply"), [])
+        self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/abort"), [{}])
         retry_worker = load_json(self, status, "status")["workers"]["worker"]
         self.assertEqual(retry_worker["status"], "timeout")
         self.assertEqual(retry_worker["session_id"], "ses_retry")
@@ -374,6 +375,7 @@ class RetryTimeoutOrchestrationCliTest(unittest.TestCase):
         self.assertEqual(status.returncode, 0, format_completed_process(status))
         self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/run"), [{"message": "Finish the worker task"}])
         self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/reply"), [])
+        self.assertEqual(payloads_for(requests, "POST", "/session/ses_retry/abort"), [{}])
         payload = load_json(self, status, "status")
         self.assertEqual(payload["status"], "timeout")
         timeout_worker = payload["workers"]["worker"]

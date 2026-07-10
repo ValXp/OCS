@@ -18,12 +18,18 @@ def is_session_not_found_error(error):
 
 
 def abort_record(session_id, data) -> NormalizedAbortRecord:
+    if isinstance(data, bool):
+        data = {"accepted": data}
     if not isinstance(data, dict):
         data = {}
     raw_status = first_present(data, "status", "state")
     accepted = bool_value(first_present(data, "accepted", "aborted", "ok", "success"))
-    if accepted is None and str(raw_status or "").lower() in {"accepted", "aborting", "abort", "aborted", "cancelled", "canceled"}:
-        accepted = True
+    if accepted is None:
+        normalized_status = str(raw_status or "").lower()
+        if normalized_status in {"accepted", "aborting", "abort", "aborted", "cancelled", "canceled"}:
+            accepted = True
+        elif normalized_status in {"denied", "error", "failed", "not_accepted", "rejected", "unsupported"}:
+            accepted = False
     return {
         "session_id": first_present(data, "sessionID", "sessionId", "session_id", "id") or session_id,
         "accepted": accepted if accepted is not None else True,

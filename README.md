@@ -27,24 +27,30 @@ health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/pro
 ## Features
 
 - Capability detection with compact and JSON output.
+- Read-only OpenAPI route discovery and guarded GET diagnostics.
 - Session lifecycle commands: `create`, `list`, `inspect`/`get`, `delete`, `abort`, `fork`, and `children`.
 - Durable input admission with `steer`, including queue delivery through `--delivery queue`.
 - Blocking prompt execution with `run_blocking`, using `/session/{sessionID}/message` or legacy run/reply fallback.
 - Event watching with normalized compact output or JSON lines.
+- OpenCode project, project-directory, and workspace metadata inventory.
 - Permission and question blocker listing and resolution.
 - Local `run` orchestration with dependency-ordered serial worker execution, persisted workers, dependencies, retries, timeouts, blockers, outputs, steering, and aborts.
+- Dry-run-first cleanup for sessions, identity-bound worktrees/branches/logs, project metadata, and run-store records explicitly owned by a run.
 - Deterministic smoke validation, opt-in live-provider validation, and disposable session cleanup.
 
 ## Command Map
 
 - `capabilities`: probe OpenCode health, route support, event support, and execution support.
+- `diagnostics routes|get`: inspect advertised routes and selected read-only API responses.
 - `create`, `list`, `inspect`, `get`, `delete`, `abort`, `fork`, `children`: manage OpenCode sessions.
 - `steer`: admit durable steer or queue input without waiting for an assistant reply.
 - `run_blocking`: execute a prompt and wait for a terminal assistant result.
 - `watch`: stream normalized events for one session until terminal state, abort, timeout, or stream end.
-- `run init|worker|start|status|collect|steer|abort`: manage local orchestration runs and workers.
+- `run init|worker|start|status|collect|steer|abort|cleanup`: manage local orchestration runs, workers, and owned resources.
 - `permission list|reply`: inspect and resolve permission blockers.
 - `question list|answer|reject`: inspect and resolve question blockers.
+- `project list|inspect|directories`, `workspace list`: inspect OpenCode project/workspace metadata.
+- `project-copy cleanup`: dry-run or apply safe cleanup for metadata belonging to deleted project-copy directories.
 - `smoke`, `live_validate`, `cleanup`: validate server behavior and clean disposable sessions.
 
 `steer` is admission, not execution. It reports admission/progress state and intentionally does not use legacy run/reply fallback. `run_blocking` is execution and waits for an assistant reply or terminal failure.
@@ -100,4 +106,4 @@ E2E environment variables include `OCS_E2E_SERVER_URL`, `OCS_E2E_AGENT`, `OCS_E2
 - `75`: run is blocked.
 - `124`: run timed out.
 - `130`: run was aborted.
-- `1`: partial run failure after at least one worker completed.
+- `1`: partial run failure or a failed, blocked, or partial cleanup.

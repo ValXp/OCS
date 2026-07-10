@@ -44,6 +44,29 @@ class _ExplicitTimeoutClient:
         return _Response({"id": "msg_assistant_explicit", "status": "completed", "text": "ok"})
 
 
+class _ModernTimeoutClient:
+    def __init__(self, *, abort_error=None, abort_accepted=True, abort_payload=None):
+        self.timeout = 3
+        self.abort_error = abort_error
+        self.abort_accepted = abort_accepted
+        self.abort_payload = abort_payload
+        self.requests = []
+
+    def message_session_response(self, session_id, message, *, message_id=None, timeout=None, deadline=None):
+        from opencode_session.api_transport import OpenCodeApiTimeoutError
+
+        self.requests.append(("message", session_id, message, message_id, timeout, deadline))
+        raise OpenCodeApiTimeoutError("OpenCode server timed out at http://127.0.0.1")
+
+    def abort_session_response(self, session_id):
+        self.requests.append(("abort", session_id))
+        if self.abort_error is not None:
+            raise self.abort_error
+        if self.abort_payload is not None:
+            return _Response(self.abort_payload)
+        return _Response({"sessionID": session_id, "accepted": self.abort_accepted})
+
+
 class _DeadlineClient:
     def __init__(self):
         self.timeout = 3
@@ -56,6 +79,31 @@ class _DeadlineClient:
     def reply_session_response(self, session_id, *, timeout=None, deadline=None):
         self.requests.append(("reply", session_id, None, timeout, deadline is not None))
         return _Response({"id": "msg_assistant_deadline", "status": "completed", "text": "ok"})
+
+
+class _LegacyTimeoutClient:
+    def __init__(self, timeout_stage):
+        self.timeout = 3
+        self.timeout_stage = timeout_stage
+        self.requests = []
+
+    def run_session_response(self, session_id, message, *, timeout=None, deadline=None):
+        from opencode_session.api_transport import OpenCodeApiTimeoutError
+
+        self.requests.append(("run", session_id))
+        if self.timeout_stage == "run":
+            raise OpenCodeApiTimeoutError("OpenCode server timed out at http://127.0.0.1")
+        return _Response({"id": "msg_user_legacy", "status": "submitted"})
+
+    def reply_session_response(self, session_id, *, timeout=None, deadline=None):
+        from opencode_session.api_transport import OpenCodeApiTimeoutError
+
+        self.requests.append(("reply", session_id))
+        raise OpenCodeApiTimeoutError("OpenCode server timed out at http://127.0.0.1")
+
+    def abort_session_response(self, session_id):
+        self.requests.append(("abort", session_id))
+        return _Response({"sessionID": session_id, "accepted": True})
 
 
 class _UnknownSessionMessageClient:
@@ -188,6 +236,110 @@ class BlockingExecutionServiceTest(unittest.TestCase):
         self.assertEqual(client.requests, [("message", 120, 3)])
         self.assertEqual(client.timeout, 3)
 
+    def test_modern_execution_uses_caller_supplied_message_id(self):
+        from opencode_session.blocking_execution import execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _BlockingExecutionClient()
+
+        result = execute_blocking_prompt(
+            client,
+            "ses_service",
+            "Finish the worker task",
+            capabilities,
+            message_id="msg_preassigned",
+        )
+
+        self.assertEqual(client.requests[0][3], "msg_preassigned")
+        self.assertEqual(result["message_ids"]["user"], "msg_preassigned")
+
+    def test_modern_timeout_aborts_and_preserves_message_id(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient()
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(
+                client,
+                "ses_service",
+                "Finish the worker task",
+                capabilities,
+                message_id="msg_preassigned",
+            )
+
+        self.assertEqual(raised.exception.prompt_id, "msg_preassigned")
+        self.assertIsNone(raised.exception.abort_error)
+        self.assertEqual(client.requests[0][0:5], ("message", "ses_service", "Finish the worker task", "msg_preassigned", 120))
+        self.assertEqual(client.requests[1], ("abort", "ses_service"))
+
+    def test_modern_timeout_surfaces_abort_failure_without_masking_timeout(self):
+        from opencode_session.api_transport import OpenCodeApiError
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_error=OpenCodeApiError("abort unavailable"))
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("OpenCode server timed out", str(raised.exception))
+        self.assertIn("session abort failed: abort unavailable", str(raised.exception))
+        self.assertEqual(raised.exception.abort_error, "abort unavailable")
+        self.assertEqual([request[0] for request in client.requests], ["message", "abort"])
+
+    def test_modern_timeout_treats_boolean_false_abort_as_not_accepted(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_payload=False)
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("session abort failed: abort was not accepted", str(raised.exception))
+        self.assertIn("not accepted", raised.exception.abort_error)
+
+    def test_modern_timeout_treats_failed_abort_status_as_not_accepted(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_payload={"status": "failed"})
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("session abort failed: abort was not accepted (failed)", str(raised.exception))
+
+    def test_modern_timeout_treats_ambiguous_abort_payload_as_unconfirmed(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_payload={})
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("session abort failed: abort response did not confirm acceptance", str(raised.exception))
+
+    def test_modern_timeout_treats_null_abort_acceptance_as_unconfirmed(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+        from opencode_session.capabilities import capabilities_from_openapi_doc
+
+        capabilities = capabilities_from_openapi_doc({"paths": {"/session/{sessionID}/message": {"post": {}}}})
+        client = _ModernTimeoutClient(abort_payload={"accepted": None})
+
+        with self.assertRaises(BlockingExecutionTimeout) as raised:
+            execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+        self.assertIn("session abort failed: abort response did not confirm acceptance", str(raised.exception))
+
     def test_passes_deadline_to_legacy_run_and_reply_requests(self):
         from opencode_session.blocking_execution import execute_blocking_prompt
         from opencode_session.timeout_boundary import TimeoutDeadline
@@ -200,6 +352,24 @@ class BlockingExecutionServiceTest(unittest.TestCase):
         self.assertEqual([request[0] for request in client.requests], ["run", "reply"])
         self.assertTrue(all(request[4] for request in client.requests))
         self.assertTrue(all(0 < request[3] <= 5 for request in client.requests))
+
+    def test_legacy_timeout_aborts_and_preserves_known_prompt_id(self):
+        from opencode_session.blocking_execution import BlockingExecutionTimeout, execute_blocking_prompt
+
+        capabilities = {"route_availability": {}, "legacy_fallback_available": True}
+        expectations = {
+            "run": (["run", "abort"], None),
+            "reply": (["run", "reply", "abort"], "msg_user_legacy"),
+        }
+        for timeout_stage, (expected_requests, expected_prompt_id) in expectations.items():
+            with self.subTest(timeout_stage=timeout_stage):
+                client = _LegacyTimeoutClient(timeout_stage)
+
+                with self.assertRaises(BlockingExecutionTimeout) as raised:
+                    execute_blocking_prompt(client, "ses_service", "Finish the worker task", capabilities)
+
+                self.assertEqual([request[0] for request in client.requests], expected_requests)
+                self.assertEqual(raised.exception.prompt_id, expected_prompt_id)
 
     def test_reports_route_plan_paths_for_legacy_execution(self):
         from opencode_session.blocking_execution import execute_blocking_prompt

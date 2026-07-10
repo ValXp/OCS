@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from opencode_session.schema_event_codecs import API_EVENT_ROUTE
+from opencode_session.project_routes import detect_project_route_availability
 from opencode_session.schema_message_codecs import LEGACY_REPLY_PATH, LEGACY_RUN_PATH, SESSION_MESSAGE_PATH
 
 
@@ -41,6 +42,7 @@ def detect_openapi_profile(doc, *, health=None):
         "legacy_run": _route(LEGACY_RUN_PATH, "POST", legacy_run_available),
         "legacy_reply": _route(LEGACY_REPLY_PATH, "POST", legacy_reply_available),
     }
+    route_availability.update(detect_project_route_availability(paths))
 
     return OpenApiProfileDetection(
         health=_health_status(health),

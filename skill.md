@@ -13,7 +13,8 @@ Use this skill to run repository work through `bin/ocs` instead of native subage
 bin/ocs capabilities --server http://127.0.0.1:80 --json
 bin/ocs run --store /tmp/opencode/RUN_STORE init RUN_NAME --directory "$PWD" --server http://127.0.0.1:80
 bin/ocs create /tmp/opencode/WORKTREE --server http://127.0.0.1:80 --json
-bin/ocs run --store /tmp/opencode/RUN_STORE worker RUN_NAME worker-id --role build --session SESSION_ID --prompt "Do the scoped task"
+touch /tmp/opencode/WORKER.log
+bin/ocs run --store /tmp/opencode/RUN_STORE worker RUN_NAME worker-id --role build --session SESSION_ID --prompt "Do the scoped task" --owned-worktree /tmp/opencode/WORKTREE --owned-log /tmp/opencode/WORKER.log
 bin/ocs run --store /tmp/opencode/RUN_STORE start RUN_NAME --worker worker-id --session SESSION_ID --prompt "Do the scoped task"
 ```
 
@@ -32,7 +33,7 @@ Always set the server explicitly. The tested local server was `http://127.0.0.1:
 9. Inspect worker worktrees after each run; OCS may time out even when the server later edits files.
 10. Integrate accepted worker diffs into the main worktree manually or through a dedicated OCS validation worker.
 11. Run focused verification, then broader tests when feasible.
-12. Clean up every session, worktree, branch, run store, temp log, and OpenCode project/workspace record created for the run.
+12. Dry-run `run cleanup --all`, inspect its exact resource and server plan, then apply it and verify any reported residuals.
 
 ## Dependency Records
 
@@ -49,27 +50,24 @@ Mark blockers honestly. If OCS itself blocks the workflow, record a worker block
 
 ## Known OCS Pitfalls
 
-- `create --json` may return `{"data": {...}}` while `list --json` returns top-level session objects. Extract IDs defensively until the JSON contract is fixed.
-- `run start` can time out client-side while the server-side OpenCode turn keeps running. Inspect the worker worktree and abort orphan sessions if needed.
-- Timed-out workers may have empty `prompt_ids`, making server-side work hard to correlate with the run record.
-- `run --cleanup` only covers sessions created by that start. It does not clean pre-created sessions, git worktrees, branches, run stores, logs, or OpenCode project metadata.
-- Deleted worktrees can remain visible in the OpenCode UI through project `sandboxes` or project-copy metadata after sessions are gone.
+- A legacy `/run` request can time out before the server returns its message ID. OCS attempts to abort the session, but that worker's `prompt_ids` may remain empty.
+- `run start --cleanup` only covers sessions created by that start. Use the separate `run cleanup` command for registered run-owned resources.
+- `project-copy cleanup` is dry-run by default. Always review its exact project-scoped plan before adding `--apply`.
+- Some OpenCode versions cannot remove residual legacy project `sandboxes` through a supported API. Treat OCS's partial/unsupported result as real; never edit the OpenCode database directly.
 
-Track these as repository issues when they affect a run. Current issue examples: #41 for `create --json` shape, #42 for orphaned timeout execution, #43-#46 for project/workspace and cleanup feature gaps.
+Track unresolved gaps as repository issues when they affect a run.
 
 ## Cleanup Checklist
 
-For every OCS-created worker, clean up in this order:
+Register every owned worktree, existing log path, and project-copy prefix on the worker record before execution. Then:
 
-1. Abort active or suspicious sessions: `bin/ocs abort SESSION_ID --server URL`.
-2. Delete sessions and verify unreadable: `bin/ocs delete SESSION_ID --server URL --json`.
-3. Remove disposable git worktrees: `git worktree remove --force PATH`.
-4. Delete disposable branches: `git branch -D BRANCH`.
-5. Remove run stores and temp logs created under `/tmp/opencode`.
-6. Refresh OpenCode project-copy metadata if the server exposes it: `POST /experimental/project/{projectID}/copy/refresh`.
-7. Verify `bin/ocs list --directory PATH --server URL --json` returns `[]` for each worker directory.
-8. Verify `git worktree list --porcelain` no longer contains the worker paths.
-9. Verify OpenCode project/workspace APIs no longer contain stale worker paths when those APIs are available.
+1. Run `bin/ocs run --store "$STORE" cleanup "$RUN" --all --server "$SERVER" --dry-run --json`.
+2. Review the exact sessions, identities, project metadata, logs, run-store flag, server URL, and preflight blockers.
+3. Resolve active workers, dirty worktrees, or unmerged branches; use `--force` only when their removal is intentional.
+4. Apply the reviewed plan by replacing `--dry-run` with `--apply`.
+5. Stop on a partial result. Never bypass an identity mismatch or edit the OpenCode database directly.
+6. Verify `bin/ocs list --directory PATH --server "$SERVER" --json` returns `[]` for every worker directory.
+7. Verify `git worktree list --porcelain` and the project/directory/workspace inventory no longer contain worker paths.
 
 Do not delete unrelated sessions, worktrees, branches, or project metadata. Match on the exact run-specific prefix or recorded session IDs.
 

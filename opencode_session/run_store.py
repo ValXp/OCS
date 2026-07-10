@@ -53,16 +53,60 @@ class RunStore:
     def load_run(self, name):
         return self._read_run_unlocked(name)
 
-    def update_run(self, name, mutator):
+    def update_run(self, name, mutator, *, allow_cleanup_in_progress=False):
         with self._locked_run(name):
             persisted_run = self._read_run_data_unlocked(name)
             run = _normalize_for_store(persisted_run, fallback_name=name)
+            cleanup = run.get("resource_cleanup")
+            if (
+                not allow_cleanup_in_progress
+                and isinstance(cleanup, dict)
+                and cleanup.get("status") == "in_progress"
+            ):
+                raise RunStoreError(
+                    f"run '{name}' has cleanup in progress; mutation is temporarily fenced",
+                    kind="conflict",
+                )
             replacement = mutator(run)
             if replacement is not None:
                 run = replacement
             run = _normalize_for_store(run, fallback_name=name)
             self._write_run_unlocked(run, persisted_run=persisted_run)
         return run
+
+    def delete_run(self, name, *, expected_run=None):
+        with self._locked_run(name):
+            path = self._run_path(name)
+            if expected_run is not None:
+                current = _normalize_for_store(self._read_run_data_unlocked(name), fallback_name=name)
+                if current != expected_run:
+                    raise RunStoreError(
+                        "run record changed before deletion; refusing to delete the updated record",
+                        kind="conflict",
+                    )
+            try:
+                path.unlink()
+            except FileNotFoundError as error:
+                raise RunStoreError(f"run '{name}' not found in {self.root}", kind="missing") from error
+            except OSError as error:
+                raise RunStoreError(f"cannot delete run '{name}' from {self.root}: {error}") from error
+
+    @contextmanager
+    def cleanup_lease(self, name):
+        self.root.mkdir(parents=True, exist_ok=True)
+        lease_path = self._run_path(name).with_suffix(".cleanup.lock")
+        with lease_path.open("a", encoding="utf-8") as lease_file:
+            try:
+                fcntl.flock(lease_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RunStoreError(
+                    f"run '{name}' already has a cleanup process",
+                    kind="conflict",
+                ) from error
+            try:
+                yield
+            finally:
+                fcntl.flock(lease_file.fileno(), fcntl.LOCK_UN)
 
     def _read_run_unlocked(self, name):
         return _normalize_for_store(self._read_run_data_unlocked(name), fallback_name=name)

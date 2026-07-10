@@ -74,7 +74,7 @@ class SessionCommandService:
             response = self.client.create_session_response(resolved_directory, agent=agent, model=model)
         except OpenCodeApiError as error:
             raise SessionCommandError(str(error)) from error
-        return SessionCreateResult(session=response.data, raw_body=response.body)
+        return SessionCreateResult(session=session_record(response.data), raw_body=response.body)
 
     def list(self, *, directory=None, agent=None, model=None, include_blockers=False):
         self._ensure_routes()

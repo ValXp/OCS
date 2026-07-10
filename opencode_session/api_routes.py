@@ -12,11 +12,26 @@ class OpenCodeRoutePlanner:
         self.route_plan = self.server_profile.route_plan
         return self
 
-    def path(self, name, *, session_id=None, request_id=None, allow_default=False):
+    def path(
+        self,
+        name,
+        *,
+        session_id=None,
+        request_id=None,
+        project_id=None,
+        workspace_id=None,
+        allow_default=False,
+    ):
         route_plan = DEFAULT_ROUTE_PLAN if allow_default and self.route_plan is None else self.require_route_plan()
         path = route_plan.get(name) or DEFAULT_ROUTE_PLAN[name]
-        if session_id is not None or request_id is not None:
-            path = render_route_path(path, session_id=session_id, request_id=request_id)
+        if any(value is not None for value in (session_id, request_id, project_id, workspace_id)):
+            path = render_route_path(
+                path,
+                session_id=session_id,
+                request_id=request_id,
+                project_id=project_id,
+                workspace_id=workspace_id,
+            )
         return path.lstrip("/")
 
     def require_route_plan(self):

@@ -29,6 +29,7 @@ class OcsUxContractTest(unittest.TestCase):
         self.assertIn("usage: ocs", result.stdout)
         self.assertIn("run_blocking", result.stdout)
         self.assertIn("steer", result.stdout)
+        self.assertIn("diagnostics", result.stdout)
         self.assertNotIn("opencode-session", result.stdout)
         self.assertNotIn("queue", result.stdout)
 

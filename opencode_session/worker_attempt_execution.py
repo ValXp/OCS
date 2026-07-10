@@ -1,7 +1,11 @@
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
-from opencode_session.blocking_execution import execute_blocking_prompt
+from opencode_session.blocking_execution import (
+    blocking_execution_strategy,
+    execute_blocking_prompt,
+    new_session_message_id,
+)
 from opencode_session.timeout_boundary import TimeoutDeadline, TimeoutExpired
 from opencode_session.worker_attempt_policy import (
     WorkerExecutionTimeout,
@@ -17,6 +21,7 @@ class WorkerPromptExecution:
     prompt: str
     capabilities: dict
     deadline: Optional[TimeoutDeadline] = None
+    prompt_id: Optional[str] = None
 
 
 class WorkerPromptExecutor(Protocol):
@@ -27,15 +32,25 @@ class CallableWorkerPromptExecutor:
     def __init__(self, executor=execute_blocking_prompt):
         self.executor = executor
 
+    def prepare_prompt_id(self, capabilities):
+        if self.executor is not execute_blocking_prompt:
+            return None
+        if blocking_execution_strategy(capabilities) != "session_message":
+            return None
+        return new_session_message_id()
+
     def execute_prompt(self, execution):
-        if execution.deadline is None:
-            return self.executor(execution.client, execution.session_id, execution.prompt, execution.capabilities)
+        kwargs = {}
+        if execution.deadline is not None:
+            kwargs["deadline"] = execution.deadline
+        if execution.prompt_id is not None:
+            kwargs["message_id"] = execution.prompt_id
         return self.executor(
             execution.client,
             execution.session_id,
             execution.prompt,
             execution.capabilities,
-            deadline=execution.deadline,
+            **kwargs,
         )
 
 
@@ -47,7 +62,14 @@ def coerce_worker_prompt_executor(executor=None):
     return CallableWorkerPromptExecutor(executor)
 
 
-def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor):
+def prepare_worker_prompt_id(executor, capabilities):
+    prepare_prompt_id = getattr(executor, "prepare_prompt_id", None)
+    if not callable(prepare_prompt_id):
+        return None
+    return prepare_prompt_id(capabilities)
+
+
+def execute_single_worker_attempt(client, worker, prompt, capabilities, *, executor, prompt_id=None):
     attempt_executor = coerce_worker_prompt_executor(executor)
     attempt_session_id = worker.session_id
     try:
@@ -60,6 +82,7 @@ def execute_single_worker_attempt(client, worker, prompt, capabilities, *, execu
                     prompt,
                     capabilities,
                     deadline=deadline,
+                    prompt_id=prompt_id,
                 )
             ),
         )
@@ -67,6 +90,8 @@ def execute_single_worker_attempt(client, worker, prompt, capabilities, *, execu
         attempt = classify_worker_attempt_exception(worker, error)
         if attempt is None:
             raise
+        if attempt.prompt_id is None:
+            attempt.prompt_id = prompt_id
         return attempt
     return classify_worker_attempt_result(result)
 
