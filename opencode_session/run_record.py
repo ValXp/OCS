@@ -1,6 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 
+from opencode_session.run_resource_schema import normalize_run_resources
 from opencode_session.status import short_status
 from opencode_session.worker_storage_adapter import (
     hydrate_worker_record,
@@ -201,6 +202,10 @@ def _normalize_run_fields(run, *, fallback_name):
     normalized.setdefault("timeout_seconds", None)
     normalized.setdefault("blockers", [])
     normalized.setdefault("output_refs", [])
+    if "resources" in normalized:
+        normalized["resources"] = normalize_run_resources(normalized.get("resources"))
+    if "resource_cleanup" in normalized and not isinstance(normalized.get("resource_cleanup"), dict):
+        normalized["resource_cleanup"] = {}
     normalized.setdefault("created_at", None)
     normalized.setdefault("updated_at", None)
     return normalized

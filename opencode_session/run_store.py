@@ -64,6 +64,14 @@ class RunStore:
             self._write_run_unlocked(run, persisted_run=persisted_run)
         return run
 
+    def delete_run(self, name):
+        with self._locked_run(name):
+            path = self._run_path(name)
+            try:
+                path.unlink()
+            except FileNotFoundError as error:
+                raise RunStoreError(f"run '{name}' not found in {self.root}", kind="missing") from error
+
     def _read_run_unlocked(self, name):
         return _normalize_for_store(self._read_run_data_unlocked(name), fallback_name=name)
 

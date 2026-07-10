@@ -16,6 +16,8 @@ class PersistedRunRecord(TypedDict, total=False):
     blockers: List[str]
     output_refs: List[str]
     workers: Dict[str, WorkerSnapshotRecord]
+    resources: Dict[str, JsonValue]
+    resource_cleanup: Dict[str, JsonValue]
     created_at: JsonValue
     updated_at: JsonValue
 
@@ -32,6 +34,8 @@ class HydratedRunRecord(TypedDict, total=False):
     blockers: List[str]
     output_refs: List[str]
     workers: Dict[str, HydratedWorker]
+    resources: Dict[str, JsonValue]
+    resource_cleanup: Dict[str, JsonValue]
     created_at: JsonValue
     updated_at: JsonValue
 

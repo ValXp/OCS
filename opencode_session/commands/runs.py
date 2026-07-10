@@ -2,6 +2,12 @@ from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.blocking_execution import format_blocking_execution_compact as _format_run_compact
 from opencode_session.cli_policy import server_default
 from opencode_session.commands.rendering import CommandResult, render_command_result
+from opencode_session.commands.run_cleanup import (
+    add_run_cleanup_parser,
+    add_run_resource_registration_arguments,
+    cleanup_run_command,
+    register_resources_from_args,
+)
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.prompt_admission import (
     PromptAdmissionFailure,
@@ -119,6 +125,7 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     )
     run_worker_parser.add_argument("--blocker", dest="blockers", action="append", help="blocker reference")
     run_worker_parser.add_argument("--output-ref", dest="output_refs", action="append", help="output reference")
+    add_run_resource_registration_arguments(run_worker_parser)
 
     run_steer_parser = run_subparsers.add_parser("steer")
     run_steer_parser.add_argument("name", help="local run name")
@@ -132,6 +139,7 @@ def _add_run_store_arguments(parser, *, add_server_argument, positive_float):
     run_abort_parser.add_argument("name", help="local run name")
     run_abort_parser.add_argument("worker_id", help="worker record ID")
     run_abort_parser.add_argument("--json", action="store_true", help="print run-scoped abort JSON")
+    add_run_cleanup_parser(run_subparsers)
 
 
 def _start_orchestration_run(args, service, *, print_error, **_context):
@@ -186,7 +194,7 @@ def _upsert_run_worker(args, service, **_context):
         blockers=args.blockers,
         output_refs=args.output_refs,
     )
-    return _render_run_result(args, run)
+    return _render_run_result(args, register_resources_from_args(args, service, run))
 
 
 def _render_run_result(args, run, *, exit_code=0):
@@ -281,4 +289,5 @@ _RUN_HANDLERS = {
     "worker": _upsert_run_worker,
     "steer": _steer_run_worker,
     "abort": _abort_run_worker,
+    "cleanup": cleanup_run_command,
 }
