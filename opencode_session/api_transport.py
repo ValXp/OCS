@@ -18,6 +18,10 @@ class OpenCodeApiError(Exception):
         self.data = data
 
 
+class OpenCodeApiTimeoutError(OpenCodeApiError):
+    """A transport timeout that was not governed by an explicit deadline."""
+
+
 class OpenCodeApiResponse:
     def __init__(self, data, body):
         self.data = data
@@ -146,13 +150,19 @@ def _raise_http_error(error, method, path):
 
 def _raise_transport_error(error, *, base_url, deadline=None, stream=False):
     if isinstance(error, URLError):
-        if deadline is not None and _url_error_is_timeout(error):
-            raise TimeoutExpired() from error
+        if _url_error_is_timeout(error):
+            if deadline is not None:
+                raise TimeoutExpired() from error
+            _raise_api_timeout(base_url, stream=stream, cause=error)
         raise OpenCodeApiError(f"cannot reach OpenCode server at {base_url.rstrip('/')}: {error.reason}") from error
     if deadline is not None:
         raise TimeoutExpired() from error
+    _raise_api_timeout(base_url, stream=stream, cause=error)
+
+
+def _raise_api_timeout(base_url, *, stream, cause):
     target = "event stream" if stream else "server"
-    raise OpenCodeApiError(f"OpenCode {target} timed out at {base_url.rstrip('/')}") from error
+    raise OpenCodeApiTimeoutError(f"OpenCode {target} timed out at {base_url.rstrip('/')}") from cause
 
 
 def _url_error_is_timeout(error):

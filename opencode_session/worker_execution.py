@@ -6,6 +6,7 @@ from opencode_session.schema_run import RunRecord
 from opencode_session.worker_attempt_execution import (
     coerce_worker_prompt_executor,
     execute_single_worker_attempt,
+    prepare_worker_prompt_id,
 )
 from opencode_session.worker_attempt_policy import (
     COMPLETED,
@@ -144,11 +145,14 @@ class WorkerExecutionExecutor:
 
         active_transition = mark_worker_active(persistence.worker, now=self.now)
         persistence.apply_worker_transition(active_transition)
+        prompt_id = prepare_worker_prompt_id(self.executor, capabilities)
         attempt_record = new_worker_attempt_record(
             persistence.worker,
             started_at=self.now(),
             created_session_ids=created_session_ids_for_attempt,
         )
+        if prompt_id is not None:
+            attempt_record["user_message_id"] = prompt_id
         persistence.apply_worker_transition(
             WorkerTransition.attempt_started(persistence.worker.worker_id, attempt_record),
         )
@@ -158,6 +162,7 @@ class WorkerExecutionExecutor:
             prompt,
             capabilities,
             executor=self.executor,
+            prompt_id=prompt_id,
         )
         transition = apply_worker_attempt_transition(
             persistence.worker,

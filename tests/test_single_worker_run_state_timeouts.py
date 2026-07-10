@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 
+from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiTimeoutError
+from opencode_session.capabilities import capabilities_from_openapi_doc
 from opencode_session.multi_worker_orchestration import DependencyOrderedSerialRunOrchestrationService
 from opencode_session.run_store import RunStore
 from opencode_session.timeout_boundary import TimeoutExpired
@@ -14,6 +16,70 @@ except ModuleNotFoundError:
 
 
 class SingleWorkerRunStateTimeoutTest(unittest.TestCase):
+    def test_modern_timeout_persists_prompt_id_before_send_and_surfaces_abort_failure(self):
+        with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
+            store = RunStore(store_root)
+            store.create_run("demo", directory=directory, server_url="http://opencode.example")
+            store.upsert_worker("demo", "worker", role="worker")
+            test_case = self
+
+            class InspectingTimeoutClient(FakeClient):
+                def message_session_response(
+                    self,
+                    session_id,
+                    prompt,
+                    *,
+                    message_id=None,
+                    timeout=None,
+                    deadline=None,
+                ):
+                    persisted_worker = store.load_run("demo")["workers"]["worker"]
+                    attempts = worker_field(persisted_worker, "attempts")
+                    test_case.assertEqual(worker_field(persisted_worker, "prompt_ids"), [message_id])
+                    test_case.assertEqual(attempts[-1]["user_message_id"], message_id)
+                    test_case.assertEqual(attempts[-1]["status"], "active")
+                    self.requests.append(("message", session_id, message_id))
+                    raise OpenCodeApiTimeoutError("OpenCode server timed out at http://opencode.example")
+
+                def abort_session_response(self, session_id):
+                    self.requests.append(("abort", session_id))
+                    raise OpenCodeApiError("abort unavailable")
+
+            client = InspectingTimeoutClient(session_ids=["ses_initial"])
+            capabilities = capabilities_from_openapi_doc(
+                {"paths": {"/session/{sessionID}/message": {"post": {}}}}
+            )
+            service = DependencyOrderedSerialRunOrchestrationService(
+                store,
+                client_factory=lambda url: client,
+                capability_detector=lambda client: capabilities,
+                now=lambda: "2026-07-03T00:00:00Z",
+            )
+
+            outcome = start_single_worker_run(
+                store,
+                service,
+                name="demo",
+                worker_id="worker",
+                role="worker",
+                prompt="Finish the worker task",
+            )
+            run = store.load_run("demo")
+
+        self.assertEqual(outcome.exit_code, 124)
+        self.assertIn("OpenCode server timed out", outcome.error)
+        self.assertIn("session abort failed: abort unavailable", outcome.error)
+        self.assertEqual([request[0] for request in client.requests], ["create", "message", "abort"])
+        timeout_worker = run["workers"]["worker"]
+        self.assertEqual(worker_output_field(timeout_worker, "status"), "timeout")
+        self.assertEqual(worker_field(timeout_worker, "failure_category"), "timeout")
+        self.assertIn("session abort failed: abort unavailable", worker_field(timeout_worker, "failure_reason"))
+        prompt_ids = worker_field(timeout_worker, "prompt_ids")
+        self.assertEqual(len(prompt_ids), 1)
+        attempts = worker_field(timeout_worker, "attempts")
+        self.assertEqual(attempts[-1]["user_message_id"], prompt_ids[0])
+        self.assertEqual(attempts[-1]["status"], "failed")
+
     def test_start_times_out_worker_and_persists_timeout_metadata(self):
         with tempfile.TemporaryDirectory() as store_root, tempfile.TemporaryDirectory() as directory:
             store = RunStore(store_root)

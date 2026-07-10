@@ -1,6 +1,11 @@
 from opencode_session.api_domain import OpenCodeDomainClient, with_session_payload as _with_session_payload
 from opencode_session.api_routes import DEFAULT_ROUTE_PLAN, OpenCodeRoutePlanner, session_prompt_path as _session_prompt_path
-from opencode_session.api_transport import OpenCodeApiError, OpenCodeApiResponse, OpenCodeApiTransport
+from opencode_session.api_transport import (
+    OpenCodeApiError,
+    OpenCodeApiResponse,
+    OpenCodeApiTimeoutError,
+    OpenCodeApiTransport,
+)
 
 
 class OpenCodeApiClient(OpenCodeDomainClient):

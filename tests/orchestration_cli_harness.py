@@ -138,6 +138,7 @@ def configure_retry_server(
             "/api/session": {"get": {}, "post": {}},
             "/session/{sessionID}/run": {"post": {}},
             "/session/{sessionID}/reply": {"post": {}},
+            "/session/{sessionID}/abort": {"post": {}},
         },
     )
     queued_session_ids = deque(session_ids)
@@ -151,6 +152,11 @@ def configure_retry_server(
     for session_id, session_reply_payloads in _retry_payloads_by_session(reply_payloads, session_ids).items():
         _register_json_sequence(server, "POST", f"/session/{session_id}/reply", session_reply_payloads)
     for session_id in session_ids:
+        server.json(
+            "POST",
+            f"/session/{session_id}/abort",
+            {"sessionID": session_id, "accepted": True, "status": "aborted"},
+        )
         server.json("DELETE", f"/api/session/{session_id}", {"id": session_id, "deleted": True})
         server.json("GET", f"/api/session/{session_id}", {"error": "not found"}, status=404)
     return server

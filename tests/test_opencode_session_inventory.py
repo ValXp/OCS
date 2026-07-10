@@ -14,9 +14,10 @@ CLI = REPO_ROOT / "bin" / "ocs"
 
 
 class InventoryOpenCodeServer:
-    def __init__(self, *, sessions=None, raw_session_bodies=None):
+    def __init__(self, *, sessions=None, raw_session_bodies=None, wrap_create_response=False):
         self.sessions = sessions or []
         self.raw_session_bodies = raw_session_bodies or {}
+        self.wrap_create_response = wrap_create_response
         self.requests = []
         self.server = None
         self.thread = None
@@ -33,19 +34,18 @@ class InventoryOpenCodeServer:
                 payload = json.loads(body or "{}")
                 parent.requests.append(("POST", self.path, payload))
                 if self.path == "/api/session":
-                    self._write_json(
-                        {
-                            "id": "ses_new",
-                            "title": "New session",
-                            "directory": _payload_directory(payload),
-                            "agent": payload["agent"],
-                            "model": payload["model"],
-                            "cost": 0,
-                            "tokens": {"input": 0, "output": 0, "total": 0},
-                            "createdAt": "2026-07-02T00:00:00Z",
-                            "updatedAt": "2026-07-02T00:00:01Z",
-                        }
-                    )
+                    session = {
+                        "id": "ses_new",
+                        "title": "New session",
+                        "directory": _payload_directory(payload),
+                        "agent": payload["agent"],
+                        "model": payload["model"],
+                        "cost": 0,
+                        "tokens": {"input": 0, "output": 0, "total": 0},
+                        "createdAt": "2026-07-02T00:00:00Z",
+                        "updatedAt": "2026-07-02T00:00:01Z",
+                    }
+                    self._write_json({"data": session} if parent.wrap_create_response else session)
                     return
                 self.send_error(404)
 
@@ -167,6 +167,29 @@ class SessionInventoryCliTest(unittest.TestCase):
                 )
             ],
         )
+
+    def test_create_json_unwraps_wrapped_session(self):
+        with tempfile.TemporaryDirectory() as directory, InventoryOpenCodeServer(
+            wrap_create_response=True
+        ) as server:
+            result = self.run_cli(
+                "create",
+                directory,
+                "--agent",
+                "build",
+                "--model",
+                "openai/gpt-5.5",
+                "--json",
+                "--server",
+                server.url,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["id"], "ses_new")
+        self.assertEqual(payload["schema_status"], "known")
+        self.assertNotIn("data", payload)
 
     def test_list_filters_sessions_and_prints_compact_lines(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other_directory:

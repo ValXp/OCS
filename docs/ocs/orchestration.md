@@ -66,6 +66,8 @@ bin/ocs run worker demo builder --role build --timeout-seconds 600 --timeout-pol
 
 Timeout policy can map a timed-out worker to `timeout`, `blocked`, `failed`, or `aborted`. A blocked timeout adds the `timeout` blocker and exposes `next_eligible_action=resolve_blocker`.
 
+For modern blocking `/session/{sessionID}/message` execution, OCS persists the generated prompt ID before sending the request. If modern or legacy blocking execution times out, OCS makes a best-effort session abort and keeps timeout as the primary worker outcome. Abort failures are included in the worker failure reason so possible orphaned work remains visible.
+
 ## Control And Collection
 
 ```bash

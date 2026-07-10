@@ -1,9 +1,12 @@
-import uuid
-
 from opencode_session.api_transport import OpenCodeApiError
 from opencode_session.api_profile import (
     OpenCodeServerProfile,
     server_profile_from_capabilities,
+)
+from opencode_session.blocking_timeout import (
+    BlockingExecutionTimeout,
+    execute_with_timeout_abort,
+    new_session_message_id,
 )
 from opencode_session.formatting import compact_value as _compact_value
 from opencode_session.schema_helpers import tokens_total
@@ -44,11 +47,12 @@ def execute_blocking_prompt(
     *,
     timeout=DEFAULT_BLOCKING_EXECUTION_TIMEOUT_SECONDS,
     deadline=None,
+    message_id=None,
 ):
     profile = server_profile_from_capabilities(capabilities)
     strategy = profile.blocking_execution_strategy(capabilities)
     if strategy == "session_message":
-        return _execute_session_message_prompt(client, session_id, prompt, capabilities, profile, timeout, deadline)
+        return _execute_session_message_prompt(client, session_id, prompt, capabilities, profile, timeout, deadline, message_id)
     if strategy == "legacy_run_reply":
         return _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, profile, timeout, deadline)
     raise OpenCodeApiError(unsupported_blocking_execution_message())
@@ -142,12 +146,19 @@ def provider_failure(message, *, route=None):
     return normalize_message_result(message, route=route).provider_failure
 
 
-def _execute_session_message_prompt(client, session_id, prompt, capabilities, profile, timeout, deadline):
-    message_id = f"msg_{uuid.uuid4().hex}"
+def _execute_session_message_prompt(
+    client, session_id, prompt, capabilities, profile, timeout, deadline, message_id
+):
+    message_id = message_id or new_session_message_id()
     kwargs = {"message_id": message_id, "timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         kwargs["deadline"] = deadline
-    response = client.message_session_response(session_id, prompt, **kwargs)
+    response = execute_with_timeout_abort(
+        client,
+        session_id,
+        message_id,
+        lambda: client.message_session_response(session_id, prompt, **kwargs),
+    )
     route = profile.message_route("blocking_message")
     assistant_result = _known_message_result(
         response.data,
@@ -166,7 +177,12 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, p
     run_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         run_kwargs["deadline"] = deadline
-    run_response = client.run_session_response(session_id, prompt, **run_kwargs)
+    run_response = execute_with_timeout_abort(
+        client,
+        session_id,
+        None,
+        lambda: client.run_session_response(session_id, prompt, **run_kwargs),
+    )
     route = profile.message_route("legacy_run")
     run_result = _known_message_result(
         run_response.data,
@@ -180,7 +196,12 @@ def _execute_legacy_run_reply_prompt(client, session_id, prompt, capabilities, p
     reply_kwargs = {"timeout": _request_timeout(client, timeout, deadline)}
     if deadline is not None:
         reply_kwargs["deadline"] = deadline
-    reply_response = client.reply_session_response(session_id, **reply_kwargs)
+    reply_response = execute_with_timeout_abort(
+        client,
+        session_id,
+        run_result.record.get("id"),
+        lambda: client.reply_session_response(session_id, **reply_kwargs),
+    )
     reply_result = _known_message_result(
         reply_response.data,
         route=route,

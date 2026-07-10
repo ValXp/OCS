@@ -1037,12 +1037,13 @@ def _reduce_active_transition(latest_worker, transition, payload, target_state):
         worker._set_canonical_field("prompt_ids", [])
     return worker
 
-
 def _reduce_attempt_started_transition(latest_worker, transition, payload, target_state):
     worker = _transition_worker_copy(latest_worker)
     worker.append_attempt(payload.attempt)
+    prompt_id = payload.attempt.get("user_message_id") if isinstance(payload.attempt, dict) else None
+    if isinstance(prompt_id, str) and prompt_id:
+        worker.remember_prompt_id(prompt_id)
     return worker
-
 
 def _reduce_failed_transition(latest_worker, transition, payload, target_state):
     worker = _transition_worker_copy(latest_worker)
@@ -1062,7 +1063,6 @@ def _reduce_failed_transition(latest_worker, transition, payload, target_state):
         worker._set_canonical_field("failure_retryable", False)
     _merge_worker_prompt_ids(worker, latest_worker, payload.prompt_ids)
     return worker
-
 
 def _reduce_dependency_blocked_transition(latest_worker, transition, payload, target_state):
     worker = _transition_worker_copy(latest_worker)

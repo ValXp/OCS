@@ -49,14 +49,12 @@ Mark blockers honestly. If OCS itself blocks the workflow, record a worker block
 
 ## Known OCS Pitfalls
 
-- `create --json` may return `{"data": {...}}` while `list --json` returns top-level session objects. Extract IDs defensively until the JSON contract is fixed.
-- `run start` can time out client-side while the server-side OpenCode turn keeps running. Inspect the worker worktree and abort orphan sessions if needed.
-- Timed-out workers may have empty `prompt_ids`, making server-side work hard to correlate with the run record.
+- A legacy `/run` request can time out before the server returns its message ID. OCS attempts to abort the session, but that worker's `prompt_ids` may remain empty.
 - `run --cleanup` only covers sessions created by that start. It does not clean pre-created sessions, git worktrees, branches, run stores, logs, or OpenCode project metadata.
 - `project-copy cleanup` is dry-run by default. Always review its exact project-scoped plan before adding `--apply`.
 - Some OpenCode versions cannot remove residual legacy project `sandboxes` through a supported API. Treat OCS's partial/unsupported result as real; never edit the OpenCode database directly.
 
-Track unresolved gaps as repository issues when they affect a run. Current issue examples include #41 for `create --json` shape and #42 for orphaned timeout execution.
+Track unresolved gaps as repository issues when they affect a run.
 
 ## Cleanup Checklist
 
