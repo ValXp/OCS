@@ -126,6 +126,27 @@ class CapabilityProbeCliTest(unittest.TestCase):
                     "method": "POST",
                     "available": True,
                 },
+                "project_collection": {"path": "/project", "method": "GET", "available": False},
+                "project_directories": {
+                    "path": "/project/{projectID}/directories",
+                    "method": "GET",
+                    "available": False,
+                },
+                "workspace_collection": {
+                    "path": "/experimental/workspace",
+                    "method": "GET",
+                    "available": False,
+                },
+                "workspace_item": {
+                    "path": "/experimental/workspace/{workspaceID}",
+                    "method": "DELETE",
+                    "available": False,
+                },
+                "project_copy_refresh": {
+                    "path": "/experimental/project/{projectID}/copy/refresh",
+                    "method": "POST",
+                    "available": False,
+                },
             },
         )
         self.assertEqual(
@@ -173,6 +194,29 @@ class CapabilityProbeCliTest(unittest.TestCase):
         self.assertEqual(detection.route_availability["events"], {"path": "/global/event", "method": "GET", "available": True})
         self.assertTrue(detection.route_availability["legacy_run"]["available"])
         self.assertTrue(detection.route_availability["legacy_reply"]["available"])
+
+    def test_openapi_profile_detection_includes_project_and_workspace_routes(self):
+        detection = detect_openapi_profile(
+            {
+                "paths": {
+                    "/project": {"get": {}},
+                    "/project/:projectID/directories": {"get": {}},
+                    "/experimental/workspace": {"get": {}},
+                    "/experimental/workspace/{id}": {"delete": {}},
+                    "/experimental/project/{id}/copy/refresh": {"post": {}},
+                }
+            }
+        )
+
+        for route_name in (
+            "project_collection",
+            "project_directories",
+            "workspace_collection",
+            "workspace_item",
+            "project_copy_refresh",
+        ):
+            with self.subTest(route=route_name):
+                self.assertTrue(detection.route_availability[route_name]["available"])
 
     def test_server_profile_selects_api_routes_and_adapters(self):
         profile = OpenCodeServerProfile.from_openapi_doc(

@@ -178,11 +178,28 @@ class OpenCodeDomainClient:
     def reject_question_response(self, request_id):
         return self.post_response(self._route_path("question_reject", request_id=request_id), {})
 
-    def _route_path(self, name, *, session_id=None, request_id=None):
+    def list_projects_response(self):
+        return self.get_response(self._route_path("project_collection"))
+
+    def list_project_directories_response(self, project_id):
+        return self.get_response(self._route_path("project_directories", project_id=project_id))
+
+    def list_workspaces_response(self):
+        return self.get_response(self._route_path("workspace_collection"))
+
+    def delete_workspace_response(self, workspace_id):
+        return self.delete_response(self._route_path("workspace_item", workspace_id=workspace_id))
+
+    def refresh_project_copies_response(self, project_id):
+        return self.post_response(self._route_path("project_copy_refresh", project_id=project_id), {})
+
+    def _route_path(self, name, *, session_id=None, request_id=None, project_id=None, workspace_id=None):
         return self._routes.path(
             name,
             session_id=session_id,
             request_id=request_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
             allow_default=name in DEFAULT_PROFILE_ENDPOINTS,
         )
 

@@ -9,6 +9,7 @@ from opencode_session.api_profile_detection import (
     WAIT_PATHS,
     detect_openapi_profile,
 )
+from opencode_session.project_routes import PROJECT_ROUTE_PLAN, render_project_route_path
 from opencode_session.schema_admission_adapter import ADMISSION_ADAPTER
 from opencode_session.schema_event_adapter import event_adapter_for_route
 from opencode_session.schema_message_adapter import (
@@ -34,6 +35,7 @@ PUBLIC_ROUTE_PLAN_KEYS = (
 )
 
 DEFAULT_ROUTE_PLAN = {
+    **PROJECT_ROUTE_PLAN,
     "session_collection": "/api/session",
     "session_item": "/api/session/{sessionID}",
     "v2_prompt": "/api/session/{sessionID}/prompt",
@@ -214,13 +216,13 @@ def route_plan_from_availability(route_availability, *, include_domain=False):
     return route_plan
 
 
-def render_route_path(path, *, session_id=None, request_id=None):
+def render_route_path(path, *, session_id=None, request_id=None, project_id=None, workspace_id=None):
     rendered = str(path)
     if session_id is not None:
         rendered = _replace_placeholders(rendered, session_id, "{sessionID}", ":sessionID", "{id}", ":id")
     if request_id is not None:
         rendered = _replace_placeholders(rendered, request_id, "{requestID}", ":requestID", "{id}", ":id")
-    return rendered
+    return render_project_route_path(rendered, project_id=project_id, workspace_id=workspace_id)
 
 
 def _replace_placeholders(path, value, *placeholders):

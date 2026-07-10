@@ -53,9 +53,10 @@ Mark blockers honestly. If OCS itself blocks the workflow, record a worker block
 - `run start` can time out client-side while the server-side OpenCode turn keeps running. Inspect the worker worktree and abort orphan sessions if needed.
 - Timed-out workers may have empty `prompt_ids`, making server-side work hard to correlate with the run record.
 - `run --cleanup` only covers sessions created by that start. It does not clean pre-created sessions, git worktrees, branches, run stores, logs, or OpenCode project metadata.
-- Deleted worktrees can remain visible in the OpenCode UI through project `sandboxes` or project-copy metadata after sessions are gone.
+- `project-copy cleanup` is dry-run by default. Always review its exact project-scoped plan before adding `--apply`.
+- Some OpenCode versions cannot remove residual legacy project `sandboxes` through a supported API. Treat OCS's partial/unsupported result as real; never edit the OpenCode database directly.
 
-Track these as repository issues when they affect a run. Current issue examples: #41 for `create --json` shape, #42 for orphaned timeout execution, #43-#46 for project/workspace and cleanup feature gaps.
+Track unresolved gaps as repository issues when they affect a run. Current issue examples include #41 for `create --json` shape and #42 for orphaned timeout execution.
 
 ## Cleanup Checklist
 
@@ -66,10 +67,11 @@ For every OCS-created worker, clean up in this order:
 3. Remove disposable git worktrees: `git worktree remove --force PATH`.
 4. Delete disposable branches: `git branch -D BRANCH`.
 5. Remove run stores and temp logs created under `/tmp/opencode`.
-6. Refresh OpenCode project-copy metadata if the server exposes it: `POST /experimental/project/{projectID}/copy/refresh`.
-7. Verify `bin/ocs list --directory PATH --server URL --json` returns `[]` for each worker directory.
-8. Verify `git worktree list --porcelain` no longer contains the worker paths.
-9. Verify OpenCode project/workspace APIs no longer contain stale worker paths when those APIs are available.
+6. Dry-run metadata cleanup: `bin/ocs project-copy cleanup PROJECT_ID --directory-prefix RUN_PREFIX --server URL --json`.
+7. Review the exact plan, then apply it with the same command plus `--apply`; stop on a partial/unsupported result.
+8. Verify `bin/ocs list --directory PATH --server URL --json` returns `[]` for each worker directory.
+9. Verify `git worktree list --porcelain` no longer contains the worker paths.
+10. Verify `bin/ocs project inspect PROJECT_ID --server URL --json`, `project directories`, and `workspace list` no longer contain worker paths.
 
 Do not delete unrelated sessions, worktrees, branches, or project metadata. Match on the exact run-specific prefix or recorded session IDs.
 

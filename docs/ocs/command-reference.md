@@ -81,6 +81,22 @@ Stored prompted workers are intentionally serial: `run start` plans one ready wo
 - `question answer REQUEST_ID --answers-json JSON`: submit nested answer arrays for multi-select questions.
 - `question reject REQUEST_ID`: reject a question request.
 
+## Project And Workspace Metadata
+
+- `project list [--directory PATH] [--json|--raw]`: list projects, optionally filtering by a worktree or sandbox directory.
+- `project inspect PROJECT_ID [--json|--raw]`: inspect one project from the project inventory.
+- `project directories PROJECT_ID [--directory PATH] [--json|--raw]`: list known root and project-copy directories.
+- `workspace list [--project-id ID] [--directory PATH] [--json|--raw]`: list experimental workspaces.
+
+These commands discover their routes through `/doc`. If the server does not expose a requested project or
+experimental workspace route, OCS exits with `70` and names the unsupported method and path.
+
+`project-copy cleanup PROJECT_ID --directory-prefix PATH [--apply] [--json]` inventories missing directories
+and workspaces owned by one project. It is a dry run unless `--apply` is present. Apply mode refreshes project-copy
+metadata, removes only matching workspace IDs, and then verifies the project, project-directory, and workspace
+inventories. OCS never edits the OpenCode database. Some server versions expose no supported operation for stale
+legacy `project.sandboxes`; OCS reports those residual paths as a partial cleanup and exits with `70`.
+
 ## Validation Commands
 
 - `smoke [--directory PATH] [--prefix PREFIX] [--event-timeout SECONDS] [--event-limit N] [--json]`: run deterministic no-live-model validation.
