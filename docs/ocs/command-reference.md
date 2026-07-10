@@ -22,6 +22,19 @@ bin/ocs capabilities --json
 
 The compact output reports health, version, session route, v2 prompt route, v2 wait route, event route, blocking execution route, and legacy run/reply support.
 
+## Read-Only Diagnostics
+
+`diagnostics` inspects routes outside OCS's first-class command surface without exposing a generic mutation tool.
+
+```bash
+bin/ocs diagnostics routes --filter workspace
+bin/ocs diagnostics routes --json
+bin/ocs diagnostics get /project --json
+bin/ocs diagnostics get /project --raw
+```
+
+`diagnostics routes` prints stable, sorted OpenAPI paths and methods. `diagnostics get` accepts only same-server absolute paths advertised as GET-capable by the server's OpenAPI document. It rejects URLs, fragments, unadvertised paths, and mutating methods.
+
 ## Session Commands
 
 - `create DIRECTORY [--agent NAME] [--model NAME]`: create a session for a target directory.

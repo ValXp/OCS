@@ -27,6 +27,7 @@ health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/pro
 ## Features
 
 - Capability detection with compact and JSON output.
+- Read-only OpenAPI route discovery and guarded GET diagnostics.
 - Session lifecycle commands: `create`, `list`, `inspect`/`get`, `delete`, `abort`, `fork`, and `children`.
 - Durable input admission with `steer`, including queue delivery through `--delivery queue`.
 - Blocking prompt execution with `run_blocking`, using `/session/{sessionID}/message` or legacy run/reply fallback.
@@ -38,6 +39,7 @@ health=ok version=1.2.3 session=/api/session prompt=/api/session/{sessionID}/pro
 ## Command Map
 
 - `capabilities`: probe OpenCode health, route support, event support, and execution support.
+- `diagnostics routes|get`: inspect advertised routes and selected read-only API responses.
 - `create`, `list`, `inspect`, `get`, `delete`, `abort`, `fork`, `children`: manage OpenCode sessions.
 - `steer`: admit durable steer or queue input without waiting for an assistant reply.
 - `run_blocking`: execute a prompt and wait for a terminal assistant result.
